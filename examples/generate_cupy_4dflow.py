@@ -23,7 +23,7 @@ if __name__ == '__main__':
   preview = False
 
   # Import imaging parameters
-  parameters = ParameterHandler('Parameters/aorta_volume.yaml')
+  parameters = ParameterHandler('parameters/aorta_volume.yaml')
 
   # Imaging orientation paramters
   theta_x = np.deg2rad(parameters.theta_x)
