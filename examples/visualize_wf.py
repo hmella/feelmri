@@ -16,7 +16,7 @@ from FEelMRI.Parameters import ParameterHandler
 if __name__ == '__main__':
 
  # Import imaging parameters
-  parameters = ParameterHandler('Parameters/PARAMETERS_wf.yaml')
+  parameters = ParameterHandler('parameters/PARAMETERS_wf.yaml')
 
   # Imaging orientation paramters
   theta_x = parameters.theta_x

@@ -18,7 +18,7 @@ if __name__ == '__main__':
   preview = True
 
   # Import imaging parameters
-  parameters = ParameterHandler('Parameters/PARAMETERS_wf.yaml')
+  parameters = ParameterHandler('parameters/PARAMETERS_wf.yaml')
 
   # Imaging orientation paramters
   theta_x = np.deg2rad(parameters.theta_x)
