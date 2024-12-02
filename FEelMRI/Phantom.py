@@ -1,9 +1,11 @@
+import warnings
+
 import meshio
 import numpy as np
 
+from FEelMRI.FiniteElements import MassAssemble
 from FEelMRI.MPIUtilities import MPI_rank
-from FEelMRI.FiniteElements import massAssemble
-import warnings
+
 
 class FEMPhantom:
   def __init__(self, path='', scale_factor=1.0, displacement_label='displacement', velocity_label='velocity', acceleration_label='acceleration', pressure_label='pressure'):
@@ -61,39 +63,38 @@ class FEMPhantom:
     d, self.point_data, self.cell_data = self.reader.read_data(fr)
 
     # Displacement
-    try:
+    if self.displacement_label in self.point_data:
       self.point_data[self.displacement_label] *= self.scale_factor
-    except KeyError:
-      if MPI_rank == 0:
-        warnings.warn(f"Displacement label '{self.displacement_label}' not found in point data.")
 
     # Velocity
-    try:
+    if self.velocity_label in self.point_data:
       self.point_data[self.velocity_label] *= self.scale_factor
-    except KeyError:
-      if MPI_rank == 0:
-        warnings.warn(f"Velocity label '{self.velocity_label}' not found in point data.")
 
     # Acceleration
-    try:
+    if self.acceleration_label in self.point_data:
       self.point_data[self.acceleration_label] *= self.scale_factor**2
-    except KeyError:
-      if MPI_rank == 0:
-        warnings.warn(f"Acceleration label '{self.acceleration_label}' not found in point data.")
 
     # Pressure
-    try:
+    if self.pressure_label in self.point_data:
       self.point_data[self.pressure_label] *= 1.0
-    except KeyError:
-      if MPI_rank == 0:
-        warnings.warn(f"Pressure label '{self.pressure_label}' not found in point data.")
 
   def translate(self, MPS_ori, LOC):
     ''' Translate phantom to obtain the desired slice location '''
     translated_nodes = (self.mesh['nodes'] - LOC) @ MPS_ori
     return translated_nodes
 
-  def mass_matrix(self):
+  def mass_matrix(self, lumped=False):
     ''' Assemble mass matrix for integrals '''
-    M = massAssemble(self.mesh['elems'], self.mesh['nodes'])
+    M = MassAssemble(self.mesh['elems'], self.mesh['nodes'])
+
+    if lumped:
+      try:
+        from scipy.sparse import lil_matrix
+        diag = M.sum(axis=1)
+        M = lil_matrix(M.shape, dtype=M.dtype)
+        M.setdiag(diag)
+      except ImportError:
+        if MPI_rank == 0:
+          warnings.warn('Lumped mass matrix not available. Please install scipy.')
+
     return M
