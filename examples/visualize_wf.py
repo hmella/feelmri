@@ -61,7 +61,7 @@ if __name__ == '__main__':
     # data['traj'].res[2] += 1
 
   # Add noise
-  K = itok(add_cpx_noise(ktoi(K, [0,1,2]), relative_std=0.01, mask=1), [0,1,2])
+  # K = itok(add_cpx_noise(ktoi(K, [0,1,2]), relative_std=0.01, mask=1), [0,1,2])
 
   # Kspace filtering (as the scanner would do)
   h_meas = Tukey_filter(K.shape[0], width=0.9, lift=0.3)

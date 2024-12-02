@@ -2,6 +2,7 @@ import os
 import pickle
 import time
 from pathlib import Path
+from scipy.sparse import csc_matrix
 
 import numpy as np
 
@@ -14,9 +15,6 @@ from FEelMRI.Parameters import ParameterHandler
 from FEelMRI.Phantom import FEMPhantom
 
 if __name__ == '__main__':
-
-  # Preview partial results
-  preview = False
 
   # Import imaging parameters
   parameters = ParameterHandler('parameters/aorta_slice.yaml')
@@ -42,11 +40,11 @@ if __name__ == '__main__':
   nodes = phantom.translate(MPS_ori, LOC)
 
   # Assemble mass matrix for integrals (just once)
-  M = phantom.mass_matrix()
+  M = phantom.mass_matrix(lumped=True)
 
   # Slice profile
   Gss = Gradient(Gr_max=parameters.G_max, Gr_sr=parameters.G_sr)
-  sp = SliceProfile(delta_z=parameters.FOV[2], flip_angle=np.deg2rad(10), NbLobes=[4,4], RFShape='apodized_sinc', ZPoints=100, dt=1e-5, plot=False, Gss=Gss, bandwidth='maximum', refocusing_area_frac=1)
+  sp = SliceProfile(delta_z=parameters.FOV[2], flip_angle=np.deg2rad(10), NbLobes=[4,4], RFShape='apodized_sinc', ZPoints=100, dt=1e-5, plot=False, Gss=Gss, bandwidth='maximum', refocusing_area_frac=1.5114285714285716)
   # sp.optimize(frac_start=1.38, frac_end=1.52, N=50, ZPoints=50)
   profile = sp.interp_profile(nodes[:,2])
   # profile = np.abs(nodes[:,2]) < parameters.FOV[2]/2
@@ -61,7 +59,8 @@ if __name__ == '__main__':
   delta_B0 = x[:,0]**2 + x[:,1]**2 #+ x[:,2]**2 # spatial distribution
   delta_B0 /= np.abs(delta_B0).max()  # normalization
   delta_B0 *= 2*np.pi * gammabar * (1.5 * 1e-6)
-  delta_phi_v = delta_B0 * bipolar.dur_
+  # delta_phi_v = delta_B0 * bipolar.dur_
+  # delta_phi_v *= 0.0
 
   # Path to export the generated data
   export_path = Path('MRImages/{:s}_V{:.0f}.pkl'.format(parameters.Sequence, 100.0*parameters.VENC))
@@ -102,13 +101,6 @@ if __name__ == '__main__':
 
     # Show elapsed time from terminal
     MPI_print('Elapsed time: {:.2f} s'.format(times[-1]))
-
-    # Save kspace for debugging purposes
-    if preview:
-      K_copy = gather_image(K)
-      if MPI_rank==0:
-        with open(str(export_path), 'wb') as f:
-          pickle.dump({'kspace': K_copy, 'MPS_ori': MPS_ori, 'LOC': LOC, 'traj': traj}, f)
 
     # Synchronize MPI processes
     MPI_print(np.array(times).mean())
