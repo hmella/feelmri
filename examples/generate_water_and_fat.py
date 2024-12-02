@@ -37,7 +37,7 @@ if __name__ == '__main__':
   nodes = phantom.translate(MPS_ori, LOC)
 
   # Assemble mass matrix for integrals (just once)
-  M = phantom.mass_matrix()
+  M = phantom.mass_matrix(lumped=True)
 
   # Slice profile
   Gss = Gradient(Gr_max=parameters.G_max, Gr_sr=parameters.G_sr)

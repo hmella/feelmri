@@ -15,7 +15,7 @@ Hardware:
   # G_max: 30.0    # in mT/m
   G_sr: 180.0    # in mT/m/s
   G_max: 33.0    # in mT/m
-  r_BW: 32.0e+3 # in Hz (equivalent to 450 Hz/pixel)
+  r_BW: 16.0e+3 # in Hz (equivalent to 450 Hz/pixel)
 
 # Imaging orientation (make sure about orthogonality)
 Formatting:

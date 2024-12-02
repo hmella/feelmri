@@ -16,7 +16,7 @@ from FEelMRI.Parameters import ParameterHandler
 if __name__ == '__main__':
 
  # Import imaging parameters
-  parameters = ParameterHandler('parameters/aorta_volume.yaml')
+  parameters = ParameterHandler('parameters/aorta_slice.yaml')
 
   # Imaging orientation paramters
   theta_x = parameters.theta_x
@@ -47,34 +47,30 @@ if __name__ == '__main__':
 
   # Zero padding in the dimensions with even measurements to avoid shifts in 
   # the image domain
-  if data['traj'].res[0] % 2 == 0:
-    pad_width = ((0, 1), (0, 0), (0, 0), (0, 0), (0, 0))
-    K = np.pad(K, pad_width, mode='constant')
-    # data['traj'].res[0] += 1
-  if data['traj'].res[1] % 2 == 0:
-    pad_width = ((0, 0), (0, 1), (0, 0), (0, 0), (0, 0))
-    K = np.pad(K, pad_width, mode='constant')
-    # data['traj'].res[1] += 1
-  if data['traj'].res[2] % 2 == 0:
-    pad_width = ((0, 0), (0, 0), (0, 1), (0, 0), (0, 0))
-    K = np.pad(K, pad_width, mode='constant')
-    # data['traj'].res[2] += 1
+  for i in range(len(data['traj'].res)):
+    if data['traj'].res[i] % 2 == 0:
+      pad_width = [(0, 0) for i in range(K.ndim)]
+      pad_width[i] = (0, 1)
+      K = np.pad(K, pad_width, mode='constant')
 
   # Add noise
-  K = itok(add_cpx_noise(ktoi(K, [0,1,2]), relative_std=0.01, mask=1), [0,1,2])
+  K = itok(add_cpx_noise(ktoi(K, [0,1,2]), relative_std=0.06, mask=1), [0,1,2])
 
   # Kspace filtering (as the scanner would do)
   h_meas = Tukey_filter(K.shape[0], width=0.9, lift=0.3)
   h_pha  = Tukey_filter(K.shape[1], width=0.9, lift=0.3)
   h = np.outer(h_meas, h_pha)
-  H = np.tile(h[:,:,np.newaxis, np.newaxis, np.newaxis], (1, 1, K.shape[2], K.shape[3], K.shape[4]))
+  tile_dims = list(K.shape)
+  tile_dims[0:2] = [1, 1]
+  H = np.tile(np.expand_dims(h, axis=[i for i in range(2, K.ndim)]), tile_dims)
   K_fil = H*K
 
   # Apply the inverse Fourier transform to obtain the image
-  I = ktoi(K_fil[::1,...], [0,1,2])
+  I = ktoi(K_fil, [0,1,2])
 
   # The final image can resized to achieve the desired resolution
-  resized_shape = np.hstack((data['traj'].oversampling_arr*data['traj'].res, I.shape[3:]))  
+  oversampling_arr = np.array([data['traj'].oversampling, 1, 1])
+  resized_shape = np.hstack((oversampling_arr*data['traj'].res, I.shape[3:]))  
   I = resize(np.real(I), resized_shape) + 1j*resize(np.imag(I), resized_shape)
 
   # Chop if needed
@@ -83,12 +79,12 @@ if __name__ == '__main__':
   if (enc_Nx == rec_Nx):
       I = I
   else:
-      ind1 = (enc_Nx - rec_Nx) // 2 #+ (data['traj'].res[0]-1 % 2 != 0)
-      ind2 = (enc_Nx - rec_Nx) // 2 + rec_Nx #+ (data['traj'].res[0]-1 % 2 != 0)
+      ind1 = (enc_Nx - rec_Nx) // 2
+      ind2 = (enc_Nx - rec_Nx) // 2 + rec_Nx
       print(ind1)
       print(ind2)
       I = I[ind1:ind2,...]
-  print('Image shape after correcting oversampling: ',I.shape)
+  print('Image shape after correcting oversampling: ', I.shape)
 
   # Plot image using matplotlib plotter
   phi_x = np.angle(I[...,0,:] * np.conj(I[...,3,:]))

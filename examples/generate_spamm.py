@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 
-from FEelMRI.FiniteElements import massAssemble
+from FEelMRI.FiniteElements import MassAssemble
 from FEelMRI.Tagging import SPAMM
 from FEelMRI.KSpaceTraj import Cartesian, Gradient
 from FEelMRI.Math import Rx, Ry, Rz
@@ -115,7 +115,7 @@ if __name__ == '__main__':
     profile = sp.interp_profile(nodes[:,2] + displacement[:,2])
 
     # Assemble mass matrix for integrals (just once)
-    M = massAssemble(phantom.mesh['elems'], phantom.mesh['nodes'] + displacement) 
+    M = MassAssemble(phantom.mesh['elems'], phantom.mesh['nodes'] + displacement) 
 
     # Generate 4D flow image
     MPI_print('Generating frame {:d}'.format(fr))
