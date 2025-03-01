@@ -2,6 +2,7 @@
 #include <pybind11/eigen.h>
 #include <pybind11/stl.h>
 #include <Eigen/Dense>
+#include <Eigen/IterativeLinearSolvers>
 #include <Eigen/Sparse>
 
 // using namespace Eigen;
@@ -167,7 +168,135 @@ Eigen::SparseMatrix<float> MassAssemble(const Eigen::MatrixXi &elems,
 }
 
 
+// Assemble local stiffness matrix
+Eigen::MatrixXf LocalGradAssemble(
+  const Eigen::MatrixXf &nodes,
+  const Eigen::MatrixXf &qpoints,
+  const Eigen::VectorXf &qweights,
+  const int &dim){
+
+  // Assembled local matrix
+  Eigen::Matrix4f Ce = Eigen::Matrix4f::Zero();
+
+  // Assembling
+  for (int q = 0; q < qweights.size(); q++){ 
+
+    // Isoparametric mapping
+    const IsoMap isoMap = IsoMapping(nodes, qpoints.row(q));
+    const auto& [S, dSdx, dSdy, dSdz, detJ] = isoMap;
+    Eigen::Matrix<float, 4, 1> dSdi;
+    if (dim == 0){
+      dSdi = dSdx;
+    }
+    else if (dim == 1){
+      dSdi = dSdy;
+    }
+    else if (dim == 2){
+      dSdi = dSdz;
+    }
+
+    // Matrix assembling (should the determinant be adjusted?)
+    Ce += (dSdi*S.transpose())*detJ*qweights(q);
+  }
+
+  return Ce;
+}
+
+
+// Assemble mass matrix
+Eigen::MatrixXf GradProjection(
+  const Eigen::VectorXf &u,
+  const Eigen::MatrixXi &elems,
+  const Eigen::MatrixXf &nodes){
+
+  // Geometric dimension
+  const int dim = nodes.cols();
+
+  // Number of elements, nodes, and dofs
+  const int nb_elems    = elems.rows();
+  const int nb_nodes    = nodes.rows();
+  const int nb_nodes_e  = elems.row(0).size();
+  const int el_mat_size = nb_nodes_e*nb_nodes_e;
+
+  // Quadrature rule
+  const QuadRule quadRule = QuadratureRule();
+  const Eigen::MatrixXf qpoints  = std::get<0>(quadRule);
+  const Eigen::VectorXf qweights = std::get<1>(quadRule);
+
+  // Global and local mass matrices
+  Eigen::SparseMatrix<float> M(nb_nodes, nb_nodes);
+  Eigen::SparseMatrix<float> C(nb_nodes, nb_nodes);
+  Eigen::MatrixXf Me = Eigen::MatrixXf::Zero(nb_nodes_e, nb_nodes_e);
+  Eigen::MatrixXf Ce = Eigen::MatrixXf::Zero(nb_nodes_e, nb_nodes_e);
+
+  // Indices
+  std::vector<TripletType> M_coefficients;
+
+  // Element and nodes
+  Eigen::VectorXi elem(el_mat_size);
+  Eigen::MatrixXf elem_nodes(el_mat_size, 3);
+
+  // Assemble mass matrix
+  for (int e = 0; e < nb_elems; e++){
+  
+    // Nodes in the element
+    elem = elems(e, Eigen::indexing::all);
+    elem_nodes = nodes(elem, Eigen::indexing::all);
+
+    // Local mass assemble
+    Me = LocalMassAssemble(elem_nodes, qpoints, qweights);
+  
+    // Fill triplets
+    for (int i = 0; i < nb_nodes_e; i++){
+      for (int j = 0; j < nb_nodes_e; j++){
+        M_coefficients.push_back(TripletType(elem(i), elem(j), Me(i,j)));
+      }
+    }        
+  }
+  M.setFromTriplets(M_coefficients.begin(), M_coefficients.end());
+
+  // Solver
+  Eigen::VectorXf b = Eigen::VectorXf::Zero(nb_nodes);
+  Eigen::ConjugateGradient<Eigen::SparseMatrix<float>> solver;
+  solver.compute(M);
+  Eigen::MatrixXf w = Eigen::MatrixXf::Zero(nb_nodes, dim);
+
+  // Assemble LHS matrix
+  for (int d = 0; d < dim; d++){
+
+    // Indices
+    std::vector<TripletType> C_coefficients;
+
+    for (int e = 0; e < nb_elems; e++){
+  
+      // Nodes in the element
+      elem = elems(e, Eigen::indexing::all);
+      elem_nodes = nodes(elem, Eigen::indexing::all);
+
+      // Local assemble
+      Ce = LocalGradAssemble(elem_nodes, qpoints, qweights, d);
+
+      // Fill triplets
+      for (int i = 0; i < nb_nodes_e; i++){
+        for (int j = 0; j < nb_nodes_e; j++){
+          C_coefficients.push_back(TripletType(elem(i), elem(j), Ce(i,j)));
+        }
+      }        
+    }
+
+    // Sparse matrix filling
+    C.setFromTriplets(C_coefficients.begin(), C_coefficients.end());
+
+    // Solve
+    b = C*u;
+    w(Eigen::indexing::all, d) = solver.solve(b);
+  }
+
+  return w;
+}
+
 PYBIND11_MODULE(FiniteElements, m) {
     m.doc() = "Finite elements functions"; // optional module docstring
     m.def("MassAssemble", &MassAssemble, py::return_value_policy::reference);
+    m.def("GradProjection", &GradProjection, py::return_value_policy::reference);
 }

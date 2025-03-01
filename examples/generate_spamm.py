@@ -7,7 +7,7 @@ import numpy as np
 
 from FEelMRI.FiniteElements import MassAssemble
 from FEelMRI.Tagging import SPAMM
-from FEelMRI.KSpaceTraj import Cartesian, Gradient
+from FEelMRI.KSpaceTraj import CartesianStack, Gradient
 from FEelMRI.Math import Rx, Ry, Rz
 from FEelMRI.MPIUtilities import MPI_comm, MPI_print, MPI_rank, gather_image
 from FEelMRI.MRImaging import SliceProfile, PositionEncoding
@@ -79,7 +79,7 @@ if __name__ == '__main__':
   # Generate kspace trajectory
   print(sp.rf_dur2)
   dummy = Gradient(Gr_max=0, slope=0, lenc=0, t_ref=sp.rf_dur2)
-  traj = Cartesian(FOV=parameters.FOV, res=parameters.RES, oversampling=parameters.Oversampling, lines_per_shot=parameters.LinesPerShot, G_enc=dummy, MPS_ori=MPS_ori, LOC=LOC, receiver_bw=parameters.r_BW, Gr_max=parameters.G_max, Gr_sr=parameters.G_sr, plot_seq=True)
+  traj = CartesianStack(FOV=parameters.FOV, res=parameters.RES, oversampling=parameters.Oversampling, lines_per_shot=parameters.LinesPerShot, G_enc=dummy, MPS_ori=MPS_ori, LOC=LOC, receiver_bw=parameters.r_BW, Gr_max=parameters.G_max, Gr_sr=parameters.G_sr, plot_seq=True)
   traj.plot_trajectory()
 
   # Print echo time

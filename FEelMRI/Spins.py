@@ -46,7 +46,7 @@ class Spins:
           t = t_lv
           z = z_lv          
 
-        # Cartesian coordinates
+        # CartesianStack coordinates
         x = r*np.cos(t) + self.center[0]
         y = r*np.sin(t) + self.center[1]
         z = z + self.center[2]

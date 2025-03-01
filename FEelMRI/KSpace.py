@@ -1,7 +1,7 @@
 import matplotlib.pyplot as plt
 import numpy as np
 
-from FEelMRI.Filters import Hamming_filter, Riesz_filter, Tukey_filter
+from FEelMRI.Filters import Hamming_filter, Riesz, Tukey
 from FEelMRI.Helpers import build_idx, isodd, order
 from FEelMRI.IO import rescale_image, scale_data
 from FEelMRI.Math import itok, ktoi
@@ -44,14 +44,14 @@ class kspace:
 
         # Filter to reduce Gibbs ringing artifacts
         if self.filter == 'Tukey':
-            Hm = Tukey_filter(acq_matrix[dir[0]],width=self.filter_width,
+            Hm = Tukey(acq_matrix[dir[0]],width=self.filter_width,
                               lift=self.filter_lift)
-            Hp = Tukey_filter(acq_matrix[dir[1]],width=self.filter_width,
+            Hp = Tukey(acq_matrix[dir[1]],width=self.filter_width,
                               lift=self.filter_lift)
         if self.filter == 'Riesz':
-            Hm = Riesz_filter(acq_matrix[dir[0]],width=self.filter_width,
+            Hm = Riesz(acq_matrix[dir[0]],width=self.filter_width,
                               lift=self.filter_lift)
-            Hp = Riesz_filter(acq_matrix[dir[1]],width=self.filter_width,
+            Hp = Riesz(acq_matrix[dir[1]],width=self.filter_width,
                               lift=self.filter_lift)
         if self.filter is None:
             Hm = np.ones([acq_matrix[dir[0]],])

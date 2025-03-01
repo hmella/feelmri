@@ -8,12 +8,8 @@
 using namespace Eigen;
 namespace py = pybind11;
 
-// Datatypes
-typedef std::complex<float> cfloat;    // Complex float datatype
-
 // Definition of PI and complex unit
 const float PI = M_PI;
-const cfloat i1(0.0, 1.0);
 
 /**
  * @brief Computes the Fourier encoding for a given set of parameters.
@@ -32,7 +28,17 @@ const cfloat i1(0.0, 1.0);
  * @param k The index for the third dimension of the k-space tensors.
  * @return A complex array representing the Fourier encoded data.
  */
-ArrayXcf FourierEncoding(const MatrixXf &r, const Tensor<float, 3> kx, const Tensor<float, 3> ky, const Tensor<float, 3> kz, const VectorXf &phi_off, const uint i, const uint j, const uint k);
+template <typename T>
+Array<std::complex<T>, Dynamic, 1> FourierEncoding(
+  const Matrix<T, Dynamic, Dynamic> &r, 
+  const Tensor<T, 3> kx, 
+  const Tensor<T, 3> ky, 
+  const Tensor<T, 3> kz, 
+  const Vector<T, Dynamic> &phi_off, 
+  const uint i, 
+  const uint j, 
+  const uint k
+  );
 
 /**
  * @brief Computes the signal by applying a sparse matrix transformation, 
@@ -42,11 +48,25 @@ ArrayXcf FourierEncoding(const MatrixXf &r, const Tensor<float, 3> kx, const Ten
  * @param Mxy A complex matrix where each column represents a different state.
  * @param fourier A complex vector representing the Fourier coefficients.
  * @param decay A float reference representing the decay factor to be applied.
- * @return cfloat The computed signal as a complex float.
+ * @return std::complex<float> The computed signal as a complex float.
  */
-cfloat signal(const SparseMatrix<float> &M, const MatrixXcf &Mxy, const VectorXcf &fourier, const VectorXf &decay, const uint &enc_dir);
+template <typename T>
+std::complex<T> signal(
+  const SparseMatrix<T> &M, 
+  const Matrix<std::complex<T>, Dynamic, Dynamic> &Mxy, 
+  const Vector<std::complex<T>, Dynamic> &fourier, 
+  const Vector<T, Dynamic> &decay, 
+  const uint &enc_dir
+  );
 
-cfloat signal(const SparseMatrix<float> &M, const MatrixXcf &Mxy, const VectorXcf &fourier, const float &decay, const uint &enc_dir);
+template <typename T>
+std::complex<T> signal(
+  const SparseMatrix<T> &M, 
+  const Matrix<std::complex<T>, Dynamic, Dynamic> &Mxy, 
+  const Vector<std::complex<T>, Dynamic> &fourier, 
+  const T &decay, 
+  const uint &enc_dir
+  );
 
 /**
  * @brief Updates the position of an object based on its initial position, velocity, and time step.
@@ -54,9 +74,13 @@ cfloat signal(const SparseMatrix<float> &M, const MatrixXcf &Mxy, const VectorXc
  * @param r0 Initial position matrix.
  * @param v0 Initial velocity matrix.
  * @param dt Time step.
- * @return MatrixXf Updated position matrix.
+ * @return MatrixXt Updated position matrix.
  */
-MatrixXf UpdatePosition(const MatrixXf &r0, const MatrixXf &v0, const float &dt);
+template <typename T>
+Matrix<T, Dynamic, Dynamic> UpdatePosition(
+  const Matrix<T, Dynamic, Dynamic> &r0, 
+  const Matrix<T, Dynamic, Dynamic> &v0, 
+  const T &dt);
 
 /**
  * @brief Updates the position of an object based on its initial position, velocity, acceleration, and time step.
@@ -65,20 +89,25 @@ MatrixXf UpdatePosition(const MatrixXf &r0, const MatrixXf &v0, const float &dt)
  * initial acceleration (a0), and the time step (dt). The calculation is based on the kinematic equation:
  * r = r0 + v0 * dt + 0.5 * a0 * dt^2.
  *
- * @param r0 The initial position matrix (MatrixXf).
- * @param v0 The initial velocity matrix (MatrixXf).
- * @param a0 The initial acceleration matrix (MatrixXf).
+ * @param r0 The initial position matrix (MatrixXt).
+ * @param v0 The initial velocity matrix (MatrixXt).
+ * @param a0 The initial acceleration matrix (MatrixXt).
  * @param dt The time step (float).
- * @return MatrixXf The updated position matrix.
+ * @return MatrixXt The updated position matrix.
  */
-MatrixXf UpdatePosition(const MatrixXf &r0, const MatrixXf &v0, const MatrixXf &a0, const float &dt);
+template <typename T>
+Matrix<T, Dynamic, Dynamic> UpdatePosition(
+  const Matrix<T, Dynamic, Dynamic> &r0, 
+  const Matrix<T, Dynamic, Dynamic> &v0, 
+  const Matrix<T, Dynamic, Dynamic> &a0, 
+  const T &dt);
 
 
 // PYBIND11_MODULE(Signal, m) {
 //     m.doc() = "Utilities for MR image generation";
 //     m.def("FourierEncoding", &FourierEncoding);
-//     m.def("signal", py::overload_cast<const SparseMatrix<float> &, const MatrixXcf &, const VectorXcf &, const VectorXf &, const uint &>(&signal));
-//     m.def("signal", py::overload_cast<const SparseMatrix<float> &, const MatrixXcf &, const VectorXcf &, const float &, const uint &>(&signal));
-//     m.def("UpdatePosition", py::overload_cast<const MatrixXf &, const MatrixXf &, const float &>(&UpdatePosition));
-//     m.def("UpdatePosition", py::overload_cast<const MatrixXf &, const MatrixXf &, const MatrixXf &, const float &>(&UpdatePosition));
+//     m.def("signal", py::overload_cast<const SparseMatrix<float> &, const MatrixXcf &, const VectorXct &, const VectorXt &, const uint &>(&signal));
+//     m.def("signal", py::overload_cast<const SparseMatrix<float> &, const MatrixXcf &, const VectorXct &, const float &, const uint &>(&signal));
+//     m.def("UpdatePosition", py::overload_cast<const MatrixXt &, const MatrixXt &, const float &>(&UpdatePosition));
+//     m.def("UpdatePosition", py::overload_cast<const MatrixXt &, const MatrixXt &, const MatrixXt &, const float &>(&UpdatePosition));
 // }
