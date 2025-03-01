@@ -2,7 +2,7 @@
 #include <Tagging.h>
 
 
-Tensor<cfloat, 4> SPAMM(
+Tensor<std::complex<float>, 4> SPAMM(
   const int &MPI_rank,
   const SparseMatrix<float> &M,
   const std::vector<Tensor<float, 3>> &kloc,
@@ -29,6 +29,9 @@ Tensor<cfloat, 4> SPAMM(
     // Nb of encoded velocities
     const uint nb_enc = M_spamm.cols();
 
+    // Complex unit
+    const std::complex<float> i1(0.0, 1.0);
+
     // Get the equivalent gradient needed to go from the center of the kspace
     // to each location
     const Tensor<float, 3> kx = 2.0 * PI * kloc[0];
@@ -41,7 +44,7 @@ Tensor<cfloat, 4> SPAMM(
     VectorXf  phi_off(nb_spins);
 
     // kspace
-    Tensor<cfloat, 4> kspace(nb_meas, nb_lines, nb_kz, nb_enc);
+    Tensor<std::complex<float>, 4> kspace(nb_meas, nb_lines, nb_kz, nb_enc);
 
     // T2* decay
     const MatrixXf T2_decay = (-t / T2).array().exp();

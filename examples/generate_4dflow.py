@@ -2,22 +2,23 @@ import os
 import pickle
 import time
 from pathlib import Path
-from scipy.sparse import csc_matrix
+from pint import Quantity as Q_
 
 import numpy as np
 
-from FEelMRI.KSpaceTraj import Cartesian
+from FEelMRI.KSpaceTraj import CartesianStack
 from FEelMRI.Math import Rx, Ry, Rz
 from FEelMRI.MPIUtilities import MPI_print, MPI_rank, gather_image
 from FEelMRI.PhaseContrast import PC
-from FEelMRI.MRImaging import Gradient, SliceProfile, VelocityEncoding
+from FEelMRI.MRObjects import Gradient, RF, Scanner
+from FEelMRI.MRImaging import SliceProfile, VelocityEncoding
 from FEelMRI.Parameters import ParameterHandler
 from FEelMRI.Phantom import FEMPhantom
 
 if __name__ == '__main__':
 
   # Import imaging parameters
-  parameters = ParameterHandler('parameters/aorta_slice.yaml')
+  parameters = ParameterHandler('parameters/aorta_volume.yaml')
 
   # Imaging orientation paramters
   theta_x = np.deg2rad(parameters.theta_x)
@@ -42,23 +43,32 @@ if __name__ == '__main__':
   # Assemble mass matrix for integrals (just once)
   M = phantom.mass_matrix(lumped=True)
 
+  # Create scanner object
+  scanner = Scanner(gradient_strength=Q_(parameters.G_max,'mT/m'), gradient_slew_rate=Q_(parameters.G_sr,'mT/m/ms'))
+
   # Slice profile
-  Gss = Gradient(Gr_max=parameters.G_max, Gr_sr=parameters.G_sr)
-  sp = SliceProfile(delta_z=parameters.FOV[2], flip_angle=np.deg2rad(10), NbLobes=[4,4], RFShape='apodized_sinc', ZPoints=100, dt=1e-5, plot=False, Gss=Gss, bandwidth='maximum', refocusing_area_frac=1.5114285714285716)
-  # sp.optimize(frac_start=1.38, frac_end=1.52, N=50, ZPoints=50)
+  rf = RF(scanner=scanner, NbLobes=[4,4], alpha=0.46, shape='apodized_sinc', flip_angle=Q_(np.deg2rad(8),'rad') , t_ref=Q_(0.0,'ms'))
+  sp = SliceProfile(delta_z=Q_(parameters.FOV[2], 'm'), 
+    profile_samples=100,
+    rf=rf,
+    dt=Q_(1e-2, 'ms'), 
+    plot=True, 
+    bandwidth=Q_(15000, 'Hz'), # 'maximum', 
+    refocusing_area_frac=1.0242424242424242)
+  # sp.optimize(frac_start=1.0, frac_end=1.2, N=100, profile_samples=50)
   profile = sp.interp_profile(nodes[:,2])
-  # profile = np.abs(nodes[:,2]) < parameters.FOV[2]/2
 
   # Bipolar gradient
-  bipolar = Gradient(Gr_max=parameters.G_max, Gr_sr=parameters.G_sr, t_ref=sp.rf_dur2)
-  bipolar.make_bipolar(enc.VENC)
+  bipolar = Gradient(scanner=scanner, t_ref=rf.t_ref)
+  bipolar.make_bipolar(Q_(enc.VENC, 'm/s'))
 
   # Field inhomogeneity
   x = phantom.mesh['nodes']
   gammabar = 1.0e+6*42.58 # Hz/T
   delta_B0 = x[:,0]**2 + x[:,1]**2 #+ x[:,2]**2 # spatial distribution
   delta_B0 /= np.abs(delta_B0).max()  # normalization
-  delta_B0 *= 2*np.pi * gammabar * (1.5 * 1e-6)
+  delta_B0 *= 2*np.pi * gammabar * (1.5 * 1e-6) 
+  delta_B0 *= 0.0
   # delta_phi_v = delta_B0 * bipolar.dur_
   # delta_phi_v *= 0.0
 
@@ -69,11 +79,19 @@ if __name__ == '__main__':
   os.makedirs(str(export_path.parent), exist_ok=True)
 
   # Generate kspace trajectory
-  traj = Cartesian(FOV=parameters.FOV, res=parameters.RES, oversampling=parameters.Oversampling, lines_per_shot=parameters.LinesPerShot, G_enc=bipolar, MPS_ori=MPS_ori, LOC=LOC, receiver_bw=parameters.r_BW, Gr_max=parameters.G_max, Gr_sr=parameters.G_sr, plot_seq=False)
+  traj = CartesianStack(FOV=Q_(parameters.FOV,'m'), 
+    res=parameters.RES, 
+    oversampling=parameters.Oversampling, 
+    lines_per_shot=parameters.LinesPerShot, 
+    G_enc=bipolar, 
+    MPS_ori=MPS_ori, 
+    LOC=LOC, 
+    receiver_bw=Q_(parameters.r_BW,'Hz'), 
+    plot_seq=True)
   # traj.plot_trajectory()
 
   # Print echo time
-  MPI_print('Echo time = {:.2f} ms'.format(1000.0*traj.echo_time))
+  MPI_print('Echo time = {:.2f} ms'.format(traj.echo_time.m_as('ms')))
 
   # kspace array
   ro_samples = traj.ro_samples
@@ -96,7 +114,7 @@ if __name__ == '__main__':
     # Generate 4D flow image
     MPI_print('Generating frame {:d}'.format(fr))
     t0 = time.time()
-    K[traj.local_idx,:,:,:,fr] = PC(MPI_rank, M, traj.local_points, traj.local_times, nodes, velocity, enc.encode(velocity), delta_B0, T2star, profile)
+    K[traj.local_idx,:,:,:,fr] = PC(MPI_rank, M, traj.local_points, traj.local_times.m_as('s'), nodes, velocity, enc.encode(velocity), delta_B0, T2star, profile)
     times.append(time.time()-t0)
 
     # Show elapsed time from terminal

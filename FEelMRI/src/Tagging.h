@@ -5,7 +5,7 @@
 #include <pybind11/stl.h>
 #include <Eigen/Dense>
 
-Tensor<cfloat, 4> SPAMM(
+Tensor<std::complex<float>, 4> SPAMM(
   const int &MPI_rank,
   const SparseMatrix<float> &M,
   const std::vector<Tensor<float, 3>> &kloc,

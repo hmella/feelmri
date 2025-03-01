@@ -16,7 +16,7 @@ def PC(M, kxyz, t , r0, v, phi_v, phi_dB0, T2, profile):
   nb_spins = r0.shape[0]
 
   # Nb of encoded velocities
-  nb_velocities = phi_v.shape[1]
+  nb_vencs = phi_v.shape[1]
 
   # Get the equivalent gradient needed to go from the center of the kspace
   # to each location
@@ -33,10 +33,7 @@ def PC(M, kxyz, t , r0, v, phi_v, phi_dB0, T2, profile):
   phi_off = cp.zeros([nb_spins, 1], dtype=cp.float32)
 
   # kspace
-  kspace = cp.zeros([nb_meas, nb_lines, nb_kz, nb_velocities], dtype=cp.complex64)
-
-  # T2* decay
-  T2_decay = cp.exp(-t / T2)
+  kspace = cp.zeros([nb_meas, nb_lines, nb_kz, nb_vencs], dtype=cp.complex64)
 
   # Iterate over kspace measurements/kspace points
   for j in range(nb_lines):
@@ -47,19 +44,22 @@ def PC(M, kxyz, t , r0, v, phi_v, phi_dB0, T2, profile):
     # Iterate over slice kspace measurements
     for i in range(nb_meas):
 
-      # Update blood position at time t(i,j)
-      r[:,:] = r0 + v*t[i,j]
-
-      # Update off-resonance phase
-      phi_off[:,0] = phi_dB0*t[i,j]
-
       for k in range(nb_kz):
+
+        # Update blood position at time t(i,j,k)
+        r[:,:] = r0 + v*t[i,j,k]
+
+        # Update off-resonance phase
+        phi_off[:,0] = phi_dB0*t[i,j,k]
+
+        # T2* decay
+        T2_decay = cp.exp(-t[i,j,k] / T2)
 
         # Update Fourier exponential
         fourier[:,0] = cp.exp(-1j * (r[:,0] * kx[i,j,k] + r[:,1] * ky[i,j,k] + r[:,2] * kz[i,j,k] + phi_off[:,0]))
 
         # Calculate k-space values, add T2* decay, and assign value to output array
-        for l in range(nb_velocities):
-          kspace[i,j,k,l] = M.dot(Mxy[:,l]).dot(fourier[:,0]) * T2_decay[i,j]
+        for l in range(nb_vencs):
+          kspace[i,j,k,l] = M.dot(Mxy[:,l]).dot(fourier[:,0]) * T2_decay
 
   return kspace

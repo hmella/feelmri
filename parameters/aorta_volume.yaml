@@ -33,5 +33,5 @@ Formatting:
   LOC: [-0.063242, 0.017021, -0.055196]
 
 Phantom:
-  T2star: 254.0             # milliseconds
-  T1: 1000.0                # milliseconds 
+  T2star: 0.2540  # seconds
+  T1: 1.000       # seconds 

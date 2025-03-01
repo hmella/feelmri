@@ -3,7 +3,7 @@ Imaging:
   RES: [66, 44, 1]
   FOV: [0.132, 0.08, 0.008] # meters
   TimeSpacing: 0.031858     # seconds
-  Oversampling: 2
+  Oversampling: 1
   Sequence: "FFE"
   LinesPerShot: 1
 

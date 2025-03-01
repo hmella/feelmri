@@ -3,3 +3,5 @@ FEelMRI.*/
 tmp/
 MRImages/
 */__pycache__/
+meshes/xdmf/
+meshes/*.msh

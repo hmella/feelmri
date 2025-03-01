@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 
-from FEelMRI.KSpaceTraj import Cartesian
+from FEelMRI.KSpaceTraj import CartesianStack
 from FEelMRI.Math import Rx, Ry, Rz
 from FEelMRI.MPIUtilities import MPI_print, MPI_rank, gather_image
 from FEelMRI.MRIEncoding import WaterFat
@@ -61,7 +61,7 @@ if __name__ == '__main__':
 
   # Generate kspace trajectory
   dummy = Gradient(Gr_max=0, slope=0, lenc=0, t_ref=sp.rf_dur2)
-  traj = Cartesian(FOV=parameters.FOV, res=parameters.RES, oversampling=parameters.Oversampling, lines_per_shot=parameters.LinesPerShot, G_enc=dummy, MPS_ori=MPS_ori, LOC=LOC, receiver_bw=parameters.r_BW, Gr_max=parameters.G_max, Gr_sr=parameters.G_sr, plot_seq=False)
+  traj = CartesianStack(FOV=parameters.FOV, res=parameters.RES, oversampling=parameters.Oversampling, lines_per_shot=parameters.LinesPerShot, G_enc=dummy, MPS_ori=MPS_ori, LOC=LOC, receiver_bw=parameters.r_BW, Gr_max=parameters.G_max, Gr_sr=parameters.G_sr, plot_seq=False)
   traj.plot_trajectory()
 
   # Print echo time

@@ -8,13 +8,14 @@ from FEelMRI.MPIUtilities import MPI_rank
 
 
 class FEMPhantom:
-  def __init__(self, path='', scale_factor=1.0, displacement_label='displacement', velocity_label='velocity', acceleration_label='acceleration', pressure_label='pressure'):
+  def __init__(self, path='', scale_factor=1.0, displacement_label='displacement', velocity_label='velocity', acceleration_label='acceleration', pressure_label='pressure', dtype=np.float32):
     self.path = path
     self.scale_factor = scale_factor
     self.displacement_label = displacement_label
     self.velocity_label = velocity_label
     self.acceleration_label = acceleration_label
     self.pressure_label = pressure_label
+    self.dtype = dtype
     self.mesh, self.reader, self.Nfr = self._prepare_reader()
     self.bbox = self.bounding_box()
     self.point_data = None
@@ -48,6 +49,9 @@ class FEMPhantom:
       # Number of timesteps
       Nfr = 1
 
+    # Convert nodes to given dtype
+    nodes = nodes.astype(self.dtype)
+
     return {'nodes': nodes, 'elems': elems, 'all_elems': all_elems}, reader, Nfr
 
   def bounding_box(self):
@@ -61,6 +65,10 @@ class FEMPhantom:
   def read_data(self, fr):
     ''' Read data at frame fr '''
     d, self.point_data, self.cell_data = self.reader.read_data(fr)
+
+    # Convert point and cell data to given dtype
+    for key in self.point_data:
+      self.point_data[key] = self.point_data[key].astype(self.dtype)
 
     # Displacement
     if self.displacement_label in self.point_data:
@@ -80,6 +88,8 @@ class FEMPhantom:
 
   def translate(self, MPS_ori, LOC):
     ''' Translate phantom to obtain the desired slice location '''
+    MPS_ori = MPS_ori.astype(self.dtype)
+    LOC = LOC.astype(self.dtype)
     translated_nodes = (self.mesh['nodes'] - LOC) @ MPS_ori
     return translated_nodes
 

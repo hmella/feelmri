@@ -4,9 +4,9 @@ from pathlib import Path
 import numpy as np
 from skimage.transform import resize
 
-from FEelMRI.Filters import Tukey_filter
+from FEelMRI.Filters import Tukey
 from FEelMRI.IO import VTIFile, XDMFFile
-from FEelMRI.KSpaceTraj import Cartesian, Radial, Spiral
+from FEelMRI.KSpaceTraj import CartesianStack, Radial, Spiral
 from FEelMRI.Math import Rx, Ry, Rz, itok, ktoi
 from FEelMRI.Noise import add_cpx_noise
 from FEelMRI.Phantom import FEMPhantom
@@ -34,7 +34,7 @@ if __name__ == '__main__':
   K = data['kspace']
 
   # Fix the direction of kspace lines measured in the opposite direction
-  if isinstance(data['traj'], Cartesian) and data['traj'].lines_per_shot > 1:   
+  if isinstance(data['traj'], CartesianStack) and data['traj'].lines_per_shot > 1:   
     # Reorder lines depending of their readout direction
     for shot in data['traj'].shots:
       for idx, ph in enumerate(shot):
@@ -64,8 +64,8 @@ if __name__ == '__main__':
   # K = itok(add_cpx_noise(ktoi(K, [0,1,2]), relative_std=0.01, mask=1), [0,1,2])
 
   # Kspace filtering (as the scanner would do)
-  h_meas = Tukey_filter(K.shape[0], width=0.9, lift=0.3)
-  h_pha  = Tukey_filter(K.shape[1], width=0.9, lift=0.3)
+  h_meas = Tukey(K.shape[0], width=0.9, lift=0.3)
+  h_pha  = Tukey(K.shape[1], width=0.9, lift=0.3)
   h = np.outer(h_meas, h_pha)
   H = np.tile(h[:,:,np.newaxis, np.newaxis], (1, 1, K.shape[2], K.shape[3]))
   K_fil = H*K
