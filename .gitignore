@@ -2,3 +2,4 @@ build/
 FEelMRI.*/
 tmp/
 MRImages/
+*/__pycache__/
