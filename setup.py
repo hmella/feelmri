@@ -148,9 +148,9 @@ class BuildExt(build_ext):
         build_ext.build_extensions(self)
 
 setup(name='FEelMRI',
-      version='0.1',
+      version='1.0',
       packages=['FEelMRI'],
-      description='Python library for the generation of synthetic MR images',
+      description='Finite element MRI library. For the simulation of MR images from finite element simulations.',
       long_description=read('README.md'),
       ext_modules=ext_modules,
       install_requires=['pybind11>=2.11'],
