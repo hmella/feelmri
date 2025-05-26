@@ -1,6 +1,7 @@
 import matplotlib.pyplot as plt
 import numpy as np
 from mpl_toolkits.axes_grid1 import make_axes_locatable
+import os
 
 class MRIPlotter:
   """
@@ -80,6 +81,44 @@ class MRIPlotter:
         cols = np.ceil(np.sqrt(len(self.images))).astype(int)
         rows = np.ceil(len(self.images) / cols).astype(int)
         self.fig, self.ax = plt.subplots(rows, cols)
+
+  def export_images(self, output_dir):
+    """
+    Exports all frames and slices of the MRI images to PNG files.
+
+    Args:
+      output_dir (str): Directory to save the exported images.
+    """
+
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    extent = [0, self._FOV[1], 0, self._FOV[0]]
+    flat_ax = self.ax.flatten()
+
+    for i, im in enumerate(self._images):
+        num_slices = im.shape[2]
+        num_frames = im.shape[3]
+
+        for slice_idx in range(num_slices):
+            for frame_idx in range(num_frames):
+                vmin, vmax = (im.min(), im.max()) if self.caxis is None else (self.caxis[i][0], self.caxis[i][1]) if isinstance(self.caxis[0], list) else (self.caxis[0], self.caxis[1])
+
+                fig, ax = plt.subplots()
+                image = ax.imshow(im[..., slice_idx, frame_idx], cmap=self.cmap, vmin=vmin, vmax=vmax, extent=extent)
+                ax.invert_yaxis()
+                ax.set_title(f'{self.title[i]} - Slice {slice_idx}, Frame {frame_idx}')
+                ax.set_xticklabels([])
+                ax.set_yticklabels([])
+
+                divider = make_axes_locatable(ax)
+                colorbar_axes = divider.append_axes("right", size="10%", pad=0.1)
+                cbar = fig.colorbar(image, cax=colorbar_axes)
+                cbar.minorticks_on()
+
+                filename = os.path.join(output_dir, f'image_{i}_slice_{slice_idx}_frame_{frame_idx}.png')
+                plt.savefig(filename, bbox_inches='tight')
+                plt.close(fig)
 
   def show(self):
     """
