@@ -5,7 +5,7 @@ def PC(M, kxyz, t , r0, v, phi_v, phi_dB0, T2, profile):
 
   # Number of kspace lines/spokes/interleaves
   nb_lines = kxyz[0].shape[1] # kxy[0].cols()
-  
+
   # Number of measurements in the readout direction
   nb_meas = kxyz[0].shape[0] # kxy[0].rows()
 
@@ -13,7 +13,7 @@ def PC(M, kxyz, t , r0, v, phi_v, phi_dB0, T2, profile):
   nb_kz = kxyz[0].shape[2]
 
   # Number of spins
-  nb_spins = r0.shape[0]
+  nb_nodes = r0.shape[0]
 
   # Nb of encoded velocities
   nb_vencs = phi_v.shape[1]
@@ -25,12 +25,12 @@ def PC(M, kxyz, t , r0, v, phi_v, phi_dB0, T2, profile):
   kz = 2.0 * cp.pi * kxyz[2]
 
   # Copy blood position to estimate the current position using the approximation r(t0+dt) = r0 + v0*dt
-  r = cp.zeros([nb_spins, 3], dtype=cp.float32)
+  r = cp.zeros([nb_nodes, 3], dtype=cp.float32)
 
   # Kspace and Fourier exponential
-  Mxy = 1.0e+3 * nb_spins * cp.exp(1j * phi_v) * profile
-  fourier = cp.zeros([nb_spins, 1], dtype=cp.complex64)
-  phi_off = cp.zeros([nb_spins, 1], dtype=cp.float32)
+  Mxy = 1.0e+3 * nb_nodes * cp.exp(1j * phi_v) * profile
+  fourier = cp.zeros([nb_nodes, 1], dtype=cp.complex64)
+  phi_off = cp.zeros([nb_nodes, 1], dtype=cp.float32)
 
   # kspace
   kspace = cp.zeros([nb_meas, nb_lines, nb_kz, nb_vencs], dtype=cp.complex64)
@@ -60,6 +60,7 @@ def PC(M, kxyz, t , r0, v, phi_v, phi_dB0, T2, profile):
 
         # Calculate k-space values, add T2* decay, and assign value to output array
         for l in range(nb_vencs):
-          kspace[i,j,k,l] = M.dot(Mxy[:,l]).dot(fourier[:,0]) * T2_decay
+          # kspace[i,j,k,l] = M.dot(Mxy[:,l]).dot(fourier[:,0]) * T2_decay
+          kspace[i,j,k,l] = (M * (Mxy[:,l] * fourier[:,0]).reshape((-1, 1)) * T2_decay).sum()
 
   return kspace
