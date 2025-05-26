@@ -3,10 +3,16 @@ FROM ubuntu:22.04 as base
 ARG DEBIAN_FRONTEND=noninteractive
 MAINTAINER Hernan Mella <hernan.mella@pucv.cl>
 
-USER root
-
 # Create new user
-RUN useradd --create-home --shel /bin/bash FEelMRI
+ARG UID=1000
+ARG GID=1000
+RUN groupadd --gid ${GID} -r FEelMRI \
+  && useradd --uid ${UID} -g FEelMRI --no-log-init --shell /bin/bash FEelMRI
+RUN mkdir -p /home/FEelMRI
+WORKDIR /home/FEelMRI
+
+# Change to root user for installation
+USER root
 
 # Update Ubuntu Software repository
 # RUN apt -qq update && \
@@ -18,7 +24,7 @@ RUN apt-get update && apt-get install -y apt-transport-https && apt-get install 
 RUN apt-get install -y python3-tk python3-setuptools cmake git && \
     apt-get install -y libopenmpi-dev mpich screen nano && \
     apt-get install -y build-essential python3-dev python3-pip && \
-    pip3 install pybind11 pyyaml mpi4py h5py meshio scipy matplotlib scikit-image
+    pip3 install pybind11 pyyaml mpi4py h5py meshio scipy matplotlib scikit-image pint
 
 RUN cd /tmp/ && git clone https://github.com/eigenteam/eigen-git-mirror.git && \
     cd eigen-git-mirror && mkdir build && cd build/ && \
