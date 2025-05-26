@@ -5,3 +5,5 @@ MRImages/
 */__pycache__/
 meshes/xdmf/
 meshes/*.msh
+*.png
+*.mp4
