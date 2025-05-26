@@ -28,7 +28,7 @@ Tensor<std::complex<T>, 4> WaterFat(
     const uint nb_kz = kloc[0].dimension(2);
     
     // Nb of spins    
-    const uint nb_spins = r0.rows();
+    const uint nb_nodes = r0.rows();
 
     // Complex unit
     const std::complex<T> i1(0.0, 1.0);
@@ -40,11 +40,11 @@ Tensor<std::complex<T>, 4> WaterFat(
     const Tensor<T, 3> kz = 2.0 * PI * kloc[2];
 
     // Kspace, Fourier exponential, and off-resonance phase
-    Matrix<std::complex<T>, Dynamic, Dynamic> Mxy_w = 1.0e+3 * nb_spins * M0.array() * rho_w.array() * profile.array();
-    Matrix<std::complex<T>, Dynamic, Dynamic> Mxy(nb_spins, 1);
-    Vector<std::complex<T>, Dynamic> fourier(nb_spins);
-    Vector<T, Dynamic>  phi_off(nb_spins);
-    Vector<T, Dynamic> phi_fat(nb_spins);
+    Matrix<std::complex<T>, Dynamic, Dynamic> Mxy_w = 1.0e+3 * nb_nodes * M0.array() * rho_w.array() * profile.array();
+    Matrix<std::complex<T>, Dynamic, Dynamic> Mxy(nb_nodes, 1);
+    Vector<std::complex<T>, Dynamic> fourier(nb_nodes);
+    Vector<T, Dynamic>  phi_off(nb_nodes);
+    Vector<T, Dynamic> phi_fat(nb_nodes);
 
     // kspace
     Tensor<std::complex<T>, 4> kspace(nb_meas, nb_lines, nb_kz, 1);
@@ -69,7 +69,7 @@ Tensor<std::complex<T>, 4> WaterFat(
           // Update off-resonance phase
           phi_off.noalias() = phi_dB0*t(i,j,k);
           phi_fat.noalias() = chemical_shift*t(i,j,k);
-          Mxy = Mxy_w.array() + 1.0e+3 * nb_spins * M0.array() * rho_f.array() * (i1 * phi_fat).array().exp() * profile.array();
+          Mxy = Mxy_w.array() + 1.0e+3 * nb_nodes * M0.array() * rho_f.array() * (i1 * phi_fat).array().exp() * profile.array();
 
           // Calculate Fourier exponential
           fourier = FourierEncoding(r0, kx, ky, kz, phi_off, i, j, k);
