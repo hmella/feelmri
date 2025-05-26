@@ -6,7 +6,7 @@ import numpy as np
 
 from FEelMRI.KSpaceTraj import CartesianStack
 from FEelMRI.Math import Rx, Ry, Rz
-from FEelMRI.MPIUtilities import MPI_print, MPI_rank, gather_image
+from FEelMRI.MPIUtilities import MPI_print, MPI_rank, gather_data
 from FEelMRI.MRIEncoding import WaterFat
 from FEelMRI.MRImaging import Gradient, SliceProfile
 from FEelMRI.Phantom import FEMPhantom
@@ -96,7 +96,7 @@ if __name__ == '__main__':
   K[traj.local_idx,:,:,:] = WaterFat(MPI_rank, M, traj.local_points, traj.local_times, nodes, delta_B0, M0, T2, profile, rho_w, rho_f, chemical_shift)
 
 # Gather results
-K = gather_image(K)
+K = gather_data(K)
 
 # Export generated data
 if MPI_rank==0:
