@@ -12,7 +12,7 @@ from FEelMRI.ImageBuilding import (CSPAMM_magnetizations,
                                       ORI_O_CSPAMM_magnetizations, get_images)
 from FEelMRI.KSpace import kspace
 from FEelMRI.Math import itok, ktoi
-from FEelMRI.MPIUtilities import MPI_print, MPI_rank, MPI_size, gather_image
+from FEelMRI.MPIUtilities import MPI_print, MPI_rank, MPI_size, gather_data
 from FEelMRI.pySpinBasedUtils import (check_kspace_bw, check_nb_slices,
                                          update_s2p)
 from FEelMRI.Spins import Function
@@ -195,10 +195,10 @@ def get_oriocspamm_image(image, epi, phantom, parameters, debug=False):
         MPI_print('Time step {:d}'.format(time_step))
 
     # Gather results
-    m0_image[...] = gather_image(I[0].reshape(m0_image.shape,order='F'))
-    m1_image[...] = gather_image(I[1].reshape(m1_image.shape,order='F'))
-    m2_image[...] = gather_image(I[2].reshape(m2_image.shape,order='F'))
-    m3_image[...] = gather_image(I[3].reshape(m3_image.shape,order='F'))    
+    m0_image[...] = gather_data(I[0].reshape(m0_image.shape,order='F'))
+    m1_image[...] = gather_data(I[1].reshape(m1_image.shape,order='F'))
+    m2_image[...] = gather_data(I[2].reshape(m2_image.shape,order='F'))
+    m3_image[...] = gather_data(I[3].reshape(m3_image.shape,order='F'))    
 
     # Iterates over slices
     for slice in range(resolution[2]):
@@ -401,9 +401,9 @@ def get_cspamm_image(image, epi, phantom, parameters, debug=False):
         MPI_print('Time step {:d}'.format(time_step))
 
     # Gather results
-    m0_image[...] = gather_image(I[0].reshape(m0_image.shape,order='F'))
-    m1_image[...] = gather_image(I[1].reshape(m1_image.shape,order='F'))
-    m2_image[...] = gather_image(I[2].reshape(m2_image.shape,order='F'))
+    m0_image[...] = gather_data(I[0].reshape(m0_image.shape,order='F'))
+    m1_image[...] = gather_data(I[1].reshape(m1_image.shape,order='F'))
+    m2_image[...] = gather_data(I[2].reshape(m2_image.shape,order='F'))
 
     # Iterates over slices
     for slice in range(resolution[2]):
@@ -605,9 +605,9 @@ def get_cdense_image(image, epi, phantom, parameters, debug=False):
         MPI_print('Time step {:d}'.format(time_step))
 
     # Gather results
-    m0_image[...] = gather_image(I[0].reshape(m0_image.shape,order='F'))
-    m1_image[...] = gather_image(I[1].reshape(m1_image.shape,order='F'))
-    m2_image[...] = gather_image(I[2].reshape(m2_image.shape,order='F'))
+    m0_image[...] = gather_data(I[0].reshape(m0_image.shape,order='F'))
+    m1_image[...] = gather_data(I[1].reshape(m1_image.shape,order='F'))
+    m2_image[...] = gather_data(I[2].reshape(m2_image.shape,order='F'))
 
     # Iterates over slices
     for slice in range(resolution[2]):
@@ -779,8 +779,8 @@ def get_exact_image(image, epi, phantom, parameters, debug=False):
         MPI_print('Time step {:d}'.format(time_step))
 
     # Gather results
-    m0_image[...] = gather_image(I[0].reshape(m0_image.shape,order='F'))
-    m1_image[...] = gather_image(I[1].reshape(m1_image.shape,order='F'))
+    m0_image[...] = gather_data(I[0].reshape(m0_image.shape,order='F'))
+    m1_image[...] = gather_data(I[1].reshape(m1_image.shape,order='F'))
 
     # Iterates over slices
     for slice in range(resolution[2]):
