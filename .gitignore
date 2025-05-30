@@ -7,3 +7,4 @@ meshes/xdmf/
 meshes/*.msh
 *.png
 *.mp4
+.*
