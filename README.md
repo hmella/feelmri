@@ -42,7 +42,7 @@ where ```container_name``` can be any name you choose for your container.
 <!-- If you wish to run the container with plotting support, i.e., allowing to the container to show images, first run:
 ```bash
 sudo apt-get install x11-xserver-utils && xhost + -->
-```
+<!-- ```
 
 ## Examples
 
@@ -53,4 +53,4 @@ mpirun -n nb_proc python3 foo.py
 Resulting images look like this:
 | CSPAMM image with epi-like artifacts  | CSPAMM kspace with epi-like artifacts |
 | ------------- | ------------- |
-| ![CSPAMM image](/screenshots/Figure_1.png "CSPAMM image with epi-like artifacts")  | ![CSPAMM image](/screenshots/Figure_2.png "CSPAMM image with epi-like artifacts")  |
+| ![CSPAMM image](/screenshots/Figure_1.png "CSPAMM image with epi-like artifacts")  | ![CSPAMM image](/screenshots/Figure_2.png "CSPAMM image with epi-like artifacts")  | -->
