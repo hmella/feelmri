@@ -2,6 +2,8 @@
 
 FEelMRI is an open source library for the generation of synthetic Magnetic Resonance images from Finite Elements simulations.
 
+<img width="480" height="216" src="gifs/spamm.gif" alt="color picker" /> <img width="287" height="216" src="gifs/aorta.gif" alt="color picker" />
+
 ## Installation instructions
 The first step to install the library is to clone the repository and navigate to the ```FEelMRI/``` folder:
 ```bash
