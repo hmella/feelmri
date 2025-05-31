@@ -1,14 +1,15 @@
+import warnings
+
 import matplotlib.pyplot as plt
 import numpy as np
 from pint import Quantity as Q_
 from scipy.integrate import RK45
 from scipy.interpolate import interp1d
 
-from FEelMRI.MRObjects import Gradient, RF, Scanner
 from FEelMRI.MPIUtilities import MPI_rank
+from FEelMRI.MRObjects import RF, Gradient, Scanner
 from FEelMRI.Units import *
 
-import warnings
 
 class Bloch:
   def __init__(self, gamma=42.58, z0=0.0, z=0.0, eval_gradient=None, B1e=None, small_angle=False):
@@ -134,13 +135,15 @@ class SliceProfile:
 
     # Optimize refocusing area fraction
     Mx = []
+    My = []
     area_fracs = np.linspace(frac_start, frac_end, N)
     for i, frac in enumerate(area_fracs):
       self.refocusing_area_frac = frac
       self.interp_profile = self.calculate()
       Mx.append(np.abs(np.imag(self.interp_profile(z_arr))).max())
+      My.append(np.abs(np.real(self.interp_profile(z_arr))).max())
       if MPI_rank == 0:
-        print("[iter ", i, "]", "Refocusing area fraction: ", frac, "Max. Mx : ", Mx[-1])
+        print("[iter ", i, "]", "Refocusing area fraction: ", frac, "Max. Mx : ", Mx[-1], ", Max. My : ", My[-1])
 
     # Verify which fraction gives the best result
     idx = np.argmin(Mx)
@@ -188,23 +191,22 @@ class SliceProfile:
     # dur   = (area - 0.5*slope*self._Gz)/self._Gz
 
     # Create slice selection gradient objects
-    dephasing = Gradient(G=Gz.to('mT/m'), scanner=self.scanner, lenc=(dur1 + dur2).to('ms'), t_ref=(rf_ss.t_ref-dur1).to('ms'))
-    rephasing = Gradient(scanner=self.scanner, t_ref=dephasing.timings[-2].to('ms'))
+    dephasing = Gradient(G=Gz.to('mT/m'), scanner=self.scanner, lenc=(dur1 + dur2).to('ms'), t_ref=(rf_ss.t_ref-dur1).to('ms'), axis=2)
+    rephasing = Gradient(scanner=self.scanner, t_ref=dephasing.timings[-2].to('ms'), axis=2)
 
     # Match area lobe of the second gradient
     half_area = dephasing.area(t0=rf_ss.t_ref).to('mT*ms/m')
-    rephasing.match_area(half_area * self.refocusing_area_frac)
+    rephasing.match_area(-half_area * self.refocusing_area_frac)
 
     # Fix timings
-    dephasing.t_ref -= dephasing.slope
-    _, dephasing.timings, dephasing.amplitudes, _ = dephasing.group_timings()
-    rephasing.t_ref -= dephasing.slope
-    _, rephasing.timings, rephasing.amplitudes, _ = rephasing.group_timings()
+    dephasing.update_reference(dephasing.t_ref - dephasing.slope)
+    rephasing.update_reference(rephasing.t_ref - dephasing.slope)
     self.dephasing = dephasing
     self.rephasing = rephasing
+    self.rf = rf_ss
 
     def ss_gradient(t):
-      return dephasing(t) - rephasing(t)
+      return dephasing(t) + rephasing(t)
 
     # Integration bounds
     t0 = dephasing.timings[0].to('ms')
@@ -240,7 +242,7 @@ class SliceProfile:
     B1 = np.array(B1)
 
     if self.plot and MPI_rank==0:
-      plt.rcParams['text.usetex'] = True
+      # plt.rcParams['text.usetex'] = True
       plt.rcParams.update({'font.size': 16})
       
       # Plot RF and slice selection gradients
@@ -252,7 +254,7 @@ class SliceProfile:
       ax[0].set_xticklabels([])
 
       ax[1].plot(dephasing.timings.m_as('ms'), dephasing.amplitudes.m_as('mT/m'))
-      ax[1].plot(rephasing.timings.m_as('ms'), -rephasing.amplitudes.m_as('mT/m'))
+      ax[1].plot(rephasing.timings.m_as('ms'), rephasing.amplitudes.m_as('mT/m'))
       ax[1].set_xlim([t0.m, t_bound.m])
       ax[1].set_xlabel('Time [{:%s}]'.format(rephasing.timings.units))
       ax[1].set_ylabel('G [{:%s}]'.format(rephasing.amplitudes.units))
