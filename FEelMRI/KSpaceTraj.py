@@ -2,7 +2,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from pint import Quantity
 
-from FEelMRI.MPIUtilities import scatterKspace, MPI_rank
+from FEelMRI.MPIUtilities import MPI_rank, scatterKspace
 from FEelMRI.MRObjects import Gradient, Scanner
 from FEelMRI.Units import *
 
@@ -10,7 +10,7 @@ from FEelMRI.Units import *
 
 # Generic tracjectory
 class Trajectory:
-  def __init__(self, FOV=Quantity(np.array([0.3, 0.3, 0.08]),'m'), res=np.array([100, 100, 1]), oversampling=2, lines_per_shot=7, scanner=Scanner(), G_enc=Gradient(slope=Quantity(0,'ms'), lenc=Quantity(0,'ms')), receiver_bw=Quantity(128.0e+3,'Hz'), plot_seq=False, MPS_ori=np.eye(3), LOC=np.zeros([3,]), dtype=np.float32):
+  def __init__(self, FOV=Quantity(np.array([0.3, 0.3, 0.08]),'m'), res=np.array([100, 100, 1]), oversampling=2, lines_per_shot=7, scanner=Scanner(), t_start=Quantity(0, 'ms'), receiver_bw=Quantity(128.0e+3,'Hz'), plot_seq=False, MPS_ori=np.eye(3), LOC=np.zeros([3,]), dtype=np.float32):
     self.scanner = scanner
     self.FOV = FOV
     self.res = res
@@ -28,10 +28,10 @@ class Trajectory:
     self.pxsz = FOV / res
     self.k_bw = 1.0 / self.pxsz
     self.k_spa = 1.0 / (self.oversampling_arr * FOV)
-    self.kx_extent = (np.array([0, self.ro_samples - 1]) - self.ro_samples // 2) * self.k_spa[0] + (self.res[0] % 2 != 0) * self.k_spa[0]
+    self.kx_extent = (np.array([0, self.ro_samples - 1]) - self.ro_samples // 2) * self.k_spa[0] + float((self.res[0] % 2 != 0)) * self.k_spa[0]
     self.ky_extent = (np.array([0, self.ph_samples - 1]) - self.ph_samples // 2) * self.k_spa[1]
     self.kz_extent = (np.array([0, self.slices - 1]) - self.slices // 2) * self.k_spa[2]
-    self.G_enc = G_enc
+    self.t_start = t_start
     self.plot_seq = plot_seq
     self.receiver_bw = receiver_bw          # [Hz]
     self.MPS_ori = MPS_ori.astype(dtype)  # orientation
@@ -50,8 +50,6 @@ class CartesianStack(Trajectory):
       self.ph_samples = self.check_ph_enc_lines(self.res[1])
       self.nb_shots = self.ph_samples // self.lines_per_shot
       (self.points, self.times) = self.kspace_points()
-      # Send the information to each process if running in parallel
-      (self.local_points, self.local_times, self.local_idx) = scatterKspace(self.points, self.times)
 
     def kspace_points(self):
       ''' Get kspace points '''
@@ -66,13 +64,13 @@ class CartesianStack(Trajectory):
       blip_grad.calculate(-self.k_bw[1].to('1/m')/self.ph_samples)
 
       # Gradient duration is not used because can be shorter than second half of the slice selection gradient
-      enc_time = Quantity(self.G_enc.timings[-1].m_as('ms') - np.max([ph_grad.dur.m_as('ms'), ro_grad0.dur.m_as('ms')]), 'ms')
+      enc_time = Quantity(self.t_start.m_as('ms') - np.max([ph_grad.dur.m_as('ms'), ro_grad0.dur.m_as('ms')]), 'ms')
       
       # Update timings
       ph_grad.update_reference(enc_time)
       ro_grad0.update_reference(enc_time)
 
-      enc_gradients = [self.G_enc, ]
+      enc_gradients = []
       ro_gradients = [ro_grad0, ]
       ph_gradients = [ph_grad, ]
       for i in range(self.lines_per_shot):
@@ -90,7 +88,7 @@ class CartesianStack(Trajectory):
 
       if self.plot_seq:
         if MPI_rank == 0:
-          plt.rcParams['text.usetex'] = True
+          # plt.rcParams['text.usetex'] = True
           plt.rcParams.update({'font.size': 16})
 
           fig, ax = plt.subplots(2, 1, figsize=(8,4))
@@ -117,9 +115,6 @@ class CartesianStack(Trajectory):
           # Set legend labels
           ax1[0].set_label('PH')
           ax2[0].set_label('RO')
-          if self.G_enc.Gr_max != 0:
-            ax3[0].set_label('ENC')
-            ax4[0].set_label('ENC')
           ax5[0].set_label('ADC')
 
           # Format plots
@@ -152,8 +147,8 @@ class CartesianStack(Trajectory):
 
       # Build shots locations
       for ph in range(self.ph_samples):
-        # self.shots[ph // self.lines_per_shot][ph % self.lines_per_shot] = ph
-        self.shots[ph % self.nb_shots][ph // self.nb_shots] = ph
+        self.shots[ph // self.lines_per_shot][ph % self.lines_per_shot] = ph
+        # self.shots[ph % self.nb_shots][ph // self.nb_shots] = ph
 
       # kspace times and locations
       t = np.zeros([self.ro_samples, self.ph_samples, self.slices], dtype=self.dtype)
@@ -169,7 +164,7 @@ class CartesianStack(Trajectory):
 
           # Update timings
           if idx == 0:
-            t[::ro,ph,0] = enc_time.m_as('ms')/1000.0 + ro_grad0.dur.m_as('ms') + ro_grad.slope.m_as('ms') + dt
+            t[::ro,ph,0] = enc_time.m_as('ms') + ro_grad0.dur.m_as('ms') + ro_grad.slope.m_as('ms') + dt
           else:
             t[::ro,ph,0] = t[:,shot[idx-1]].max() + ro_grad.slope.m_as('ms') + ro_grad.slope.m_as('ms') + dt[::ro]
 
@@ -186,7 +181,7 @@ class CartesianStack(Trajectory):
     def plot_trajectory(self):
       ''' Show kspace points and time map'''
       if MPI_rank == 0:
-        plt.rcParams['text.usetex'] = True
+        # plt.rcParams['text.usetex'] = True
         plt.rcParams.update({'font.size': 16})
 
         # Plot kspace locations and times
@@ -198,7 +193,7 @@ class CartesianStack(Trajectory):
         ax[0].set_xlabel('$k_x ~(1/m)$')
         ax[0].set_ylabel('$k_y ~(1/m)$')
 
-        im = ax[1].scatter(self.points[0][:,:,0],self.points[1][:,:,0],c=1000*self.times,s=2.5,cmap='turbo')
+        im = ax[1].scatter(self.points[0][:,:,0],self.points[1][:,:,0],c=self.times,s=2.5,cmap='turbo')
         ax[1].set_xlabel('$k_x ~(1/m)$')
         ax[1].set_yticklabels([])
         fig.tight_layout()
@@ -214,8 +209,6 @@ class RadialStack(Trajectory):
       self.ph_samples = self.check_ph_enc_lines(self.ph_samples)
       self.nb_shots = self.ph_samples // self.lines_per_shot
       (self.points, self.times) = self.kspace_points()
-      # Send the information to each process if running in parallel
-      (self.local_points, self.local_times, self.local_idx) = scatterKspace(self.points, self.times)
 
     def kspace_points(self):
       ''' Get kspace points '''
@@ -250,7 +243,7 @@ class RadialStack(Trajectory):
 
       if self.plot_seq:
         if MPI_rank == 0:
-          plt.rcParams['text.usetex'] = True
+          # plt.rcParams['text.usetex'] = True
           plt.rcParams.update({'font.size': 16})
 
           fig, ax = plt.subplots(2, 1, figsize=(8,4))
@@ -340,7 +333,7 @@ class RadialStack(Trajectory):
 
           # Update timings
           if idx == 0:
-            t[::ro,ph,0] = enc_time/1000.0 + ro_grad0.dur + ro_grad.slope + dt
+            t[::ro,ph,0] = enc_time + ro_grad0.dur + ro_grad.slope + dt
           else:
             t[::ro,ph,0] = t[:,shot[idx-1]].max() + ro_grad.slope + ro_grad.slope + dt[::ro]
 
@@ -357,7 +350,7 @@ class RadialStack(Trajectory):
     def plot_trajectory(self):
       ''' Show kspace points and time map'''
       if MPI_rank == 0:
-        plt.rcParams['text.usetex'] = True
+        # plt.rcParams['text.usetex'] = True
         plt.rcParams.update({'font.size': 16})
 
         # Plot kspace locations and times
@@ -369,7 +362,7 @@ class RadialStack(Trajectory):
         ax[0].set_xlabel('$k_x ~(1/m)$')
         ax[0].set_ylabel('$k_y ~(1/m)$')
 
-        im = ax[1].scatter(self.points[0][:,:,0],self.points[1][:,:,0],c=1000*self.times,s=2.5,cmap='turbo')
+        im = ax[1].scatter(self.points[0][:,:,0],self.points[1][:,:,0],c=self.times,s=2.5,cmap='turbo')
         ax[1].set_xlabel('$k_x ~(1/m)$')
         ax[1].set_yticklabels([])
         fig.tight_layout()
@@ -444,7 +437,7 @@ class SpiralStack(Trajectory):
       # Plot kspace locations and times
       fig, axs = plt.subplots(1, 2, figsize=(10, 5))
       axs[0].plot(self.points[0].flatten('F'),self.points[1].flatten('F'))
-      im = axs[1].scatter(self.points[0],self.points[1],c=1000*self.times,s=1.5)
+      im = axs[1].scatter(self.points[0],self.points[1],c=self.times,s=1.5)
       axs[0].set_xlabel('k_x (1/m)')
       axs[0].set_ylabel('k_y (1/m)')
       axs[1].set_xlabel('k_x (1/m)')
