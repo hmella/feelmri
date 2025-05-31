@@ -3,8 +3,8 @@ import os
 import sys
 
 import setuptools
-from setuptools import Extension, setup
-from setuptools.command.build_ext import build_ext
+from setuptools import setup
+from pybind11.setup_helpers import Pybind11Extension, build_ext
 
 
 def read(fname):
@@ -37,9 +37,31 @@ class get_pybind_include(object):
 
 
 ext_modules = [
-    Extension(
-        'FEelMRI.FiniteElements',
-        sources=['FEelMRI/src/FiniteElements.cpp'],
+    Pybind11Extension(
+        'FEelMRI.FEAssemble',
+        sources=['FEelMRI/src/FEAssemble.cpp'],
+        include_dirs=[
+            # Path to pybind11 headers
+            get_pybind_include(),
+            '/usr/include/eigen3/',
+            '/usr/include/basix/'
+        ],
+        language='c++',
+    ),
+    Pybind11Extension(
+        'FEelMRI.BlochSimulator',
+        sources=['FEelMRI/src/BlochSimulator.cpp'],
+        include_dirs=[
+            # Path to pybind11 headers
+            get_pybind_include(),
+            '/usr/include/eigen3/',
+            'FEelMRI/src/'
+        ],
+        language='c++',
+    ),
+    Pybind11Extension(
+        'FEelMRI.MeshRefinement',
+        sources=['FEelMRI/src/MeshRefinement.cpp'],
         include_dirs=[
             # Path to pybind11 headers
             get_pybind_include(),
@@ -47,7 +69,7 @@ ext_modules = [
         ],
         language='c++',
     ),
-    Extension(
+    Pybind11Extension(
         'FEelMRI.MRIEncoding',
         ['FEelMRI/src/MRIEncoding.cpp', 'FEelMRI/src/Signal.cpp'],
         include_dirs=[
@@ -57,7 +79,7 @@ ext_modules = [
         ],
         language='c++',
     ),
-    Extension(
+    Pybind11Extension(
         'FEelMRI.Tagging',
         ['FEelMRI/src/Tagging.cpp', 'FEelMRI/src/Signal.cpp'],
         include_dirs=[
@@ -67,7 +89,7 @@ ext_modules = [
         ],
         language='c++',
     ),
-    Extension(
+    Pybind11Extension(
         'FEelMRI.PhaseContrast',
         sources=['FEelMRI/src/PhaseContrast.cpp', 'FEelMRI/src/Signal.cpp'],
         include_dirs=[
@@ -96,11 +118,15 @@ def has_flag(compiler, flagname):
 
 
 def cpp_flag(compiler):
-    """Return the -std=c++[11/14] compiler flag.
+    """Return the -std=c++[11/14/17/20] compiler flag.
 
-    The c++14 is prefered over c++11 (when it is available).
+    The c++20 is prefered over others (when it is available).
     """
-    if has_flag(compiler, '-std=c++14'):
+    if has_flag(compiler, '-std=c++20'):
+        return '-std=c++20'
+    if has_flag(compiler, '-std=c++17'):
+        return '-std=c++17'
+    elif has_flag(compiler, '-std=c++14'):
         return '-std=c++14'
     elif has_flag(compiler, '-std=c++11'):
         return '-std=c++11'
@@ -139,8 +165,6 @@ class BuildExt(build_ext):
                 opts.append('-DNDEBUG')
             if has_flag(self.compiler, '-mfpmath=sse'):
                 opts.append('-mfpmath=sse')
-            # if has_flag(self.compiler, '-fopenmp'):
-            #     opts.append('-fopenmp')
         elif ct == 'msvc':
             opts.append('/DVERSION_INFO=\\"%s\\"' % self.distribution.get_version())
         for ext in self.extensions:
