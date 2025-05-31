@@ -263,7 +263,6 @@ class FEMPhantom:
 
     # Assemble mass matrix
     M = MassAssemble(self.local_elements, self.local_nodes, fe, qr)
-    print("Process {:d} has {:d} rows in the mass matrix".format(MPI_rank, M.shape[0]))
 
     # Make matrix lumped if requested
     if lumped:
