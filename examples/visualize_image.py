@@ -35,11 +35,12 @@ if __name__ == '__main__':
   I = CartesianRecon(K, data['traj'], filter={'type': 'Tukey', 'width': 0.9, 'lift': 0.3})
 
   # Plot image using matplotlib plotter
-  phi_x = np.angle(I[...,0,:])# * np.conj(I[...,3,:]))
-  phi_y = np.angle(I[...,1,:])# * np.conj(I[...,3,:]))
-  phi_z = np.angle(I[...,2,:])# * np.conj(I[...,3,:]))
-  phi_ref = np.angle(I[...,2,:])
-  plotter = MRIPlotter(images=[np.abs(I[...,0,:]), phi_x, phi_y, phi_z, phi_ref], FOV=parameters.FOV, title=['Magnitude', '$\phi_x-\phi_{ref}$', '$\phi_y-\phi_{ref}$', '$\phi_z-\phi_{ref}$', '$\phi_{ref}$'])
+  phi_x = np.angle(I[...,0,:] * np.conj(I[...,3,:]))
+  phi_y = np.angle(I[...,1,:] * np.conj(I[...,3,:]))
+  phi_z = np.angle(I[...,2,:] * np.conj(I[...,3,:]))
+  phi_ref = np.angle(I[...,3,:])
+  plotter = MRIPlotter(images=[np.abs(I[...,0,:]), phi_x, phi_y, phi_z, phi_ref], FOV=parameters.FOV, title=['Magnitude', '$\phi_x-\phi_{ref}$', '$\phi_y-\phi_{ref}$', '$\phi_z-\phi_{ref}$', '$\phi_{ref}$'], swap_axes=[0,2])
+  # plotter.export_images('4dflow_images/')
   plotter.show()
 
   # # Origin and pixel spacing of the generated image
