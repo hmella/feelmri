@@ -49,7 +49,6 @@ def gather_data(data):
   gathered_data = np.zeros_like(data)
 
   # Reduced image
-  # MPI_comm.Reduce([data, mpi_type], [gathered_data, mpi_type], op=MPI.SUM, root=0)
   MPI_comm.Reduce([data, mpi_type], [gathered_data, mpi_type], op=MPI.SUM, root=0)
 
   return gathered_data
