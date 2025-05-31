@@ -1,4 +1,5 @@
 #include <pybind11/pybind11.h>
+#include <pybind11/eigen/tensor.h>
 #include <pybind11/eigen.h>
 #include <pybind11/stl.h>
 #include <Eigen/Dense>
@@ -8,64 +9,37 @@
 // using namespace Eigen;
 namespace py = pybind11;
 
-// Custom types
-using ShapeFunctions = std::tuple<Eigen::Matrix<float, 4, 1>,
-  Eigen::Matrix<float, 4, 1>,
-  Eigen::Matrix<float, 4, 1>,
-  Eigen::Matrix<float, 4, 1>>;
-using QuadRule = std::tuple<Eigen::Matrix<float, 4, 3>, Eigen::Vector<float, 4>>;
-using IsoMap = std::tuple<Eigen::Matrix<float, 4, 1>,
-  Eigen::Matrix<float, 4, 1>,
-  Eigen::Matrix<float, 4, 1>,
-  Eigen::Matrix<float, 4, 1>,
+using IsoMap = std::tuple<Eigen::VectorXf,
+  Eigen::VectorXf,
+  Eigen::VectorXf,
+  Eigen::VectorXf,
   float>;
 
 // Triplets
 using TripletType = Eigen::Triplet<float>;
 
 
-// Quadrature rule
-QuadRule QuadratureRule(){
-
-  // Points
-  Eigen::Matrix<float, 4, 3> x = (Eigen::Matrix<float, 4, 3>() <<
-    0.5854101966249685, 0.1381966011250105, 0.1381966011250105,
-    0.1381966011250105, 0.5854101966249685, 0.1381966011250105,
-    0.1381966011250105, 0.1381966011250105, 0.5854101966249685,
-    0.1381966011250105, 0.1381966011250105, 0.1381966011250105
-  ).finished();
-
-  // Weights
-  Eigen::Vector<float, 4> w;
-  w << 0.25/6.0, 0.25/6.0, 0.25/6.0, 0.25/6.0;
-
-  return std::make_tuple(x, w);
-}
-
-
-// Computes the shape functions and their derivatives for a tetrahedral element
-ShapeFunctions P1Tetra(float r, float s, float t){
-  // Shape functions
-  Eigen::Matrix<float, 4, 1> S;
-  S << 1-r-s-t, r, s, t;
-
-  // Derivatives
-  Eigen::Matrix<float, 4, 1> dSdr, dSds, dSdt;
-  dSdr << -1, 1, 0, 0;
-  dSds << -1, 0, 1, 0;
-  dSdt << -1, 0, 0, 1;
-
-  return std::make_tuple(S, dSdr, dSds, dSdt);
-}
-
-
 // Isoparametric mapping
-IsoMap IsoMapping(const Eigen::MatrixXf &nodes, const Eigen::VectorXf &qpoint){
+IsoMap IsoMapping(
+  const Eigen::MatrixXf &nodes, 
+  const Eigen::MatrixXf &qpoint, 
+  const py::object &finite_element){
 
   // Evaluate shape functions
-  auto [S, dSdr, dSds, dSdt] = P1Tetra(qpoint(0), qpoint(1), qpoint(2));
+  const auto values = py::cast<Eigen::Tensor<float, 4>>(finite_element.attr("tabulate")(1, qpoint));
 
-  // Jacobian matrix
+  // Number of degrees of freedom
+  const auto nb_dofs = py::cast<int>(finite_element.attr("dimension"));
+
+  // Create shape functions
+  Eigen::VectorXf S(nb_dofs), dSdr(nb_dofs), dSds(nb_dofs), dSdt(nb_dofs);
+  for (int i=0; i<nb_dofs; i++){
+    S(i) = values(0,0,i,0); 
+    dSdr(i) = values(1,0,i,0); 
+    dSds(i) = values(2,0,i,0); 
+    dSdt(i) = values(3,0,i,0); 
+  }
+
   Eigen::Matrix3f J;
   J(0, 0) = (dSdr.transpose() * nodes.col(0)).sum();
   J(0, 1) = (dSdr.transpose() * nodes.col(1)).sum();
@@ -84,9 +58,10 @@ IsoMap IsoMapping(const Eigen::MatrixXf &nodes, const Eigen::VectorXf &qpoint){
   const Eigen::Matrix3f invJ = J.inverse();
 
   // Shape functions in the global element
-  const Eigen::Matrix<float, 4, 1> dSdx = invJ(0,0)*dSdr + invJ(0,1)*dSds + invJ(0,2)*dSdt;
-  const Eigen::Matrix<float, 4, 1> dSdy = invJ(1,0)*dSdr + invJ(1,1)*dSds + invJ(1,2)*dSdt;
-  const Eigen::Matrix<float, 4, 1> dSdz = invJ(2,0)*dSdr + invJ(2,1)*dSds + invJ(2,2)*dSdt;
+  Eigen::VectorXf dSdx(nb_dofs), dSdy(nb_dofs), dSdz(nb_dofs);
+  dSdx = invJ(0,0)*dSdr + invJ(0,1)*dSds + invJ(0,2)*dSdt;
+  dSdy = invJ(1,0)*dSdr + invJ(1,1)*dSds + invJ(1,2)*dSdt;
+  dSdz = invJ(2,0)*dSdr + invJ(2,1)*dSds + invJ(2,2)*dSdt;
 
   return std::make_tuple(S, dSdx, dSdy, dSdz, detJ);
 }
@@ -96,17 +71,22 @@ IsoMap IsoMapping(const Eigen::MatrixXf &nodes, const Eigen::VectorXf &qpoint){
 Eigen::MatrixXf LocalMassAssemble(
   const Eigen::MatrixXf &nodes,
   const Eigen::MatrixXf &qpoints,
-  const Eigen::VectorXf &qweights){
+  const Eigen::VectorXf &qweights,
+  const py::object &finite_element){
+
+  // Number of degrees of freedom
+  const auto nb_dofs = py::cast<int>(finite_element.attr("dimension"));
 
   // Assembled local matrix
-  Eigen::Matrix4f Me = Eigen::Matrix4f::Zero();
+  Eigen::MatrixXf Me(nb_dofs, nb_dofs);
+  Me.setZero();
 
   // Assembling
   for (int q = 0; q < qweights.size(); q++){ 
 
     // Isoparametric mapping
-    const IsoMap isoMap = IsoMapping(nodes, qpoints.row(q));
-    const auto& [S, dSdx, dSdy, dSdz, detJ] = isoMap;
+    const IsoMap tmp = IsoMapping(nodes, qpoints.row(q), finite_element);
+    const auto& [S, dSdx, dSdy, dSdz, detJ] = tmp;
 
     // Matrix assembling (should the determinant be adjusted?)
     Me += (S*S.transpose())*detJ*qweights(q);
@@ -118,19 +98,17 @@ Eigen::MatrixXf LocalMassAssemble(
 
 
 // Assemble mass matrix
-Eigen::SparseMatrix<float> MassAssemble(const Eigen::MatrixXi &elems,
-  const Eigen::MatrixXf &nodes){
+Eigen::SparseMatrix<float> MassAssemble(
+  const Eigen::MatrixXi &elems,
+  const Eigen::MatrixXf &nodes,
+  const py::object &finite_element,
+  const py::object &quadrature_rule){
 
   // Number of elements and nodes
   const int nb_elems = elems.rows();
   const int nb_nodes = nodes.rows();
   const int nb_nodes_e = elems.row(0).size();
   const int el_mat_size = nb_nodes_e*nb_nodes_e;
-
-  // Quadrature rule
-  const QuadRule quadRule = QuadratureRule();
-  const Eigen::MatrixXf qpoints  = std::get<0>(quadRule);
-  const Eigen::VectorXf qweights = std::get<1>(quadRule);
 
   // Global and local mass matrices
   Eigen::SparseMatrix<float> M(nb_nodes, nb_nodes);
@@ -143,6 +121,10 @@ Eigen::SparseMatrix<float> MassAssemble(const Eigen::MatrixXi &elems,
   Eigen::VectorXi elem(el_mat_size);
   Eigen::MatrixXf elem_nodes(el_mat_size, 3);
 
+  // Quadrature rule
+  const Eigen::MatrixXf quadrature_points = py::cast<Eigen::MatrixXf>(quadrature_rule.attr("points"));
+  const Eigen::VectorXf quadrature_weights = py::cast<Eigen::VectorXf>(quadrature_rule.attr("weights"));
+
   // Loop over elements for assembling
   for (int e = 0; e < nb_elems; e++){
 
@@ -151,7 +133,7 @@ Eigen::SparseMatrix<float> MassAssemble(const Eigen::MatrixXi &elems,
     elem_nodes = nodes(elem, Eigen::indexing::all);
 
     // Local assemble
-    Me = LocalMassAssemble(elem_nodes, qpoints, qweights);
+    Me = LocalMassAssemble(elem_nodes, quadrature_points, quadrature_weights, finite_element);
 
     // Fill triplets
     for (int i = 0; i < nb_nodes_e; i++){
@@ -173,17 +155,23 @@ Eigen::MatrixXf LocalGradAssemble(
   const Eigen::MatrixXf &nodes,
   const Eigen::MatrixXf &qpoints,
   const Eigen::VectorXf &qweights,
+  const py::object &finite_element,
   const int &dim){
 
+  // Number of degrees of freedom
+  const auto nb_dofs = py::cast<int>(finite_element.attr("dimension"));
+
   // Assembled local matrix
-  Eigen::Matrix4f Ce = Eigen::Matrix4f::Zero();
+  Eigen::MatrixXf Ce(nb_dofs, nb_dofs);
+  Ce.setZero();
 
   // Assembling
   for (int q = 0; q < qweights.size(); q++){ 
 
     // Isoparametric mapping
-    const IsoMap isoMap = IsoMapping(nodes, qpoints.row(q));
-    const auto& [S, dSdx, dSdy, dSdz, detJ] = isoMap;
+    const IsoMap tmp = IsoMapping(nodes, qpoints.row(q), finite_element);
+    const auto& [S, dSdx, dSdy, dSdz, detJ] = tmp;
+
     Eigen::Matrix<float, 4, 1> dSdi;
     if (dim == 0){
       dSdi = dSdx;
@@ -207,7 +195,9 @@ Eigen::MatrixXf LocalGradAssemble(
 Eigen::MatrixXf GradProjection(
   const Eigen::VectorXf &u,
   const Eigen::MatrixXi &elems,
-  const Eigen::MatrixXf &nodes){
+  const Eigen::MatrixXf &nodes,
+  const py::object &finite_element,
+  const py::object &quadrature_rule){
 
   // Geometric dimension
   const int dim = nodes.cols();
@@ -219,9 +209,8 @@ Eigen::MatrixXf GradProjection(
   const int el_mat_size = nb_nodes_e*nb_nodes_e;
 
   // Quadrature rule
-  const QuadRule quadRule = QuadratureRule();
-  const Eigen::MatrixXf qpoints  = std::get<0>(quadRule);
-  const Eigen::VectorXf qweights = std::get<1>(quadRule);
+  const Eigen::MatrixXf quadrature_points = py::cast<Eigen::MatrixXf>(quadrature_rule.attr("points"));
+  const Eigen::VectorXf quadrature_weights = py::cast<Eigen::VectorXf>(quadrature_rule.attr("weights"));
 
   // Global and local mass matrices
   Eigen::SparseMatrix<float> M(nb_nodes, nb_nodes);
@@ -244,7 +233,7 @@ Eigen::MatrixXf GradProjection(
     elem_nodes = nodes(elem, Eigen::indexing::all);
 
     // Local mass assemble
-    Me = LocalMassAssemble(elem_nodes, qpoints, qweights);
+    Me = LocalMassAssemble(elem_nodes, quadrature_points, quadrature_weights, finite_element);
   
     // Fill triplets
     for (int i = 0; i < nb_nodes_e; i++){
@@ -274,7 +263,7 @@ Eigen::MatrixXf GradProjection(
       elem_nodes = nodes(elem, Eigen::indexing::all);
 
       // Local assemble
-      Ce = LocalGradAssemble(elem_nodes, qpoints, qweights, d);
+      Ce = LocalGradAssemble(elem_nodes, quadrature_points, quadrature_weights, finite_element, d);
 
       // Fill triplets
       for (int i = 0; i < nb_nodes_e; i++){
@@ -295,7 +284,7 @@ Eigen::MatrixXf GradProjection(
   return w;
 }
 
-PYBIND11_MODULE(FiniteElements, m) {
+PYBIND11_MODULE(FEAssemble, m) {
     m.doc() = "Finite elements functions"; // optional module docstring
     m.def("MassAssemble", &MassAssemble, py::return_value_policy::reference);
     m.def("GradProjection", &GradProjection, py::return_value_policy::reference);
