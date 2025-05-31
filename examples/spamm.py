@@ -9,7 +9,7 @@ from pint import Quantity as Q_
 from FEelMRI.IO import XDMFFile
 from FEelMRI.KSpaceTraj import CartesianStack, Gradient
 from FEelMRI.Math import Rx, Ry, Rz
-from FEelMRI.MPIUtilities import MPI_comm, MPI_print, MPI_rank, gather_data
+from FEelMRI.MPIUtilities import MPI_print, MPI_rank, gather_data
 from FEelMRI.MRImaging import PositionEncoding, SliceProfile
 from FEelMRI.MRObjects import (RF, BlochSolver, Gradient, Scanner, Sequence,
                                SequenceBlock)
@@ -42,13 +42,14 @@ if __name__ == '__main__':
   # Translate phantom to obtain the desired slice location
   phantom.orient(MPS_ori, LOC)
 
-  # We can use only a submesh to speed up the simulation. The submesh is
-  # created by selecting the elements that are inside the FOV. We can also
-  # refine the submesh to increase the number of nodes and elements
-  midpoints = np.array([np.mean(phantom.mesh['nodes'][e], axis=0) for e in phantom.mesh['elems']])
+  # We can use only a submesh to speed up the simulation. The submesh is created by selecting the elements that are inside the FOV. We can also refine the submesh to increase the number of nodes and elements
+  midpoints = np.array([np.mean(phantom.nodes[e,:], axis=0) for e in phantom.elements])
   condition = (np.abs(midpoints[:,2]) <= 0.6*parameters.FOV[2]) > 1e-3
   markers = np.where(condition)[0]
   phantom.create_submesh(markers, refine=False, element_size=0.0012)
+
+  # Distribute the mesh to all MPI processes
+  phantom.distribute_mesh()
 
   # Create scanner object defining the gradient strength, slew rate and giromagnetic ratio
   scanner = Scanner(gradient_strength=Q_(parameters.G_max,'mT/m'), gradient_slew_rate=Q_(parameters.G_sr,'mT/m/ms'))
@@ -56,8 +57,8 @@ if __name__ == '__main__':
   # Field inhomogeneity
   def spatial(x):
       return x[:,0] + x[:,1] + x[:,2]
-  delta_B0 = spatial(phantom.submesh['nodes'])
-  delta_B0 /= np.abs(spatial(phantom.mesh['nodes']).flatten()).max()
+  delta_B0 = spatial(phantom.local_nodes)
+  delta_B0 /= np.abs(spatial(phantom.local_nodes).flatten()).max()
   delta_B0 *= 1.5 * 1e-6 # 1.5 ppm of the main magnetic field
   delta_omega0 = 2.0 * np.pi * scanner.gammabar.m_as('Hz/T') * delta_B0
 
@@ -101,13 +102,13 @@ if __name__ == '__main__':
       # Create sequence object
       seq = Sequence(prepulse=prep, blocks=[imaging], dt_prep=Q_(2, 'ms'))
       seq.repeat_blocks(nb_times=phantom.Nfr, dt_blocks=Q_(parameters.TimeSpacing, 's'))
-      seq.plot()
+      # seq.plot()
 
       # Bloch solver
       solver = BlochSolver(seq, phantom, scanner=scanner, M0=1e+9, T1=Q_(parameters.T1, 's'), T2=Q_(parameters.T2star, 's'), delta_B=delta_B0.reshape((-1, 1)))
 
       # Solve for x and y directions
-      Mxy, Mz = solver.solve(use_submesh=True) 
+      Mxy, Mz = solver.solve() 
 
       # Assign the magnetization to the corresponding direction
       SPAMM_mag[i] = Mxy
@@ -118,11 +119,11 @@ if __name__ == '__main__':
   # Slice profile
   profile = Mxy[:, -1]
 
-  if MPI_rank == 0:
-    testfile = XDMFFile('test_new.xdmf', nodes=phantom.submesh['nodes'], elements=phantom.submesh['all_elems'])
-    for i in range(Mxy.shape[1]):
-      testfile.write(pointData={'Mx': np.real(Mxy[:,i]), 'My': np.imag(Mxy[:,i]), 'Mz': Mz[:,i]}, time=i)
-    testfile.close()
+  # # Export SPAMM magnetization to XDMF file
+  # testfile = XDMFFile('test_new_{:d}.xdmf'.format(MPI_rank), nodes=phantom.local_nodes, elements={'tetra': phantom.local_elements})
+  # for i in range(Mxy.shape[1]):
+  #   testfile.write(pointData={'Mx': np.real(Mxy[:,i]), 'My': np.imag(Mxy[:,i]), 'Mz': Mz[:,i]}, time=i)
+  # testfile.close()
 
   # # Path to export the generated data
   # export_path = Path('MRImages/{:s}_V{:.0f}.pkl'.format(parameters.Sequence, 100.0*parameters.VENC))
@@ -139,8 +140,9 @@ if __name__ == '__main__':
     MPS_ori=MPS_ori, 
     LOC=LOC, 
     receiver_bw=Q_(parameters.r_BW,'Hz'), 
-    plot_seq=True)
-  traj.plot_trajectory()
+    plot_seq=False)
+  # traj.plot_trajectory()
+  print('Echo time: {:.2f} ms'.format(traj.echo_time.m_as('ms')))
 
   # kspace array
   ro_samples = traj.ro_samples
@@ -149,7 +151,7 @@ if __name__ == '__main__':
   K = np.zeros([ro_samples, ph_samples, slices, enc.nb_directions, phantom.Nfr], dtype=np.complex64)
 
   # T2star relaxation time
-  T2star = np.ones([phantom.submesh['nodes'].shape[0], ], dtype=np.float32)*parameters.T2star
+  T2star = np.ones([phantom.nodes.shape[0], ], dtype=np.float32)*parameters.T2star
 
   # Iterate over cardiac phases
   t0 = time.time()  
@@ -161,13 +163,14 @@ if __name__ == '__main__':
     submesh_displacement = phantom.interpolate_to_submesh(displacement)
 
     # Assemble mass matrix for integrals (just once)
-    M = phantom.mass_matrix(lumped=True, use_submesh=True, element_type='quadratic', quadrature_order=2)
+    M = phantom.mass_matrix(lumped=True, quadrature_order=2)
 
+    # SPAMM magnetization for this frame
     M_spamm = np.vstack((SPAMM_mag[0][:, fr+2], SPAMM_mag[1][:, fr+2])).T
 
     # Generate 4D flow image
     MPI_print('Generating frame {:d}'.format(fr))
-    K[traj.local_idx,:,:,:,fr] = SPAMM(MPI_rank, M, traj.local_points, traj.local_times.m_as('s'), phantom.submesh['nodes'] + submesh_displacement, M_spamm, delta_omega0, T2star, profile)
+    K[:,:,:,:,fr] = SPAMM(MPI_rank, M, traj.points, traj.times.m_as('s'), phantom.local_nodes + submesh_displacement, M_spamm, delta_omega0, T2star, profile)
 
   # Store elapsed time
   spamm_time = time.time() - t0
@@ -195,12 +198,12 @@ if __name__ == '__main__':
     my = np.abs(I[...,1,:])
     mxy = np.abs(I[...,0,:] - I[...,1,:])
     plotter = MRIPlotter(images=[mx, my, mxy], title=['SPAMM X', 'SPAMM Y', 'O-CSPAMM'], FOV=parameters.FOV)
-    plotter.export_images('animation_I/')
+    # plotter.export_images('animation_I/')
     plotter.show()
 
-    mx = np.abs(K[...,0,:])
-    my = np.abs(K[...,1,:])
-    mxy = np.abs(K[...,0,:] - K[...,1,:])
-    plotter = MRIPlotter(images=[mx, my, mxy], title=['SPAMM X', 'SPAMM Y', 'O-CSPAMM'], FOV=parameters.FOV)
-    plotter.export_images('animation_K/')
-    plotter.show()
+    # mx = np.abs(K[...,0,:])
+    # my = np.abs(K[...,1,:])
+    # mxy = np.abs(K[...,0,:] - K[...,1,:])
+    # plotter = MRIPlotter(images=[mx, my, mxy], title=['SPAMM X', 'SPAMM Y', 'O-CSPAMM'], FOV=parameters.FOV)
+    # plotter.export_images('animation_K/')
+    # plotter.show()

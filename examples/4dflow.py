@@ -1,4 +1,5 @@
 import os
+os.environ["OPENBLAS_NUM_THREADS"] = "1" # export OPENBLAS_NUM_THREADS=1
 import pickle
 import time
 from pathlib import Path
@@ -11,7 +12,8 @@ from FEelMRI.KSpaceTraj import CartesianStack
 from FEelMRI.Math import Rx, Ry, Rz
 from FEelMRI.MPIUtilities import MPI_print, MPI_rank, gather_data
 from FEelMRI.MRImaging import SliceProfile, VelocityEncoding
-from FEelMRI.MRObjects import RF, BlochSolver, Gradient, Scanner, Sequence, SequenceBlock
+from FEelMRI.MRObjects import (RF, BlochSolver, Gradient, Scanner, Sequence,
+                               SequenceBlock)
 from FEelMRI.Parameters import ParameterHandler
 from FEelMRI.Phantom import FEMPhantom
 from FEelMRI.PhaseContrast import PC
@@ -43,10 +45,13 @@ if __name__ == '__main__':
   # We can use only a submesh to speed up the simulation. The submesh is
   # created by selecting the elements that are inside the FOV. We can also
   # refine the submesh to increase the number of nodes and elements
-  midpoints = np.array([np.mean(phantom.mesh['nodes'][e], axis=0) for e in phantom.mesh['elems']])
+  midpoints = np.array([np.mean(phantom.nodes[e, :], axis=0) for e in phantom.elements])
   condition = (np.abs(midpoints[:,2]) <= 0.6*parameters.FOV[2]) > 1e-3
   markers = np.where(condition)[0]
   phantom.create_submesh(markers, refine=False, element_size=0.0012)
+
+  # Distribute the mesh across MPI processes
+  phantom.distribute_mesh()
 
   # Create scanner object defining the gradient strength, slew rate and giromagnetic ratio
   scanner = Scanner(gradient_strength=Q_(parameters.G_max,'mT/m'), gradient_slew_rate=Q_(parameters.G_sr,'mT/m/ms'))
@@ -54,8 +59,8 @@ if __name__ == '__main__':
   # Field inhomogeneity
   def spatial(x):
       return x[:,0] + x[:,1] + x[:,2]
-  delta_B0 = spatial(phantom.submesh['nodes'])
-  delta_B0 /= np.abs(spatial(phantom.mesh['nodes']).flatten()).max()
+  delta_B0 = spatial(phantom.local_nodes)
+  delta_B0 /= np.abs(spatial(phantom.nodes).flatten()).max()
   delta_B0 *= 1.5 * 1e-6             # 1.5 ppm of the main magnetic field
   delta_omega0 = 2.0 * np.pi * scanner.gammabar.m_as('Hz/T') * delta_B0
 
@@ -82,7 +87,7 @@ if __name__ == '__main__':
                         dt_rf=Q_(1e-2, 'ms'), 
                         dt_gr=Q_(1e-2, 'ms'), 
                         dt=Q_(1, 'ms'))
-  seq =  Sequence(blocks=[block], dt_blocks=Q_(parameters.TimeSpacing, 's'))
+  seq =  Sequence(blocks=[block])
   seq.plot()
 
   # # Bloch solver
@@ -96,7 +101,7 @@ if __name__ == '__main__':
   #   testfile.close()
 
   # Slice profile
-  profile = sp.interp_profile(phantom.submesh['nodes'][:,2])
+  profile = sp.interp_profile(phantom.local_nodes[:,2])
   # profile = Mxy[:, -1]
 
   # Path to export the generated data
@@ -125,10 +130,10 @@ if __name__ == '__main__':
   slices = traj.slices
   K = np.zeros([ro_samples, ph_samples, slices, enc.nb_directions, phantom.Nfr], dtype=np.complex64)
 
-  T2star = (parameters.T2star * np.ones([phantom.submesh['nodes'].shape[0]])).astype(np.float32)
+  T2star = (parameters.T2star * np.ones([phantom.local_nodes.shape[0]])).astype(np.float32)
 
   # Assemble mass matrix for integrals (just once to accelerate the simulation)
-  M = phantom.mass_matrix(lumped=True, use_submesh=True)
+  M = phantom.mass_matrix(lumped=True)
 
   # Iterate over cardiac phases
   t0 = time.time()
@@ -142,7 +147,7 @@ if __name__ == '__main__':
       submesh_velocity = phantom.interpolate_to_submesh(velocity)
 
       # Generate 4D flow image
-      K[traj.local_idx,:,:,:,fr] = PC(MPI_rank, M, traj.local_points, traj.local_times.m_as('s'), phantom.submesh['nodes'], submesh_velocity, enc.encode(submesh_velocity), delta_omega0, T2star, profile)
+      K[:,:,:,:,fr] = PC(MPI_rank, M, traj.points, traj.times.m_as('s'), phantom.local_nodes, submesh_velocity, enc.encode(submesh_velocity), delta_omega0, T2star, profile)
 
       MPI_print('Elapsed time frame {:d}: {:.2f} s'.format(fr, time.time()-t0_fr))
 
