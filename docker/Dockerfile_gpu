@@ -1,7 +1,10 @@
 # Download base image ubuntu 18.04
-FROM cupy/cupy as base
+FROM cupy/cupy AS base
 ARG DEBIAN_FRONTEND=noninteractive
-MAINTAINER Hernan Mella <hernan.mella@pucv.cl>
+LABEL org.opencontainers.image.authors="hernan.mella@pucv.cl"
+
+# Set environment variable to allow matplotlib to run in a docker container
+ENV MPLCONFIGDIR="./tmp/matplotlib"
 
 # Create new user
 ARG UID=1000

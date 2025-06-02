@@ -29,17 +29,31 @@ You might need to run this with ```sudo``` although not recommended. To avoid th
 
 
 ### Docker images
-To avoid compiling the source code directly on your machine and to allow the interoperability of the library, two ```Dockerfiles``` are provided inside the ```docker/``` folder: one for CPU parallelization and other for GPU parallelization. To build the docker image run the following instruction in the terminal:
+To avoid compiling the source code directly on your machine and allow interoperability, two ```Dockerfiles``` are provided inside the ```docker/``` folder: one for CPU parallelization and other for GPU parallelization using CUDA. To build any of the docker images, run the following instruction in the terminal:
 ```bash
 docker build --build-arg UID=$(id -u) --build-arg GID=$(id -g) . -f docker/Dockerfile_foo -t image_name
 ```
-where ```foo``` can be either ```cpu``` or ```gpu```, and ```image_name``` denotes the tag of yout image. The ```--build-arg UID=$(id -u)``` and ```--build-arg GID=$(id -g)``` arguments are used to tell Docker who owns the users and groups inside the image and avoid running any container with inadequate permissions.
+where ```foo``` can be either ```cpu``` or ```gpu```, and ```image_name``` denotes the tag of yout image. The ```--build-arg UID=$(id -u)``` and ```--build-arg GID=$(id -g)``` arguments are used to tell Docker who owns the users and groups inside the image and avoid running the containers with inadequate permissions.
 
 Once the building process has finished, run the following to start a FEelMRI Docker container:
 ```bash
 docker run --name container_name --shm-size 256m -ti -v /path/to/host/folder:/home/FEelMRI/ image_name
 ```
-where ```container_name``` can be any name you choose for your container.
+
+#### Allowing plots inside containers
+To allow plotting inside docker containers, run the following:
+```bash
+docker run -it \
+    --name container_name \
+    --user=$(id -u $USER):$(id -g $USER) \
+    --env="DISPLAY" \
+    --volume="/etc/group:/etc/group:ro" \
+    --volume="/etc/passwd:/etc/passwd:ro" \
+    --volume="/etc/shadow:/etc/shadow:ro" \
+    --volume="/etc/sudoers.d:/etc/sudoers.d:ro" \
+    --volume="/tmp/.X11-unix:/tmp/.X11-unix:rw" \
+    -v $(pwd):/home/FEelMRI/ image_name
+```
 
 <!-- If you wish to run the container with plotting support, i.e., allowing to the container to show images, first run:
 ```bash
