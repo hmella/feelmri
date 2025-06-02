@@ -177,7 +177,7 @@ class Sequence:
     if MPI_rank == 0:
       # Plot RF pulses and MR gradients
       titles = ['RF', 'M', 'P', 'S']
-      blocks = [block._discrete_gradients() for block in [self.prepulse] + self.blocks if block is not None]
+      blocks = [block._discrete_objects() for block in [self.prepulse] + self.blocks if block is not None]
 
       fig, ax = plt.subplots(4, 1)
       for objects in blocks:
@@ -244,11 +244,12 @@ class SequenceBlock:
 
     return [Q_(t_min, 'ms'), Q_(t_max, 'ms')]
 
-  def _discrete_gradients(self):
+  def _discrete_objects(self):
+    # TODO: make sure that both gradients and RF pulses keep the units. Do not use .m_as('ms') or .m here.
     # Get gradient timings and amplitudes
-    M_d_gr = [(g.timings, g.amplitudes) for g in self.M_gradients]
-    P_d_gr = [(g.timings, g.amplitudes) for g in self.P_gradients]
-    S_d_gr = [(g.timings, g.amplitudes) for g in self.S_gradients]    
+    M_d_gr = [(g.timings.m, g.amplitudes.m) for g in self.M_gradients]
+    P_d_gr = [(g.timings.m, g.amplitudes.m) for g in self.P_gradients]
+    S_d_gr = [(g.timings.m, g.amplitudes.m) for g in self.S_gradients]    
 
     # Get (t_min, t_ref, t_max) for each rf pulse
     rf_d = []
@@ -302,7 +303,7 @@ class SequenceBlock:
     if MPI_rank == 0:
       # Plot RF pulses and MR gradients
       titles = ['RF', 'M', 'P', 'S']
-      objects = self._discrete_gradients()
+      objects = self._discrete_objects()
 
       fig, ax = plt.subplots(4, 1)
       for i, obj in enumerate(objects):
