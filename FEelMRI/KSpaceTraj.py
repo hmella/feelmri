@@ -147,8 +147,8 @@ class CartesianStack(Trajectory):
 
       # Build shots locations
       for ph in range(self.ph_samples):
-        self.shots[ph // self.lines_per_shot][ph % self.lines_per_shot] = ph
-        # self.shots[ph % self.nb_shots][ph // self.nb_shots] = ph
+        # self.shots[ph // self.lines_per_shot][ph % self.lines_per_shot] = ph
+        self.shots[ph % self.nb_shots][ph // self.nb_shots] = ph
 
       # kspace times and locations
       t = np.zeros([self.ro_samples, self.ph_samples, self.slices], dtype=self.dtype)
