@@ -116,7 +116,7 @@ class FEMPhantom:
     else:
       local_elems = self.elements
       local_nodes = self.nodes
-      membership = np.zeros(self.elements.shape[0], dtype=int)
+      membership = [0,] * self.elements.shape[0]
 
     # Debugging info
     print("Process {:d} has {:d} elements and {:d} nodes".format(MPI_rank, len(local_elems), local_nodes.shape[0]))
@@ -126,7 +126,7 @@ class FEMPhantom:
     self.local_nodes = local_nodes
 
     # Add mesh partition 
-    self.partitioning = {'partitioning': membership.reshape(-1, 1)}
+    self.partitioning = {'partitioning': np.array(membership).reshape(-1, 1)}
 
   def create_submesh(self, markers, refine=False, element_size=0.01):
     # Get element indexes where profile is non-zero (given a tolerance)
