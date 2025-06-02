@@ -6,7 +6,6 @@ from pathlib import Path
 import numpy as np
 from pint import Quantity as Q_
 
-from FEelMRI.IO import XDMFFile
 from FEelMRI.KSpaceTraj import CartesianStack, Gradient
 from FEelMRI.Math import Rx, Ry, Rz
 from FEelMRI.MPIUtilities import MPI_print, MPI_rank, gather_data
@@ -89,20 +88,20 @@ if __name__ == '__main__':
       G_tag = Gradient(scanner=scanner, t_ref=rf1.t_ref + rf1.dur2, axis=i)
       G_tag.match_area(Q_(parameters.ke/scanner.gamma.m_as('1/mT/ms'), 'mT*ms/m'))
 
-      if i==0:
-        rf2 = RF(scanner=scanner, shape='hard', dur=Q_(0.2, 'ms'), flip_angle=Q_(np.deg2rad(90),'rad'), t_ref=G_tag.t_ref + G_tag.dur + rf1.t_ref + rf1.dur2)
-      else:
-        rf2 = RF(scanner=scanner, shape='hard', dur=Q_(0.2, 'ms'), flip_angle=Q_(np.deg2rad(-90),'rad'), t_ref=G_tag.t_ref + G_tag.dur + rf1.t_ref + rf1.dur2)
+      rf2 = RF(scanner=scanner, shape='hard', dur=Q_(0.2, 'ms'), flip_angle=Q_((-1)**i*np.deg2rad(90),'rad'), t_ref=G_tag.t_ref + G_tag.dur + rf1.t_ref + rf1.dur2)
 
       prep = SequenceBlock(gradients=[G_tag], rf_pulses=[rf1, rf2], dt_rf=Q_(1e-2, 'ms'), dt_gr=Q_(1e-2, 'ms'), dt=Q_(1, 'ms'))
 
       # Imaging block
+      sp.rf.update_reference(rf2.t_ref + rf2.dur2 + sp.rf.dur1 + Q_(0.5, 'ms'))
+      sp.dephasing.update_reference(sp.rf.t_ref - (sp.dephasing.slope + 0.5*sp.dephasing.lenc))
+      sp.rephasing.update_reference(sp.dephasing.t_ref + sp.dephasing.dur)
       imaging = SequenceBlock(gradients=[sp.dephasing, sp.rephasing], rf_pulses=[sp.rf], dt_rf=Q_(1e-2, 'ms'), dt_gr=Q_(1e-2, 'ms'), dt=Q_(1, 'ms'))
 
       # Create sequence object
-      seq = Sequence(prepulse=prep, blocks=[imaging], dt_prep=Q_(2, 'ms'))
+      seq = Sequence(prepulse=prep, blocks=[imaging], dt_prep=Q_(0, 'ms'))
       seq.repeat_blocks(nb_times=phantom.Nfr, dt_blocks=Q_(parameters.TimeSpacing, 's'))
-      # seq.plot()
+      seq.plot()
 
       # Bloch solver
       solver = BlochSolver(seq, phantom, scanner=scanner, M0=1e+9, T1=Q_(parameters.T1, 's'), T2=Q_(parameters.T2star, 's'), delta_B=delta_B0.reshape((-1, 1)))
@@ -141,7 +140,7 @@ if __name__ == '__main__':
     LOC=LOC, 
     receiver_bw=Q_(parameters.r_BW,'Hz'), 
     plot_seq=False)
-  # traj.plot_trajectory()
+  traj.plot_trajectory()
   print('Echo time: {:.2f} ms'.format(traj.echo_time.m_as('ms')))
 
   # kspace array
