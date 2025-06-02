@@ -193,7 +193,7 @@ class CartesianStack(Trajectory):
         ax[0].set_xlabel('$k_x ~(1/m)$')
         ax[0].set_ylabel('$k_y ~(1/m)$')
 
-        im = ax[1].scatter(self.points[0][:,:,0],self.points[1][:,:,0],c=self.times,s=2.5,cmap='turbo')
+        im = ax[1].scatter(self.points[0][:,:,0], self.points[1][:,:,0], c=self.times.m_as('ms'), s=2.5, cmap='turbo')
         ax[1].set_xlabel('$k_x ~(1/m)$')
         ax[1].set_yticklabels([])
         fig.tight_layout()
