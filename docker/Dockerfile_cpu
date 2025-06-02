@@ -1,7 +1,10 @@
 # Download base image ubuntu 18.04
-FROM ubuntu:22.04 as base
+FROM ubuntu:22.04 AS base
 ARG DEBIAN_FRONTEND=noninteractive
-MAINTAINER Hernan Mella <hernan.mella@pucv.cl>
+LABEL org.opencontainers.image.authors="hernan.mella@pucv.cl"
+
+# Set environment variable to allow matplotlib to run in a docker container
+ENV MPLCONFIGDIR="./tmp/matplotlib"
 
 # Create new user
 ARG UID=1000
@@ -45,3 +48,6 @@ ENV OMPI_MCA_btl_vader_single_copy_mechanism=none
 # Change default user
 USER FEelMRI
 WORKDIR /home/FEelMRI
+
+# To allow matplotlib to run in a docker container
+RUN export 
