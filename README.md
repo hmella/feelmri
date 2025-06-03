@@ -1,17 +1,22 @@
-# FEelMRI
 
-FEelMRI is an open source library for the generation of synthetic Magnetic Resonance images from Finite Elements simulations.
+<!-- <p align="center"> -->
+  <img height="150" src="gifs/logo.png" alt="color picker" />
+<!-- </p> -->
 
-<img width="480" height="216" src="gifs/spamm.gif" alt="color picker" /> <img width="287" height="216" src="gifs/aorta.gif" alt="color picker" />
+**FEelMRI** is an open-source library for generating synthetic magnetic resonance images from finite-element (FE) simulations. The library is designed to handle complex phenomena whose behavior is described by partial differential equations and approximated using FEM. **FEelMRI** supports FE meshes with arbitrary cell geometries and simulations performed in any discrete function space.
+
+<p align="center">
+  <img height="216" src="gifs/spamm.gif" alt="color picker" /> <img height="216" src="gifs/aorta.gif" alt="color picker" />
+</p>
 
 ## Installation instructions
-The first step to install the library is to clone the repository and navigate to the ```FEelMRI/``` folder:
+To install the library, first clone the repository and navigate to the ```FEelMRI/``` folder:
 ```bash
 git clone https://github.com/hernanmella/FEelMRI && cd FEelMRI/
 ```
 
 ### Dependencies
-```FEelMRI``` dependencies can be installed through the ```install_dependencies.sh``` script. To do this, you should be able to run the script through:
+Dependencies can be installed via the ```install_dependencies.sh``` script. You can run:
 ```bash
 source install_dependencies.sh  # be careful with the sudo commands inside this script
 ```
@@ -20,28 +25,36 @@ or
 chmod a+x install_dependencies.sh && ./install_dependencies.sh
 ```
 
-### Installing the library
-To install ```FEelMRI``` simply run:
+### Installing FEelMRI
+To install the library, run:
 ```bash
-pip3 install .  # install
+pip3 install .
 ```
-You might need to run this with ```sudo``` although not recommended. To avoid this, add the ```--user``` flag.
+You may need to prepend ```sudo```, though this is not recommended. To install without ```sudo```, add the ```--user``` flag:
+```bash
+pip3 install . --user
+```
 
 
 ### Docker images
-To avoid compiling the source code directly on your machine and allow interoperability, two ```Dockerfiles``` are provided inside the ```docker/``` folder: one for CPU parallelization and other for GPU parallelization using CUDA. To build any of the docker images, run the following instruction in the terminal:
+Two Dockerfiles are provided in the ```docker/``` folder: one for CPU parallelization and one for GPU parallelization using CUDA. To build either image, run:
 ```bash
 docker build --build-arg UID=$(id -u) --build-arg GID=$(id -g) . -f docker/Dockerfile_foo -t image_name
 ```
-where ```foo``` can be either ```cpu``` or ```gpu```, and ```image_name``` denotes the tag of yout image. The ```--build-arg UID=$(id -u)``` and ```--build-arg GID=$(id -g)``` arguments are used to tell Docker who owns the users and groups inside the image and avoid running the containers with inadequate permissions.
+Here, ```foo``` can be either ```cpu``` or ```gpu```, and image_name will be the tag for your image. The ```--build-arg UID=$(id -u)``` and ```--build-arg GID=$(id -g)``` arguments ensure that files created inside the container are owned by your user, avoiding permission issues.
 
-Once the building process has finished, run the following to start a FEelMRI Docker container:
-```bash
-docker run --name container_name --shm-size 256m -ti -v /path/to/host/folder:/home/FEelMRI/ image_name
-```
+#### Starting a FEelMRI Docker Container
+* **CPU container**:
+  ```bash
+  docker run --name container_name --shm-size 256m -ti -v $(pwd):/home/FEelMRI/ image_name
+  ```
+* **GPU container**:  
+  ```bash
+  docker run --name container_name  --runtime=nvidia --gpus all --shm-size 256m -ti -v $(pwd):/home/FEelMRI/ image_name
+  ```
 
 #### Allowing plots inside containers
-To allow plotting inside docker containers, run the following:
+To enable plotting within Docker containers, run (in place of the above `docker run` commands):
 ```bash
 docker run -it \
     --name container_name \
