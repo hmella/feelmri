@@ -41,7 +41,7 @@ Two Dockerfiles are provided in the ```docker/``` folder: one for CPU paralleliz
 ```bash
 docker build --build-arg UID=$(id -u) --build-arg GID=$(id -g) . -f docker/Dockerfile_foo -t image_name
 ```
-Here, ```foo``` can be either ```cpu``` or ```gpu```, and image_name will be the tag for your image. The ```--build-arg UID=$(id -u)``` and ```--build-arg GID=$(id -g)``` arguments ensure that files created inside the container are owned by your user, avoiding permission issues.
+Here, ```foo``` can be either ```cpu``` or ```gpu```, and ```image_name``` will be the tag for your image. The ```--build-arg UID=$(id -u)``` and ```--build-arg GID=$(id -g)``` arguments ensure that files created inside the container are owned by your user, avoiding permission issues.
 
 #### Starting a FEelMRI Docker Container
 * **CPU container**:
@@ -67,19 +67,3 @@ docker run -it \
     --volume="/tmp/.X11-unix:/tmp/.X11-unix:rw" \
     -v $(pwd):/home/FEelMRI/ image_name
 ```
-
-<!-- If you wish to run the container with plotting support, i.e., allowing to the container to show images, first run:
-```bash
-sudo apt-get install x11-xserver-utils && xhost + -->
-<!-- ```
-
-## Examples
-
-and run from a terminal with
-```bash
-mpirun -n nb_proc python3 foo.py
-```
-Resulting images look like this:
-| CSPAMM image with epi-like artifacts  | CSPAMM kspace with epi-like artifacts |
-| ------------- | ------------- |
-| ![CSPAMM image](/screenshots/Figure_1.png "CSPAMM image with epi-like artifacts")  | ![CSPAMM image](/screenshots/Figure_2.png "CSPAMM image with epi-like artifacts")  | -->
