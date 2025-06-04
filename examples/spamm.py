@@ -1,4 +1,6 @@
 import os
+
+os.environ["OPENBLAS_NUM_THREADS"] = "1" # export OPENBLAS_NUM_THREADS=1
 import pickle
 import time
 from pathlib import Path
@@ -18,7 +20,6 @@ from FEelMRI.Phantom import FEMPhantom
 from FEelMRI.Plotter import MRIPlotter
 from FEelMRI.Recon import CartesianRecon
 from FEelMRI.Tagging import SPAMM
-
 
 if __name__ == '__main__':
 
@@ -46,7 +47,7 @@ if __name__ == '__main__':
   midpoints = np.array([np.mean(phantom.nodes[e,:], axis=0) for e in phantom.elements])
   condition = (np.abs(midpoints[:,2]) <= 0.6*parameters.FOV[2]) > 1e-3
   markers = np.where(condition)[0]
-  phantom.create_submesh(markers, refine=False, element_size=0.0025)
+  phantom.create_submesh(markers, refine=False, element_size=0.003)
 
   # Distribute the mesh to all MPI processes
   phantom.distribute_mesh()
@@ -65,8 +66,9 @@ if __name__ == '__main__':
   pod_trajectory = PODTrajectory(time_array=times,
                                  data=trajectory,
                                  n_modes=5,
-                                 taylor_order=10)
-
+                                 taylor_order=10,
+                                 is_periodic=True)
+  
   # Create scanner object defining the gradient strength, slew rate and giromagnetic ratio
   scanner = Scanner(gradient_strength=Q_(parameters.G_max,'mT/m'), gradient_slew_rate=Q_(parameters.G_sr,'mT/m/ms'))
 
@@ -134,18 +136,6 @@ if __name__ == '__main__':
   # Slice profile
   profile = Mxy[:, -1]
 
-  # # Export SPAMM magnetization to XDMF file
-  # testfile = XDMFFile('test_new_{:d}.xdmf'.format(MPI_rank), nodes=phantom.local_nodes, elements={'tetra': phantom.local_elements})
-  # for i in range(Mxy.shape[1]):
-  #   testfile.write(pointData={'Mx': np.real(Mxy[:,i]), 'My': np.imag(Mxy[:,i]), 'Mz': Mz[:,i]}, time=i)
-  # testfile.close()
-
-  # # Path to export the generated data
-  # export_path = Path('MRImages/{:s}_V{:.0f}.pkl'.format(parameters.Sequence, 100.0*parameters.VENC))
-
-  # # Make sure the directory exist
-  # os.makedirs(str(export_path.parent), exist_ok=True)
-
   # Generate kspace trajectory
   traj = CartesianStack(FOV=Q_(parameters.FOV,'m'),
     t_start=imaging.time_extent[1] - sp.rf.t_ref,
@@ -184,11 +174,12 @@ if __name__ == '__main__':
     M_spamm = np.vstack((SPAMM_mag[0][:, fr+2], SPAMM_mag[1][:, fr+2])).T
 
     # Update reference time of POD trajectory
-    pod_trajectory.reference_time = fr * parameters.TimeSpacing
+    pod_trajectory.timeshift = fr * parameters.TimeSpacing
 
     # Generate 4D flow image
     MPI_print('Generating frame {:d}'.format(fr))
-    K[:,:,:,:,fr] = SPAMM(MPI_rank, M, traj.points, traj.times.m_as('s'), phantom.local_nodes + submesh_displacement, M_spamm, delta_omega0, T2star, profile)
+    # K[:,:,:,:,fr] = SPAMM(MPI_rank, M, traj.points, traj.times.m_as('s'), phantom.local_nodes + submesh_displacement, M_spamm, delta_omega0, T2star, profile)
+    K[:,:,:,:,fr] = SPAMM(MPI_rank, M, traj.points, traj.times.m_as('s'), phantom.local_nodes, M_spamm, delta_omega0, T2star, profile, pod_trajectory)
 
   # Store elapsed time
   spamm_time = time.time() - t0
@@ -216,7 +207,7 @@ if __name__ == '__main__':
     my = np.abs(I[...,1,:])
     mxy = np.abs(I[...,0,:] - I[...,1,:])
     plotter = MRIPlotter(images=[mx, my, mxy], title=['SPAMM X', 'SPAMM Y', 'O-CSPAMM'], FOV=parameters.FOV)
-    # plotter.export_images('animation_I4/')
+    plotter.export_images('animation_I{:d}/'.format(parameters.LinesPerShot))
     plotter.show()
 
     # mx = np.abs(K[...,0,:])
