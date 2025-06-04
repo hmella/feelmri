@@ -277,3 +277,31 @@ class FEMPhantom:
           warnings.warn('Lumped mass matrix not available. Please install scipy.')
 
     return M
+  
+  def mass_matrix_2(self, local_nodes, lumped=False, use_submesh=False, quadrature_order=2):
+    ''' Assemble mass matrix for integrals '''
+    # Create finite element and quadrature rule according to the mesh type
+    cell_type = self.all_elements[0].type
+    fe = FiniteElement(family=family_dict[cell_type], 
+                       cell_type=element_dict[cell_type], 
+                       degree=degree_dict[cell_type], 
+                       variant='equispaced')
+    qr = QuadratureRule(cell_type=element_dict[cell_type], 
+                        order=quadrature_order, 
+                        rule='default')
+
+    # Assemble mass matrix
+    M = MassAssemble(self.local_elements, local_nodes, fe, qr)
+
+    # Make matrix lumped if requested
+    if lumped:
+      try:
+        from scipy.sparse import lil_matrix
+        diag = M.sum(axis=1)
+        M = lil_matrix(M.shape, dtype=M.dtype)
+        M.setdiag(diag)
+      except ImportError:
+        if MPI_rank == 0:
+          warnings.warn('Lumped mass matrix not available. Please install scipy.')
+
+    return M

@@ -1,7 +1,12 @@
-# This piece of code was inspired by CMRSim toolbox
-# TODO: add additional information about the original authors and license
+import time
+from pathlib import Path
 
 import numpy as np
+
+from FEelMRI.Math import Rx, Ry, Rz
+from FEelMRI.Parameters import ParameterHandler
+from FEelMRI.Phantom import FEMPhantom
+from FEelMRI.IO import XDMFFile
 
 class PODTrajectory:
   def __init__(self, time_array: np.ndarray, data: np.ndarray, n_modes: int = 5, taylor_order: int = 10):
@@ -11,7 +16,6 @@ class PODTrajectory:
       self.taylor_order = taylor_order
       self.modes, self.weights = self.calculate_pod(remove_mean=False)
       self.taylor_coefficients = self.fit()
-      self.reference_time = 0.0
 
   def __call__(self, t: float):
       """ Evaluates the trajectory at time t using the POD modes and the Taylor coefficients.
@@ -19,8 +23,7 @@ class PODTrajectory:
       :param t: time at which to evaluate the trajectory
       :return: evaluated trajectory at time t
       """
-      time = self.reference_time + t
-      return self._evaluate_trajectory(time)
+      return self._evaluate_trajectory(t)
 
   def calculate_pod(self, remove_mean: bool = False):
     """Computes the proper orthogonal decomposition of data snapshots at points defined in
@@ -66,6 +69,10 @@ class PODTrajectory:
     """ Fits a Taylor polynomial of order self.order to the weights of the POD modes
     """
     flat_coefficients = np.polynomial.polynomial.polyfit(self.time_array, self.weights, deg=self.taylor_order)
+    # coefficients = np.swapaxes(
+    #     flat_coefficients.reshape(self._int_order + 1, n_particles, n_dims),
+    #     0, 1)
+    # self.optimal_parameters.assign(coefficients.astype(np.float32))
     return flat_coefficients
 
   def _evaluate_weights(self, t: float):
@@ -89,5 +96,54 @@ class PODTrajectory:
     :return: evaluated trajectory at time t
     """
     weights = self._evaluate_weights(t)[np.newaxis, np.newaxis, :]
-
+    # # Reshape weights to match the shape of modes
+    # weights = weights.reshape(-1, self.n_modes)
+    # # Evaluate trajectory
     return np.sum(self.modes * weights, axis=-1)
+
+
+if __name__ == '__main__':
+
+  # Import imaging parameters
+  parameters = ParameterHandler('parameters/aorta_volume.yaml')
+
+  # Imaging orientation paramters
+  theta_x = np.deg2rad(parameters.theta_x)
+  theta_y = np.deg2rad(parameters.theta_y)
+  theta_z = np.deg2rad(parameters.theta_z)
+  MPS_ori = Rz(theta_z)@Rx(theta_x)@Ry(theta_y)
+  LOC = parameters.LOC
+
+
+  # Create FEM phantom object
+  phantom = FEMPhantom(path='phantoms/aorta_CFD.xdmf', scale_factor=1.0)
+
+  # Translate phantom to obtain the desired slice location
+  phantom.orient(MPS_ori, LOC)
+
+  # # Distribute phantom across MPI ranks
+  # phantom.distribute_mesh()
+
+  # Iterate over cardiac phases
+  t0 = time.time()
+  trajectory = np.zeros([phantom.nodes.shape[0], phantom.nodes.shape[1],phantom.Nfr], dtype=np.float32)
+  for fr in range(phantom.Nfr):
+    # Read displacement data in frame fr
+    phantom.read_data(fr)
+    displacement = phantom.point_data['velocity'] @ MPS_ori
+    trajectory[..., fr] = displacement
+
+  # Define POD object
+  times = np.linspace(0, (phantom.Nfr-1)*parameters.TimeSpacing, phantom.Nfr)
+  pod_trajectory = PODTrajectory(time_array=times,
+                                 data=trajectory,
+                                 n_modes=10,
+                                 taylor_order=10)
+
+  # Test class
+  times = np.linspace(0, (phantom.Nfr-1)*parameters.TimeSpacing, 100)
+  file = XDMFFile('test_velocity.xdmf', nodes=phantom.nodes, elements=phantom.all_elements)
+  for i, t in enumerate(times):
+    ut = pod_trajectory(t)
+    file.write(pointData={'velocity': ut}, time=t)
+  file.close()
