@@ -2,16 +2,30 @@
 # TODO: add additional information about the original authors and license
 
 import numpy as np
+from FEelMRI.MPIUtilities import MPI_print
+
 
 class PODTrajectory:
-  def __init__(self, time_array: np.ndarray, data: np.ndarray, n_modes: int = 5, taylor_order: int = 10):
+  def __init__(self, time_array: np.ndarray, data: np.ndarray, n_modes: int = 5, taylor_order: int = 10, is_periodic: bool = False):
       self.time_array = time_array
       self.data = data
       self.n_modes = n_modes
       self.taylor_order = taylor_order
       self.modes, self.weights = self.calculate_pod(remove_mean=False)
       self.taylor_coefficients = self.fit()
-      self.reference_time = 0.0
+      self.timeshift = 0.0
+      self.is_periodic = is_periodic
+
+  def __add__(self, other):
+      """ Combines two PODTrajectory objects by summing their modes and weights.
+      
+      :param other: another PODTrajectory object
+      :return: new PODTrajectory object with combined modes and weights
+      """
+      if not isinstance(other, PODTrajectory):
+          raise TypeError("Can only add another PODTrajectory object.")
+      
+      return PODSum(self, other)
 
   def __call__(self, t: float):
       """ Evaluates the trajectory at time t using the POD modes and the Taylor coefficients.
@@ -19,8 +33,7 @@ class PODTrajectory:
       :param t: time at which to evaluate the trajectory
       :return: evaluated trajectory at time t
       """
-      time = self.reference_time + t
-      return self._evaluate_trajectory(time)
+      return self._evaluate_trajectory(t)
 
   def calculate_pod(self, remove_mean: bool = False):
     """Computes the proper orthogonal decomposition of data snapshots at points defined in
@@ -88,6 +101,25 @@ class PODTrajectory:
     :param t: time at which to evaluate the trajectory
     :return: evaluated trajectory at time t
     """
+    t = t + self.timeshift  # Apply time shift if necessary
+    if self.is_periodic:
+      t = t % self.time_array[-1]
+
+    # Evaluate the weights at time t
     weights = self._evaluate_weights(t)[np.newaxis, np.newaxis, :]
 
     return np.sum(self.modes * weights, axis=-1)
+  
+
+class PODSum:
+  def __init__(self, pod1: PODTrajectory, pod2: PODTrajectory):
+    self.pod1 = pod1
+    self.pod2 = pod2
+
+  def __call__(self, t: float):
+    """ Evaluates the sum of all PODTrajectory objects at time t.
+
+    :param t: time at which to evaluate the sum of trajectories
+    :return: sum of evaluated trajectories at time t
+    """
+    return self.pod1(t) + self.pod2(t)
