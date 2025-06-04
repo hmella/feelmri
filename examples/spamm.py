@@ -8,6 +8,7 @@ from pint import Quantity as Q_
 
 from FEelMRI.KSpaceTraj import CartesianStack, Gradient
 from FEelMRI.Math import Rx, Ry, Rz
+from FEelMRI.Motion import PODTrajectory
 from FEelMRI.MPIUtilities import MPI_print, MPI_rank, gather_data
 from FEelMRI.MRImaging import PositionEncoding, SliceProfile
 from FEelMRI.MRObjects import (RF, BlochSolver, Gradient, Scanner, Sequence,
@@ -45,10 +46,26 @@ if __name__ == '__main__':
   midpoints = np.array([np.mean(phantom.nodes[e,:], axis=0) for e in phantom.elements])
   condition = (np.abs(midpoints[:,2]) <= 0.6*parameters.FOV[2]) > 1e-3
   markers = np.where(condition)[0]
-  phantom.create_submesh(markers, refine=False, element_size=0.0012)
+  phantom.create_submesh(markers, refine=False, element_size=0.0025)
 
   # Distribute the mesh to all MPI processes
   phantom.distribute_mesh()
+
+  # Create POD trajectory object
+  trajectory = np.zeros([phantom.local_nodes.shape[0], phantom.local_nodes.shape[1], phantom.Nfr], dtype=np.float32)
+  for fr in range(phantom.Nfr):
+    # Read displacement data in frame fr
+    phantom.read_data(fr)
+    displacement = phantom.point_data['displacement'] @ MPS_ori
+    submesh_displacement = phantom.interpolate_to_submesh(displacement)
+    trajectory[..., fr] = submesh_displacement
+
+  # Define POD object
+  times = np.linspace(0, (phantom.Nfr-1)*parameters.TimeSpacing, phantom.Nfr)
+  pod_trajectory = PODTrajectory(time_array=times,
+                                 data=trajectory,
+                                 n_modes=5,
+                                 taylor_order=10)
 
   # Create scanner object defining the gradient strength, slew rate and giromagnetic ratio
   scanner = Scanner(gradient_strength=Q_(parameters.G_max,'mT/m'), gradient_slew_rate=Q_(parameters.G_sr,'mT/m/ms'))
@@ -73,7 +90,6 @@ if __name__ == '__main__':
     bandwidth='maximum',
     refocusing_area_frac=0.7758)
   # sp.optimize(frac_start=0.7, frac_end=0.8, N=100, profile_samples=100)
-
 
   # SPAMM magnetization
   SPAMM_mag = [None,]*len(enc.directions)
@@ -101,7 +117,7 @@ if __name__ == '__main__':
       # Create sequence object
       seq = Sequence(prepulse=prep, blocks=[imaging], dt_prep=Q_(0, 'ms'))
       seq.repeat_blocks(nb_times=phantom.Nfr, dt_blocks=Q_(parameters.TimeSpacing, 's'))
-      seq.plot()
+      # seq.plot()
 
       # Bloch solver
       solver = BlochSolver(seq, phantom, scanner=scanner, M0=1e+9, T1=Q_(parameters.T1, 's'), T2=Q_(parameters.T2star, 's'), delta_B=delta_B0.reshape((-1, 1)))
@@ -162,10 +178,13 @@ if __name__ == '__main__':
     submesh_displacement = phantom.interpolate_to_submesh(displacement)
 
     # Assemble mass matrix for integrals (just once)
-    M = phantom.mass_matrix(lumped=True, quadrature_order=2)
+    M = phantom.mass_matrix_2(phantom.local_nodes + submesh_displacement, lumped=True, quadrature_order=2)
 
     # SPAMM magnetization for this frame
     M_spamm = np.vstack((SPAMM_mag[0][:, fr+2], SPAMM_mag[1][:, fr+2])).T
+
+    # Update reference time of POD trajectory
+    pod_trajectory.reference_time = fr * parameters.TimeSpacing
 
     # Generate 4D flow image
     MPI_print('Generating frame {:d}'.format(fr))
@@ -197,7 +216,7 @@ if __name__ == '__main__':
     my = np.abs(I[...,1,:])
     mxy = np.abs(I[...,0,:] - I[...,1,:])
     plotter = MRIPlotter(images=[mx, my, mxy], title=['SPAMM X', 'SPAMM Y', 'O-CSPAMM'], FOV=parameters.FOV)
-    # plotter.export_images('animation_I/')
+    # plotter.export_images('animation_I4/')
     plotter.show()
 
     # mx = np.abs(K[...,0,:])
