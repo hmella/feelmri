@@ -10,8 +10,7 @@ Tensor<std::complex<T>, 4> SPAMM(
   const Matrix<T, Dynamic, Dynamic> &r0,
   const Matrix<std::complex<T>, Dynamic, Dynamic> &M_spamm,
   const Vector<T, Dynamic> &phi_dB0,
-  const Vector<T, Dynamic> &T2,
-  const Vector<std::complex<T>, Dynamic> &profile
+  const Vector<T, Dynamic> &T2
   ){
 
     // Nb of measurements in the readout direction
@@ -94,7 +93,6 @@ Tensor<std::complex<T>, 4> SPAMM(
   const Matrix<std::complex<T>, Dynamic, Dynamic> &M_spamm,
   const Vector<T, Dynamic> &phi_dB0,
   const Vector<T, Dynamic> &T2,
-  const Vector<std::complex<T>, Dynamic> &profile,
   const py::object &pod_trajectory
   ){
 
