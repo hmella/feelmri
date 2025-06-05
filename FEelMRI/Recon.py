@@ -6,6 +6,7 @@ from skimage.transform import resize
 
 from FEelMRI.Filters import Riesz, Tukey
 from FEelMRI.Math import ktoi
+from FEelMRI.MPIUtilities import MPI_print
 from FEelMRI.KSpaceTraj import CartesianStack, RadialStack, SpiralStack
 
 
@@ -69,10 +70,8 @@ def CartesianRecon(K, trajectory, filter={'type': 'Tukey', 'width': 0.9, 'lift':
   else:
       ind1 = (enc_Nx - rec_Nx) // 2 #+ (trajectory.res[0]-1 % 2 != 0)
       ind2 = (enc_Nx - rec_Nx) // 2 + rec_Nx #+ (trajectory.res[0]-1 % 2 != 0)
-      print(ind1)
-      print(ind2)
       I = I[ind1:ind2,...]
-  print("Image shape after correcting oversampling: ", I.shape)
+  MPI_print("Image shape after correcting oversampling: ", I.shape)
 
   return I
 
