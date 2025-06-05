@@ -30,7 +30,13 @@ family_dict = {
 
 
 class FEMPhantom:
-  def __init__(self, path='', scale_factor=1.0, displacement_label='displacement', velocity_label='velocity', acceleration_label='acceleration', pressure_label='pressure', dtype=np.float32):
+  def __init__(self, path: str = '', 
+               scale_factor: float = 1.0, 
+               displacement_label: str = 'displacement', 
+               velocity_label: str = 'velocity', 
+               acceleration_label: str = 'acceleration',
+               pressure_label:str = 'pressure', 
+               dtype: np.dtype = np.float32):
     self.path = path
     self.scale_factor = scale_factor
     self.displacement_label = displacement_label
@@ -39,14 +45,13 @@ class FEMPhantom:
     self.pressure_label = pressure_label
     self.dtype = dtype
     mesh, self.reader, self.Nfr = self._prepare_reader()
-    self.elements = mesh['elements']
-    self.all_elements = mesh['all_elements']
-    self.nodes = mesh['nodes']
-    self.local_elements = mesh['local_elements']
-    self.local_nodes = mesh['local_nodes']
+    self.global_elements = mesh['elements']
+    self.all_global_elements = mesh['all_elements']
+    self.global_nodes = mesh['nodes']
     self.bbox = self.bounding_box()
     self.point_data = None
     self.cell_data = None
+    self.distribute_mesh()
 
   def _prepare_reader(self):
     try:
@@ -82,62 +87,40 @@ class FEMPhantom:
     # Mesh dictionary
     mesh = {'nodes': nodes, 
             'elements': elems, 
-            'all_elements': all_elems, 
-            'local_elements': elems,
-            'local_nodes': nodes}
+            'all_elements': all_elems}
 
     return mesh, reader, Nfr
 
-  def distribute_mesh(self):
-    # Mesh partitioning
-    if MPI_size > 1:
-
-      # Mesh partitioning
-      connectivity = self.elements.tolist()
-      num_parts    = MPI_size
-      tpwgts = [1.0/MPI_size] * MPI_size  # Equal weights for each partition
-      n_cuts, membership, vert_part = pymetis.part_mesh(num_parts, connectivity, None, tpwgts, pymetis.GType.DUAL)
-
-      # Local elements
-      local_elements_idx = np.argwhere(np.array(membership) == MPI_rank).ravel()
-      local_elems = self.elements[local_elements_idx, :]
-
-      # Local nodes
-      local_nodes_idx = np.unique(local_elems)
-      local_nodes = self.nodes[local_nodes_idx, :]
-
-      # Create a mapping from old node indices to new indices
-      mapped_nodes = -np.ones(self.nodes.shape[0], dtype=int)
-      mapped_nodes[local_nodes_idx] = np.arange(len(local_nodes_idx))
-
-      # Remap the element node indices to the new submesh node indices
-      local_elems = mapped_nodes[local_elems]
-
-    else:
-      local_elems = self.elements
-      local_nodes = self.nodes
-      membership = [0,] * self.elements.shape[0]
-
-    # Debugging info
-    print("Process {:d} has {:d} elements and {:d} nodes".format(MPI_rank, len(local_elems), local_nodes.shape[0]))
-
-    # Update mesh parameters
-    self.local_elements = local_elems
-    self.local_nodes = local_nodes
-
-    # Add mesh partition 
-    self.partitioning = {'partitioning': np.array(membership).reshape(-1, 1)}
 
   def create_submesh(self, markers, refine=False, element_size=0.01):
+    '''
+    Create a submesh from the global mesh based on the markers provided.
+    Parameters
+    ----------
+    markers : np.ndarray
+        A boolean array indicating which elements to include in the submesh.
+    refine : bool, optional
+        If True, the submesh will be refined. Default is False.
+    element_size : float, optional
+        The target size of the elements in the refined mesh. Default is 0.01.
+    Returns
+    -------
+    None 
+
+    Notes
+    -----   
+    This method modifies the global mesh to create a submesh based on the markers provided (this means that the original mesh is stored in ).
+    '''
+
     # Get element indexes where profile is non-zero (given a tolerance)
-    submesh_elems = self.elements[markers, :]
+    submesh_elems = self.global_elements[markers, :]
 
     # Get nodes contained in profile elements 
     submesh_nodes_map = np.sort(np.unique(submesh_elems))
-    submesh_nodes = self.nodes[submesh_nodes_map, :]
+    submesh_nodes = self.global_nodes[submesh_nodes_map, :]
 
     # Create a mapping from old node indices to new indices
-    mapped_nodes = -np.ones(self.nodes.shape[0], dtype=int)
+    mapped_nodes = -np.ones(self.global_nodes.shape[0], dtype=int)
     mapped_nodes[submesh_nodes_map] = np.arange(len(submesh_nodes_map))
 
     # Remap the element node indices to the new submesh node indices
@@ -158,20 +141,69 @@ class FEMPhantom:
       MPI_print("[MeshRefinement] Number of elements after refining: {:d}".format(len(submesh_elems)))
       MPI_print("[MeshRefinement] Elapsed time for refinement: {:.2f} s".format(time.time()-t0))
 
+    # Backup original mesh
+    self.all_elements_ = self.all_global_elements
+    self.global_nodes_ = self.global_nodes
+    self.global_elements_ = self.global_elements
+
     # Update mesh parameters and backup original mesh
-    self.nodes_ = self.nodes.copy()
-    self.elements_ = self.elements.copy()
-    self.all_elements_ = self.all_elements.copy()
-    self.submesh_markers_ = markers
-    self.nodes = submesh_nodes
-    self.elements = submesh_elems
-    # self.all_elements = {self.all_elements_[0].type: submesh_elems}
-    self.submesh_nodes_map = submesh_nodes_map
+    self.global_nodes = submesh_nodes
+    self.global_elements = submesh_elems
+    self.mesh_to_submesh_nodes = submesh_nodes_map
+
+    # Distribute the submesh
+    self.distribute_mesh()
+
+
+  def distribute_mesh(self):
+    # Mesh partitioning
+    if MPI_size > 1:
+
+      # Mesh partitioning
+      connectivity = self.global_elements.tolist()
+      num_parts    = MPI_size
+      tpwgts = [1.0/MPI_size] * MPI_size  # Equal weights for each partition
+      n_cuts, membership, vert_part = pymetis.part_mesh(num_parts, connectivity, None, tpwgts, pymetis.GType.DUAL)
+
+      # Local elements
+      local_elements_idx = np.argwhere(np.array(membership) == MPI_rank).ravel()
+      local_elems = self.global_elements[local_elements_idx, :]
+
+      # Local nodes
+      local_nodes_idx = np.unique(local_elems)
+      local_nodes = self.global_nodes[local_nodes_idx, :]
+
+      # Create a mapping from old node indices to new indices
+      mapped_nodes = -np.ones(self.global_nodes.shape[0], dtype=int)
+      mapped_nodes[local_nodes_idx] = np.arange(len(local_nodes_idx))
+
+      # Remap the element node indices to the new submesh node indices
+      local_elems = mapped_nodes[local_elems]
+
+    else:
+      local_nodes = self.global_nodes
+      local_elems = self.global_elements
+      local_nodes_idx = np.arange(self.global_nodes.shape[0], dtype=int)
+      membership = [0,] * self.global_elements.shape[0]
+
+    # Debugging info
+    print("Process {:d} has {:d} elements and {:d} nodes".format(MPI_rank, len(local_elems), local_nodes.shape[0]))
+
+    # Update mesh parameters
+    self.local_elements = local_elems
+    self.local_nodes = local_nodes
+
+    # Add global to local mapping
+    self.global_to_local_nodes = local_nodes_idx
+
+    # Add mesh partition 
+    self.partitioning = {'partitioning': np.array(membership).reshape(-1, 1)}
+
 
   def bounding_box(self):
     ''' Calculate bounding box of the FEM geometry '''
-    bmin = np.min(self.nodes, axis=0)
-    bmax = np.max(self.nodes, axis=0)
+    bmin = np.min(self.global_nodes, axis=0)
+    bmax = np.max(self.global_nodes, axis=0)
     if MPI_rank == 0:
       print('Bounding box: ({:f},{:f},{:f}), ({:f},{:f},{:f})'.format(bmin[0],bmin[1],bmin[2],bmax[0],bmax[1],bmax[2]))
     return (bmin, bmax)
@@ -201,26 +233,30 @@ class FEMPhantom:
       self.point_data[self.pressure_label] *= 1.0
 
 
-  def interpolate_to_submesh(self, data, kernel='linear', neighbors=25):
+  def interpolate_to_submesh(self, data, local=True, kernel='linear', neighbors=25):
       """
       Interpolate a velocity field defined on the main mesh nodes to the submesh nodes using RBF.
 
-      Parameters:
-      - velocity_field: numpy.ndarray of shape (N, 3), velocity field on the main mesh nodes.
-      - kernel: str, type of RBF kernel to use ('linear', 'thin_plate_spline', 'cubic', etc.).
-      - epsilon: float, shape parameter for the RBF. If None, it will be estimated automatically.
-
-      Returns:
-      - submesh_velocity: numpy.ndarray of shape (M, 3), interpolated velocity field on the submesh nodes.
+      Parameters
+      ----------
+      data : np.ndarray
+          The data to interpolate, shape (N, M) where N is the number of nodes and M is the number of channels.
+      local : bool, optional
+          If True, the interpolation is done only on the local CPU nodes. If False, it uses the full mesh nodes.
+          Default is True.
+      kernel : str, optional
+          The kernel to use for the RBF interpolation. Default is 'linear'.
+      neighbors : int, optional
+          The number of nearest neighbors to use for the interpolation. Default is 25.
       """
       try:
-        self.nodes_
+        self.mesh_to_submesh_nodes
       except KeyError:
         raise ValueError("Submesh not created. Please create a submesh first using `create_submesh`.")
 
       # Main mesh nodes and submesh nodes
-      idx = self.submesh_nodes_map
-      mesh_nodes = self.nodes_[idx, :]
+      idx = self.mesh_to_submesh_nodes
+      mesh_nodes = self.global_nodes_[idx, :]
 
       # Stacked data
       if data.shape[1] > 0:
@@ -235,7 +271,10 @@ class FEMPhantom:
         self.submesh_interp = RBFInterpolator(mesh_nodes, data, neighbors=neighbors, kernel=kernel, degree=1)
 
       # Interpolate data
-      interp_data = self.submesh_interp(self.local_nodes)
+      if local:
+        interp_data = self.submesh_interp(self.local_nodes)
+      else:
+        interp_data = self.submesh_interp(self.global_nodes)
 
       return interp_data
 
@@ -247,7 +286,7 @@ class FEMPhantom:
     LOC = LOC.astype(self.dtype)
 
     # Translate and rotate
-    self.nodes = (self.nodes - LOC) @ MPS_ori
+    self.global_nodes = (self.global_nodes - LOC) @ MPS_ori
 
 
   def mass_matrix(self, lumped=False, use_submesh=False, quadrature_order=2):
@@ -281,7 +320,7 @@ class FEMPhantom:
   def mass_matrix_2(self, local_nodes, lumped=False, use_submesh=False, quadrature_order=2):
     ''' Assemble mass matrix for integrals '''
     # Create finite element and quadrature rule according to the mesh type
-    cell_type = self.all_elements[0].type
+    cell_type = self.all_elements_[0].type
     fe = FiniteElement(family=family_dict[cell_type], 
                        cell_type=element_dict[cell_type], 
                        degree=degree_dict[cell_type], 
