@@ -9,9 +9,15 @@ from FEelMRI.MPIUtilities import MPI_print
 
 
 class PODTrajectory:
-  def __init__(self, time_array: np.ndarray, data: np.ndarray, n_modes: int = 5, taylor_order: int = 10, is_periodic: bool = False):
+  def __init__(self, time_array: np.ndarray, 
+               data: np.ndarray,
+               global_to_local: np.ndarray = None,
+               n_modes: int = 5, 
+               taylor_order: int = 10, 
+               is_periodic: bool = False):
       self.time_array = time_array
       self.data = data
+      self.global_to_local = global_to_local
       self.n_modes = n_modes
       self.taylor_order = taylor_order
       self.modes, self.weights = self.calculate_pod(remove_mean=False)
@@ -33,7 +39,14 @@ class PODTrajectory:
       :param t: time at which to evaluate the trajectory
       :return: evaluated trajectory at time t
       """
-      return self._evaluate_trajectory(t)
+      if self.global_to_local is not None:
+        # If global_to_local mapping is provided, apply it to the modes
+        trajectory = self._evaluate_trajectory(t)[self.global_to_local, :]
+      else:
+        # If no mapping is provided, return the modes directly
+        trajectory = self._evaluate_trajectory(t)
+
+      return trajectory
 
   def calculate_pod(self, remove_mean: bool = False):
     """Computes the proper orthogonal decomposition of data snapshots at points defined in
