@@ -1,7 +1,10 @@
 # This piece of code was inspired by CMRSim toolbox
 # TODO: add additional information about the original authors and license
 
+from collections.abc import Callable
+
 import numpy as np
+
 from FEelMRI.MPIUtilities import MPI_print
 
 
@@ -21,10 +24,7 @@ class PODTrajectory:
       
       :param other: another PODTrajectory object
       :return: new PODTrajectory object with combined modes and weights
-      """
-      if not isinstance(other, PODTrajectory):
-          raise TypeError("Can only add another PODTrajectory object.")
-      
+      """      
       return PODSum(self, other)
 
   def __call__(self, t: float):
@@ -112,7 +112,7 @@ class PODTrajectory:
   
 
 class PODSum:
-  def __init__(self, pod1: PODTrajectory, pod2: PODTrajectory):
+  def __init__(self, pod1: PODTrajectory, pod2: Callable[[float], np.ndarray]):
     self.pod1 = pod1
     self.pod2 = pod2
 
