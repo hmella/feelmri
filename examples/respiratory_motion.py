@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 from pint import Quantity as Q_
 
+from FEelMRI.IO import XDMFFile
 from FEelMRI.KSpaceTraj import CartesianStack, Gradient
 from FEelMRI.Math import Rx, Ry, Rz
 from FEelMRI.Motion import PODTrajectory
@@ -62,25 +63,33 @@ if __name__ == '__main__':
     trajectory[..., fr] = submesh_displacement
 
   # Define POD object
-  times = np.linspace(0, (phantom.Nfr-1)*parameters.TimeSpacing, phantom.Nfr)
-  pod_trajectory = PODTrajectory(time_array=times,
+  pod_times = np.linspace(0, (phantom.Nfr-1)*parameters.TimeSpacing, phantom.Nfr)
+  pod_trajectory = PODTrajectory(time_array=pod_times,
                                  data=trajectory,
                                  n_modes=5,
                                  taylor_order=10,
                                  is_periodic=True)
   
   # Define respiratory motion object
-  def expr(t, T=3.0, A=0.01):
-    T_star = T*2
-    return A - A*np.cos(2.0*np.pi*t/T_star)**4
-  times = np.linspace(0, 3, 20)
-  direction = np.array([[0, 1, 0]]).reshape((1, 3, 1))
-  motion = expr(times).reshape((1, 1, -1)) * direction
-  resp_motion = PODTrajectory(time_array=times, 
-                              data=motion, 
-                              n_modes=10, 
-                              taylor_order=15,
-                              is_periodic=True)
+  T = 3.0   # period
+  A = 0.008 # amplitude
+  times = np.linspace(0, T, 100)
+  # def expr(t): return A*(1 - np.cos(2*np.pi*t/(2*T))**4)
+  def expr(t): 
+    return np.random.uniform(-0.5*A, 0.5*A, size=[1,]).reshape((1,1)) * np.array([[0, 1, 0]]).reshape((1, 3))
+
+  # import matplotlib.pyplot as plt
+  # if MPI_rank == 0:
+  #   plt.plot(times, expr(times))
+  #   plt.show()
+
+  # direction = np.array([[0, 1, 0]]).reshape((1, 3, 1))
+  # motion = expr(times).reshape((1, 1, -1)) * direction
+  # pod_resp_motion = PODTrajectory(time_array=times, 
+  #                             data=motion, 
+  #                             n_modes=10, 
+  #                             taylor_order=15,
+  #                             is_periodic=True)
 
   # Create scanner object defining the gradient strength, slew rate and giromagnetic ratio
   scanner = Scanner(gradient_strength=Q_(parameters.G_max,'mT/m'), gradient_slew_rate=Q_(parameters.G_sr,'mT/m/ms'))
@@ -121,13 +130,23 @@ if __name__ == '__main__':
 
       rf2 = RF(scanner=scanner, shape='hard', dur=Q_(0.2, 'ms'), flip_angle=Q_((-1)**i*np.deg2rad(90),'rad'), t_ref=G_tag.t_ref + G_tag.dur + rf1.t_ref + rf1.dur2)
 
-      prep = SequenceBlock(gradients=[G_tag], rf_pulses=[rf1, rf2], dt_rf=Q_(1e-2, 'ms'), dt_gr=Q_(1e-2, 'ms'), dt=Q_(1, 'ms'))
+      prep = SequenceBlock(gradients=[G_tag], 
+                           rf_pulses=[rf1, rf2], 
+                           dt_rf=Q_(1e-2, 'ms'), 
+                           dt_gr=Q_(1e-2, 'ms'), 
+                           dt=Q_(1, 'ms'), 
+                           store_magnetization=False)
 
       # Imaging block
       sp.rf.update_reference(rf2.t_ref + rf2.dur2 + sp.rf.dur1 + Q_(0.5, 'ms'))
       sp.dephasing.update_reference(sp.rf.t_ref - (sp.dephasing.slope + 0.5*sp.dephasing.lenc))
       sp.rephasing.update_reference(sp.dephasing.t_ref + sp.dephasing.dur)
-      imaging = SequenceBlock(gradients=[sp.dephasing, sp.rephasing], rf_pulses=[sp.rf], dt_rf=Q_(1e-2, 'ms'), dt_gr=Q_(1e-2, 'ms'), dt=Q_(1, 'ms'))
+      imaging = SequenceBlock(gradients=[sp.dephasing, sp.rephasing], 
+                              rf_pulses=[sp.rf], 
+                              dt_rf=Q_(1e-2, 'ms'), 
+                              dt_gr=Q_(1e-2, 'ms'), 
+                              dt=Q_(1, 'ms'), 
+                              store_magnetization=True)
 
       # Create sequence object
       seq = Sequence(prepulse=prep, blocks=[imaging], dt_prep=Q_(0, 'ms'))
@@ -137,29 +156,14 @@ if __name__ == '__main__':
       # Bloch solver
       solver = BlochSolver(seq, phantom, scanner=scanner, M0=1e+9, T1=Q_(parameters.T1, 's'), T2=Q_(parameters.T2star, 's'), delta_B=delta_B0.reshape((-1, 1)))
 
-      # Solve for x and y directions
-      Mxy, Mz = solver.solve() 
+      # Solve
+      Mxy, Mz = solver.solve()
 
       # Assign the magnetization to the corresponding direction
       SPAMM_mag[i] = Mxy
 
   # Store elapsed time
   bloch_time = time.time() - t0
-
-  # Slice profile
-  profile = Mxy[:, -1]
-
-  # # Export SPAMM magnetization to XDMF file
-  # testfile = XDMFFile('test_new_{:d}.xdmf'.format(MPI_rank), nodes=phantom.local_nodes, elements={'tetra': phantom.local_elements})
-  # for i in range(Mxy.shape[1]):
-  #   testfile.write(pointData={'Mx': np.real(Mxy[:,i]), 'My': np.imag(Mxy[:,i]), 'Mz': Mz[:,i]}, time=i)
-  # testfile.close()
-
-  # # Path to export the generated data
-  # export_path = Path('MRImages/{:s}_V{:.0f}.pkl'.format(parameters.Sequence, 100.0*parameters.VENC))
-
-  # # Make sure the directory exist
-  # os.makedirs(str(export_path.parent), exist_ok=True)
 
   # Generate kspace trajectory
   traj = CartesianStack(FOV=Q_(parameters.FOV,'m'),
@@ -171,8 +175,8 @@ if __name__ == '__main__':
     LOC=LOC, 
     receiver_bw=Q_(parameters.r_BW,'Hz'), 
     plot_seq=False)
-  traj.plot_trajectory()
-  print('Echo time: {:.2f} ms'.format(traj.echo_time.m_as('ms')))
+  # traj.plot_trajectory()
+  MPI_print('Echo time: {:.1f} ms'.format(traj.echo_time.m_as('ms')))
 
   # kspace array
   ro_samples = traj.ro_samples
@@ -191,9 +195,9 @@ if __name__ == '__main__':
   for s in range(K.shape[2]):
 
     # Iterate over shots
-    for sh in traj.shots:
+    for i, sh in enumerate(traj.shots):
 
-      print(sh)
+      MPI_print("Generating shot {:d}/{:d} for slice {:d}/{:d}".format(i+1, traj.nb_shots, s+1, K.shape[2]))
 
       # Iterate over cardiac phases
       for fr in range(phantom.Nfr):
@@ -207,13 +211,12 @@ if __name__ == '__main__':
         M = phantom.mass_matrix_2(phantom.local_nodes + submesh_displacement, lumped=True, quadrature_order=2)
 
         # SPAMM magnetization for this frame
-        M_spamm = np.vstack((SPAMM_mag[0][:, fr+2], SPAMM_mag[1][:, fr+2])).T
+        M_spamm = np.vstack((SPAMM_mag[0][:, fr], SPAMM_mag[1][:, fr])).T
 
         # Update reference time of POD trajectory
-        scan_time += parameters.TimeSpacing
-        pod_trajectory.timeshift = scan_time
-        resp_motion.timeshift = scan_time
-        dsa = pod_trajectory + resp_motion
+        pod_trajectory.timeshift = fr * parameters.TimeSpacing
+        # pod_resp_motion.timeshift = scan_time
+        pod_sum = pod_trajectory + expr
 
         # k-space points per shot
         kspace_points = (traj.points[0][:,sh,s,np.newaxis], 
@@ -222,9 +225,11 @@ if __name__ == '__main__':
         kspace_times = traj.times.m_as('s')[:,sh,s,np.newaxis]
 
         # Generate 4D flow image
-        # K[:,:,:,:,fr] = SPAMM(MPI_rank, M, traj.points, traj.times.m_as('s'), phantom.local_nodes + submesh_displacement, M_spamm, delta_omega0, T2star, profile)
-        tmp = SPAMM(MPI_rank, M, kspace_points, kspace_times, phantom.local_nodes, M_spamm, delta_omega0, T2star, profile, dsa)
+        tmp = SPAMM(MPI_rank, M, kspace_points, kspace_times, phantom.local_nodes, M_spamm, delta_omega0, T2star, pod_sum)
         K[:,sh,s,:,fr] = tmp.swapaxes(0, 1)[:,:,0,:]
+
+        # Update scan time
+        scan_time += parameters.TimeSpacing
 
   # Store elapsed time
   spamm_time = time.time() - t0
@@ -238,11 +243,6 @@ if __name__ == '__main__':
   # Gather results
   K = gather_data(K)
 
-  # # Export generated data
-  # if MPI_rank==0:
-  #   with open(str(export_path), 'wb') as f:
-  #     pickle.dump({'kspace': K, 'MPS_ori': MPS_ori, 'LOC': LOC, 'traj': traj}, f)
-
   # Image reconstruction
   I = CartesianRecon(K, traj)
 
@@ -252,12 +252,12 @@ if __name__ == '__main__':
     my = np.abs(I[...,1,:])
     mxy = np.abs(I[...,0,:] - I[...,1,:])
     plotter = MRIPlotter(images=[mx, my, mxy], title=['SPAMM X', 'SPAMM Y', 'O-CSPAMM'], FOV=parameters.FOV)
-    plotter.export_images('animation_I{:d}/'.format(parameters.LinesPerShot))
+    # plotter.export_images('animation_I{:d}/'.format(parameters.LinesPerShot))
     plotter.show()
 
-    # mx = np.abs(K[...,0,:])
-    # my = np.abs(K[...,1,:])
-    # mxy = np.abs(K[...,0,:] - K[...,1,:])
-    # plotter = MRIPlotter(images=[mx, my, mxy], title=['SPAMM X', 'SPAMM Y', 'O-CSPAMM'], FOV=parameters.FOV)
+    mx = np.abs(K[...,0,:])
+    my = np.abs(K[...,1,:])
+    mxy = np.abs(K[...,0,:] - K[...,1,:])
+    plotter = MRIPlotter(images=[mx, my, mxy], title=['SPAMM X', 'SPAMM Y', 'O-CSPAMM'], FOV=parameters.FOV)
     # plotter.export_images('animation_K/')
-    # plotter.show()
+    plotter.show()
