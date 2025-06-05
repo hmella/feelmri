@@ -76,7 +76,7 @@ class MRIPlotter:
       if len(self.images) < 4:
         self.fig, self.ax = plt.subplots(1, len(self.images))
         if len(self.images) == 1:
-          self.ax = [self.ax, None]
+          self.ax = np.array([self.ax])
       else:
         cols = np.ceil(np.sqrt(len(self.images))).astype(int)
         rows = np.ceil(len(self.images) / cols).astype(int)
