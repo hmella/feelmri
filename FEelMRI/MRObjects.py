@@ -8,7 +8,7 @@ from pint import Quantity as Q_
 from scipy.interpolate import interp1d
 
 from FEelMRI.BlochSimulator import solve_mri
-from FEelMRI.MPIUtilities import MPI_rank
+from FEelMRI.MPIUtilities import MPI_rank, MPI_print
 
 
 # Scanner class
@@ -64,6 +64,10 @@ class BlochSolver:
     n_pos = x.shape[0]
     n_blocks = len(valid_blocks)
 
+    # List of indices indicating which blocks need to be stored
+    store_indices = np.array([i for i, block in enumerate(valid_blocks) if block.store_magnetization])
+    store_indices += 1  # +1 to account for the initial condition
+
     # Allocate magnetizations
     Mxy = np.zeros((n_pos, n_blocks+1), dtype=np.complex64)
     Mz = np.zeros((n_pos, n_blocks+1), dtype=np.float32)
@@ -103,15 +107,14 @@ class BlochSolver:
         Mxy_, Mz_ = solve_mri(x, T1, T2, delta_B, self.M0, gamma, rf_all, G_all, dt, regime_idx, 0*Mxy_[:, -1], Mz_[:, -1])
 
       # Update magnetizations
-      if self.sequence.non_empty[i]:
-        Mxy[:, count+1] = Mxy_[:, -1]
-        Mz[:, count+1]  = Mz_[:, -1]
-        count += 1
+      Mxy[:, count+1] = Mxy_[:, -1]
+      Mz[:, count+1]  = Mz_[:, -1]
+      count += 1
 
       # # Print elapsed time
       # MPI_print('[BlochSolver] Elapsed time to run simulation in block {:d}: {:.2f} s'.format(i, time.time() - t0))
 
-    return Mxy, Mz
+    return Mxy[:, store_indices], Mz[:, store_indices]
 
 
 class Sequence:
@@ -127,7 +130,6 @@ class Sequence:
     # TODO: review! Update reference time for each block
     for i, block in enumerate(self.blocks, start=1):
       shift = self.blocks[i-1].time_extent[-1].to('ms') + self.dt_blocks.to('ms') + self.dt_prep.to('ms')
-      # print(shift)
       block.update_reference(shift)
 
   def update_block_references(self):
@@ -142,8 +144,7 @@ class Sequence:
     for i in range(nb_times):
       # Create dummy block for dead times
       dur = dt_blocks.m_as('ms') - (self.blocks[-1].time_extent[1].m_as('ms') - self.blocks[0].time_extent[0].m_as('ms'))
-      dummy = SequenceBlock(gradients=[], rf_pulses=[], dt=self.blocks[0].dt, dur=Q_(dur, 'ms'), empty=True)
-      # print("Dummy extent: ", dummy.time_extent)
+      dummy = SequenceBlock(gradients=[], rf_pulses=[], dt=self.blocks[0].dt, dur=Q_(dur, 'ms'), empty=True, store_magnetization=False)
 
       # Generate train of blocks
       for block in self.blocks:
@@ -191,7 +192,7 @@ class Sequence:
       plt.show()
 
 class SequenceBlock:
-  def __init__(self, gradients=[], rf_pulses=[], dt_rf=Q_(0.01, 'ms'), dt_gr=Q_(-1, 'ms'), dt=Q_(10, 'ms'), dur=Q_(-1, 'ms'), empty=False):
+  def __init__(self, gradients=[], rf_pulses=[], dt_rf=Q_(0.01, 'ms'), dt_gr=Q_(-1, 'ms'), dt=Q_(10, 'ms'), dur=Q_(-1, 'ms'), empty=False, store_magnetization=True):
     self.gradients = gradients
     self.M_gradients = [g for g in self.gradients if g.axis == 0]
     self.P_gradients = [g for g in self.gradients if g.axis == 1]
@@ -205,6 +206,7 @@ class SequenceBlock:
     self.discrete_times = self._discretization()
     self.Nb_times = len(self.discrete_times)
     self.empty = empty
+    self.store_magnetization = store_magnetization
 
   def __call__(self, t):
     rf = np.sum([rf(t) for rf in self.rf_pulses])
