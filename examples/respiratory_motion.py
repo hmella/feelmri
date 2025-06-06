@@ -25,7 +25,7 @@ from FEelMRI.Tagging import SPAMM
 if __name__ == '__main__':
 
   # Import imaging parameters
-  parameters = ParameterHandler('parameters/PARAMETERS_LV.yaml')
+  parameters = ParameterHandler('parameters/respiratory_motion.yaml')
 
   # Imaging orientation paramters
   theta_x = np.deg2rad(parameters.theta_x)
@@ -34,10 +34,6 @@ if __name__ == '__main__':
   MPS_ori = Rz(theta_z)@Rx(theta_x)@Ry(theta_y)
   LOC = parameters.LOC
 
-  # Velocity encoding parameters
-  ke_dirs = list(parameters.Directions.values())
-  enc = PositionEncoding(parameters.ke, np.array(ke_dirs))
-
   # Create FEM phantom object
   phantom = FEMPhantom(path='phantoms/beating_heart.xdmf', scale_factor=1.0)
 
@@ -45,38 +41,36 @@ if __name__ == '__main__':
   phantom.orient(MPS_ori, LOC)
 
   # We can use only a submesh to speed up the simulation. The submesh is created by selecting the elements that are inside the FOV. We can also refine the submesh to increase the number of nodes and elements
-  midpoints = np.array([np.mean(phantom.nodes[e,:], axis=0) for e in phantom.elements])
+  midpoints = np.array([np.mean(phantom.global_nodes[e,:], axis=0) for e in phantom.global_elements])
   condition = (np.abs(midpoints[:,2]) <= 0.6*parameters.FOV[2]) > 1e-3
   markers = np.where(condition)[0]
   phantom.create_submesh(markers, refine=False, element_size=0.003)
 
-  # Distribute the mesh to all MPI processes
-  phantom.distribute_mesh()
-
   # Create POD trajectory object
-  trajectory = np.zeros([phantom.local_nodes.shape[0], phantom.local_nodes.shape[1], phantom.Nfr], dtype=np.float32)
+  trajectory = np.zeros([phantom.global_nodes.shape[0], phantom.global_nodes.shape[1], phantom.Nfr], dtype=np.float32)
   for fr in range(phantom.Nfr):
     # Read displacement data in frame fr
     phantom.read_data(fr)
     displacement = phantom.point_data['displacement'] @ MPS_ori
-    submesh_displacement = phantom.interpolate_to_submesh(displacement)
+    submesh_displacement = phantom.interpolate_to_submesh(displacement, local=False)
     trajectory[..., fr] = submesh_displacement
 
   # Define POD object
   pod_times = np.linspace(0, (phantom.Nfr-1)*parameters.TimeSpacing, phantom.Nfr)
   pod_trajectory = PODTrajectory(time_array=pod_times,
                                  data=trajectory,
+                                 global_to_local=phantom.global_to_local_nodes,
                                  n_modes=5,
                                  taylor_order=10,
                                  is_periodic=True)
   
   # Define respiratory motion object
-  T = 3.0   # period
-  A = 0.008 # amplitude
+  T = 3.0     # period
+  A = 0.00   # amplitude
   times = np.linspace(0, T, 100)
-  # def expr(t): return A*(1 - np.cos(2*np.pi*t/(2*T))**4)
-  def expr(t): 
-    return np.random.uniform(-0.5*A, 0.5*A, size=[1,]).reshape((1,1)) * np.array([[0, 1, 0]]).reshape((1, 3))
+  def pod_resp_motion(t): return A*(1 - np.cos(2*np.pi*t/(2*T))**4) * np.array([[0, 1, 0]]).reshape((1, 3))
+  # def expr(t): 
+  #   return np.random.uniform(-0.5*A, 0.5*A, size=[1,]).reshape((1,1)) * np.array([[0, 1, 0]]).reshape((1, 3))
 
   # import matplotlib.pyplot as plt
   # if MPI_rank == 0:
@@ -84,7 +78,7 @@ if __name__ == '__main__':
   #   plt.show()
 
   # direction = np.array([[0, 1, 0]]).reshape((1, 3, 1))
-  # motion = expr(times).reshape((1, 1, -1)) * direction
+  # motion = resp_motion(times).reshape((1, 1, -1)) * direction
   # pod_resp_motion = PODTrajectory(time_array=times, 
   #                             data=motion, 
   #                             n_modes=10, 
@@ -115,52 +109,42 @@ if __name__ == '__main__':
     refocusing_area_frac=0.7758)
   # sp.optimize(frac_start=0.7, frac_end=0.8, N=100, profile_samples=100)
 
-  # SPAMM magnetization
-  SPAMM_mag = [None,]*len(enc.directions)
-
   # Simulate the SPAMM preparation block for each encoding direction
   t0 = time.time()
-  for i in range(len(enc.directions)):
 
-      # SPAMM preparation block
-      rf1 = RF(scanner=scanner, shape='hard', dur=Q_(0.2, 'ms'), flip_angle=Q_(np.deg2rad(90),'rad'), t_ref=Q_(0.0, 'ms'))
+  # Imaging block
+  imaging = SequenceBlock(gradients=[sp.dephasing, sp.rephasing], 
+                          rf_pulses=[sp.rf], 
+                          dt_rf=Q_(1e-2, 'ms'), 
+                          dt_gr=Q_(1e-2, 'ms'), 
+                          dt=Q_(1, 'ms'), 
+                          store_magnetization=True)
+  dummy = imaging.copy()
+  dummy.store_magnetization = False
 
-      G_tag = Gradient(scanner=scanner, t_ref=rf1.t_ref + rf1.dur2, axis=i)
-      G_tag.match_area(Q_(parameters.ke/scanner.gamma.m_as('1/mT/ms'), 'mT*ms/m'))
+  # Create and fill sequence object
+  seq = Sequence()
+  for i in range(80):
+    seq.add_block(dummy.copy())  # Add dummy blocks to reach the steady state
+    seq.add_block(Q_(parameters.RepetitionTime, 's'))  # Delay between imaging blocks
+  for i in range(phantom.Nfr):
+    seq.add_block(imaging.copy())
+    seq.add_block(Q_(parameters.RepetitionTime, 's'))  # Delay between imaging blocks
+  # seq.plot()
 
-      rf2 = RF(scanner=scanner, shape='hard', dur=Q_(0.2, 'ms'), flip_angle=Q_((-1)**i*np.deg2rad(90),'rad'), t_ref=G_tag.t_ref + G_tag.dur + rf1.t_ref + rf1.dur2)
+  # Bloch solver
+  solver = BlochSolver(seq, phantom, scanner=scanner, M0=1000, T1=Q_(parameters.T1, 's'), T2=Q_(parameters.T2star, 's'), delta_B=delta_B0.reshape((-1, 1)))
 
-      prep = SequenceBlock(gradients=[G_tag], 
-                           rf_pulses=[rf1, rf2], 
-                           dt_rf=Q_(1e-2, 'ms'), 
-                           dt_gr=Q_(1e-2, 'ms'), 
-                           dt=Q_(1, 'ms'), 
-                           store_magnetization=False)
+  # Solve
+  Mxy, Mz = solver.solve()
 
-      # Imaging block
-      sp.rf.update_reference(rf2.t_ref + rf2.dur2 + sp.rf.dur1 + Q_(0.5, 'ms'))
-      sp.dephasing.update_reference(sp.rf.t_ref - (sp.dephasing.slope + 0.5*sp.dephasing.lenc))
-      sp.rephasing.update_reference(sp.dephasing.t_ref + sp.dephasing.dur)
-      imaging = SequenceBlock(gradients=[sp.dephasing, sp.rephasing], 
-                              rf_pulses=[sp.rf], 
-                              dt_rf=Q_(1e-2, 'ms'), 
-                              dt_gr=Q_(1e-2, 'ms'), 
-                              dt=Q_(1, 'ms'), 
-                              store_magnetization=True)
-
-      # Create sequence object
-      seq = Sequence(prepulse=prep, blocks=[imaging], dt_prep=Q_(0, 'ms'))
-      seq.repeat_blocks(nb_times=phantom.Nfr, dt_blocks=Q_(parameters.TimeSpacing, 's'))
-      # seq.plot()
-
-      # Bloch solver
-      solver = BlochSolver(seq, phantom, scanner=scanner, M0=1e+9, T1=Q_(parameters.T1, 's'), T2=Q_(parameters.T2star, 's'), delta_B=delta_B0.reshape((-1, 1)))
-
-      # Solve
-      Mxy, Mz = solver.solve()
-
-      # Assign the magnetization to the corresponding direction
-      SPAMM_mag[i] = Mxy
+  # Export xdmf for debugging
+  file = XDMFFile('magnetization_{:d}.xdmf'.format(MPI_rank), nodes=phantom.local_nodes, elements={'tetra': phantom.local_elements})
+  for fr in range(Mxy.shape[1]):
+    file.write(pointData={'Mx': np.real(Mxy[:, fr]), 
+                          'My': np.imag(Mxy[:, fr]),
+                          'Mz': Mz[:, fr]}, time=fr*parameters.RepetitionTime)
+  file.close()
 
   # Store elapsed time
   bloch_time = time.time() - t0
@@ -182,54 +166,46 @@ if __name__ == '__main__':
   ro_samples = traj.ro_samples
   ph_samples = traj.ph_samples
   slices = traj.slices
-  K = np.zeros([ro_samples, ph_samples, slices, enc.nb_directions, phantom.Nfr], dtype=np.complex64)
+  K = np.zeros([ro_samples, ph_samples, slices, 1, 1], dtype=np.complex64)
 
   # T2star relaxation time
-  T2star = np.ones([phantom.nodes.shape[0], ], dtype=np.float32)*parameters.T2star
+  T2star = np.ones([phantom.global_nodes.shape[0], ], dtype=np.float32)*parameters.T2star
 
   # Scan time
   scan_time = 0.0
 
   # Iterate over slices
   t0 = time.time()  
-  for s in range(K.shape[2]):
+  for s in range(slices):
 
     # Iterate over shots
     for i, sh in enumerate(traj.shots):
 
       MPI_print("Generating shot {:d}/{:d} for slice {:d}/{:d}".format(i+1, traj.nb_shots, s+1, K.shape[2]))
 
-      # Iterate over cardiac phases
-      for fr in range(phantom.Nfr):
+      # Update reference time of POD trajectory
+      pod_trajectory.timeshift = i * parameters.RepetitionTime
+      pod_resp_motion.timeshift = i * parameters.RepetitionTime
+      pod_sum = pod_trajectory + pod_resp_motion
 
-        # Read displacement data in frame fr
-        phantom.read_data(fr)
-        displacement = phantom.point_data['displacement'] @ traj.MPS_ori
-        submesh_displacement = phantom.interpolate_to_submesh(displacement)
+      # Get displacement data in frame fr
+      displacement = pod_trajectory(i * parameters.RepetitionTime)
 
-        # Assemble mass matrix for integrals (just once)
-        M = phantom.mass_matrix_2(phantom.local_nodes + submesh_displacement, lumped=True, quadrature_order=2)
+      # Assemble mass matrix for integrals (just once)
+      M = phantom.mass_matrix_2(phantom.local_nodes + displacement, lumped=True, quadrature_order=2)
 
-        # SPAMM magnetization for this frame
-        M_spamm = np.vstack((SPAMM_mag[0][:, fr], SPAMM_mag[1][:, fr])).T
+      # k-space points per shot
+      kspace_points = (traj.points[0][:,sh,s,np.newaxis], 
+                      traj.points[1][:,sh,s,np.newaxis], 
+                      traj.points[2][:,sh,s,np.newaxis])
+      kspace_times = traj.times.m_as('s')[:,sh,s,np.newaxis]
 
-        # Update reference time of POD trajectory
-        pod_trajectory.timeshift = fr * parameters.TimeSpacing
-        # pod_resp_motion.timeshift = scan_time
-        pod_sum = pod_trajectory + expr
+      # Generate 4D flow image
+      tmp = SPAMM(MPI_rank, M, kspace_points, kspace_times, phantom.local_nodes, Mxy[:, 0], delta_omega0, T2star, pod_sum)
+      K[:,sh,s,:,0] = tmp.swapaxes(0, 1)[:,:,0]
 
-        # k-space points per shot
-        kspace_points = (traj.points[0][:,sh,s,np.newaxis], 
-                        traj.points[1][:,sh,s,np.newaxis], 
-                        traj.points[2][:,sh,s,np.newaxis])
-        kspace_times = traj.times.m_as('s')[:,sh,s,np.newaxis]
-
-        # Generate 4D flow image
-        tmp = SPAMM(MPI_rank, M, kspace_points, kspace_times, phantom.local_nodes, M_spamm, delta_omega0, T2star, pod_sum)
-        K[:,sh,s,:,fr] = tmp.swapaxes(0, 1)[:,:,0,:]
-
-        # Update scan time
-        scan_time += parameters.TimeSpacing
+      # Update scan time
+      scan_time += parameters.TimeSpacing
 
   # Store elapsed time
   spamm_time = time.time() - t0
@@ -248,16 +224,11 @@ if __name__ == '__main__':
 
   # Show reconstruction
   if MPI_rank == 0:
-    mx = np.abs(I[...,0,:])
-    my = np.abs(I[...,1,:])
-    mxy = np.abs(I[...,0,:] - I[...,1,:])
-    plotter = MRIPlotter(images=[mx, my, mxy], title=['SPAMM X', 'SPAMM Y', 'O-CSPAMM'], FOV=parameters.FOV)
-    # plotter.export_images('animation_I{:d}/'.format(parameters.LinesPerShot))
+    m = np.abs(I[...,0,:])
+    plotter = MRIPlotter(images=[m], title=['Magnitude'], FOV=parameters.FOV)
     plotter.show()
 
-    mx = np.abs(K[...,0,:])
-    my = np.abs(K[...,1,:])
-    mxy = np.abs(K[...,0,:] - K[...,1,:])
-    plotter = MRIPlotter(images=[mx, my, mxy], title=['SPAMM X', 'SPAMM Y', 'O-CSPAMM'], FOV=parameters.FOV)
+    k = np.abs(K[...,0,:])
+    plotter = MRIPlotter(images=[k], title=['k-space'], FOV=parameters.FOV)
     # plotter.export_images('animation_K/')
     plotter.show()
