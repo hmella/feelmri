@@ -3,7 +3,7 @@ Imaging:
   RES: [70, 55, 1]
   FOV: [0.16, 0.12, 0.008]  # meters
   TimeSpacing: 0.04         # seconds
-  RepetitionTime: 0.03      # seconds
+  RepetitionTime: 0.03     # seconds
   Oversampling: 2
   Sequence: "FFE"
   LinesPerShot: 1
@@ -17,10 +17,10 @@ Hardware:
 # Imaging orientation (make sure about orthogonality)
 Formatting:
   # Data taken from Box paraview filter
-  theta_x: -9.209081171087387    # degrees
-  theta_y: -90.70278176464689    # degrees
-  theta_z: 1.115864928954766     # degrees
-  LOC: [0.022945010601301028, 0.0014597910123357039, 0.0195306879396226624]
+  theta_x: -9.2091     # degrees
+  theta_y: -90.7028    # degrees
+  theta_z: 1.1159      # degrees
+  LOC: [0.02295, 0.001460, 0.01953]
 
 Phantom:
   T2star: 0.05     # seconds

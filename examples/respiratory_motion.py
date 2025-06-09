@@ -8,14 +8,14 @@ from pathlib import Path
 import numpy as np
 from pint import Quantity as Q_
 
+from FEelMRI.Bloch import BlochSolver, Sequence, SequenceBlock
 from FEelMRI.IO import XDMFFile
-from FEelMRI.KSpaceTraj import CartesianStack, Gradient
+from FEelMRI.KSpaceTraj import CartesianStack
 from FEelMRI.Math import Rx, Ry, Rz
-from FEelMRI.Motion import PODTrajectory
+from FEelMRI.Motion import PODTrajectory, RespiratoryMotion
 from FEelMRI.MPIUtilities import MPI_print, MPI_rank, gather_data
-from FEelMRI.MRImaging import PositionEncoding, SliceProfile
-from FEelMRI.MRObjects import (RF, BlochSolver, Gradient, Scanner, Sequence,
-                               SequenceBlock)
+from FEelMRI.MRImaging import SliceProfile
+from FEelMRI.MRObjects import RF, Scanner
 from FEelMRI.Parameters import ParameterHandler
 from FEelMRI.Phantom import FEMPhantom
 from FEelMRI.Plotter import MRIPlotter
@@ -65,25 +65,24 @@ if __name__ == '__main__':
                                  is_periodic=True)
   
   # Define respiratory motion object
-  T = 3.0     # period
-  A = 0.08    # amplitude
-  times = np.linspace(0, T, 100)
-  def pod_resp_motion(t): return A*(1 - np.cos(2*np.pi*t/(2*T))**4)
-  # def expr(t): 
-  #   return np.random.uniform(-0.5*A, 0.5*A, size=[1,]).reshape((1,1)) * np.array([[0, 1, 0]]).reshape((1, 3))
-
-  # import matplotlib.pyplot as plt
-  # if MPI_rank == 0:
-  #   plt.plot(times, expr(times))
-  #   plt.show()
-
-  direction = np.array([[0, 1, 0]]).reshape((1, 3, 1))
-  motion = pod_resp_motion(times).reshape((1, 1, -1)) * direction
-  pod_resp_motion = PODTrajectory(time_array=times, 
+  T = 3.0      # period
+  A = 0.008    # amplitude
+  times  = np.linspace(0, T, 100)
+  motion = A*(1 - np.cos(2*np.pi*times/(2*T))**4)
+  pod_resp_motion = RespiratoryMotion(time_array=times, 
                               data=motion, 
-                              n_modes=10, 
-                              taylor_order=15,
-                              is_periodic=True)
+                              is_periodic=True,
+                              direction=np.array([0, 1, 0]),
+                              remove_mean=True)
+  
+  import matplotlib.pyplot as plt
+  motion = []
+  times  = np.linspace(0, 2*T, 100)
+  for t in times:
+    pod_resp_motion.timeshift = t
+    motion.append(pod_resp_motion(0).max())
+  plt.plot(times, motion)
+  plt.show()
 
   # Create scanner object defining the gradient strength, slew rate and giromagnetic ratio
   scanner = Scanner(gradient_strength=Q_(parameters.G_max,'mT/m'), gradient_slew_rate=Q_(parameters.G_sr,'mT/m/ms'))
@@ -133,7 +132,7 @@ if __name__ == '__main__':
   # seq.plot()
 
   # Bloch solver
-  solver = BlochSolver(seq, phantom, scanner=scanner, M0=1e+8, T1=Q_(parameters.T1, 's'), T2=Q_(parameters.T2star, 's'), delta_B=delta_B0.reshape((-1, 1)))
+  solver = BlochSolver(seq, phantom, scanner=scanner, M0=1e+8, T1=Q_(parameters.T1, 's'), T2=Q_(parameters.T2star, 's'), delta_B=delta_B0.reshape((-1, 1)), pod_trajectory=pod_trajectory)
 
   # Solve
   Mxy, Mz = solver.solve()
@@ -225,7 +224,8 @@ if __name__ == '__main__':
   # Show reconstruction
   if MPI_rank == 0:
     m = np.abs(I[...,0,:])
-    plotter = MRIPlotter(images=[m], title=['Magnitude'], FOV=parameters.FOV)
+    phi = np.angle(I[...,0,:])
+    plotter = MRIPlotter(images=[m, phi], title=['Magnitude', 'Phase'], FOV=parameters.FOV)
     plotter.show()
 
     k = np.abs(K[...,0,:])

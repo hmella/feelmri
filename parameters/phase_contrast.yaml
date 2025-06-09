@@ -8,12 +8,10 @@ Imaging:
   LinesPerShot: 1
 
 VelocityEncoding:
-  VENC: 2.4   # meters per second
+  VENC: 2.1   # meters per second
   Directions:
-    dir1: [1.0, 0.0, 0.0]
-    dir2: [0.0, 1.0, 0.0]
-    dir3: [0.0, 0.0, 1.0]
-    dir4: [0.0, 0.0, 0.0]
+    dir1: [0.0, 0.0, 1.0]
+    dir2: [0.0, 0.0, 0.0]
 
 # Hardware parameters
 Hardware:
@@ -26,11 +24,10 @@ Hardware:
 # Imaging orientation (make sure about orthogonality)
 Formatting:
   # Data taken from Box paraview filter
-  theta_x: 0.0    # degrees
-  theta_y: 0.0    # degrees
-  theta_z: -90.0  # degrees
-  # LOC: [-0.063242, 0.012783, -0.07]
-  LOC: [-0.063242, 0.017021, -0.055196]
+  theta_x: -9.2885     # degrees
+  theta_y: -17.3653    # degrees
+  theta_z: -93.7925    # degrees
+  LOC: [-0.06566, 0.01671, -0.06434]
 
 Phantom:
   T2star: 0.2540  # seconds
