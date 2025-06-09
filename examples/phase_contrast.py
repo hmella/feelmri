@@ -1,4 +1,6 @@
 import os
+import sys
+
 os.environ["OPENBLAS_NUM_THREADS"] = "1" # export OPENBLAS_NUM_THREADS=1
 import pickle
 import time
@@ -7,14 +9,14 @@ from pathlib import Path
 import numpy as np
 from pint import Quantity as Q_
 
-from FEelMRI.IO import XDMFFile
+from FEelMRI.Bloch import BlochSolver, Sequence, SequenceBlock
 from FEelMRI.KSpaceTraj import CartesianStack
 from FEelMRI.Math import Rx, Ry, Rz
 from FEelMRI.Motion import PODTrajectory
 from FEelMRI.MPIUtilities import MPI_print, MPI_rank, gather_data
 from FEelMRI.MRImaging import SliceProfile, VelocityEncoding
-from FEelMRI.MRObjects import (RF, BlochSolver, Gradient, Scanner, Sequence,
-                               SequenceBlock)
+from FEelMRI.MRObjects import RF, Gradient, Scanner
+from FEelMRI.Noise import add_cpx_noise
 from FEelMRI.Parameters import ParameterHandler
 from FEelMRI.Phantom import FEMPhantom
 from FEelMRI.PhaseContrast import PC
@@ -51,10 +53,7 @@ if __name__ == '__main__':
   markers = np.where(condition)[0]
   phantom.create_submesh(markers, refine=False, element_size=0.0012)
 
-  # Distribute the mesh across MPI processes
-  phantom.distribute_mesh()
-
-  # Create POD trajectory object
+  # Create POD trajectory object for velocity
   trajectory = np.zeros([phantom.global_nodes.shape[0], phantom.global_nodes.shape[1], phantom.Nfr], dtype=np.float32)
   for fr in range(phantom.Nfr):
     # Read displacement data in frame fr
@@ -80,7 +79,7 @@ if __name__ == '__main__':
       return x[:,0] + x[:,1] + x[:,2]
   delta_B0 = spatial(phantom.local_nodes)
   delta_B0 /= np.abs(spatial(phantom.global_nodes).flatten()).max()
-  delta_B0 *= 1.5 * 1e-6 * 0            # 1.5 ppm of the main magnetic field
+  delta_B0 *= 1.5 * 1e-6 * 0.0           # 1.5 ppm of the main magnetic field
   delta_omega0 = 2.0 * np.pi * scanner.gammabar.m_as('Hz/T') * delta_B0
 
   # Slice profile
@@ -93,36 +92,53 @@ if __name__ == '__main__':
     dt=Q_(1e-2, 'ms'), 
     plot=False, 
     bandwidth=Q_(10000, 'Hz'), #'maximum',
-    refocusing_area_frac=0.8)
-  # sp.optimize(frac_start=0.5, frac_end=1.5, N=100)
+    refocusing_area_frac=0.7961)
+  # sp.optimize(frac_start=0.79, frac_end=0.81, N=100)
 
-  # Bipolar gradient
-  t_ref = sp.rephasing.t_ref + sp.rephasing.dur
-  bp1 = Gradient(scanner=scanner, t_ref=t_ref, axis=2)
-  bp2 = bp1.make_bipolar(Q_(enc.VENC, 'm/s'))
+  # Create sequence object and solve magnetization
+  Mxy_PC = np.zeros([phantom.local_nodes.shape[0], phantom.Nfr, enc.nb_directions], dtype=np.complex64)
+  for d in range(enc.nb_directions):
+    # Create sequence object
+    seq = Sequence()
 
-  # Create sequence object
-  seq = Sequence()
+    # Bipolar gradient
+    t_ref = sp.rephasing.t_ref + sp.rephasing.dur
+    bp1 = Gradient(scanner=scanner, t_ref=t_ref, axis=2)
+    bp2 = bp1.make_bipolar(Q_(parameters.VENC, 'm/s'))
+    bp1 *= d + (-1)**d
+    bp2 *= d + (-1)**d
 
-  # Imaging block
-  imaging = SequenceBlock(gradients=[sp.dephasing, sp.rephasing, bp1, bp2], rf_pulses=[sp.rf], dt_rf=Q_(1e-2, 'ms'), dt_gr=Q_(1e-2, 'ms'), dt=Q_(1, 'ms'), store_magnetization=True)
+    # Imaging block
+    imaging = SequenceBlock(gradients=[sp.dephasing, sp.rephasing, bp1, bp2],
+                            rf_pulses=[sp.rf], 
+                            dt_rf=Q_(1e-2, 'ms'), 
+                            dt_gr=Q_(1e-2, 'ms'), 
+                            dt=Q_(1, 'ms'), 
+                            store_magnetization=True)
+    dummy = imaging.copy()
+    dummy.store_magnetization = False
 
-  # Add blocks to the sequence
-  for fr in range(phantom.Nfr):
-    seq.add_block(imaging)
-    seq.add_block(Q_(parameters.TimeSpacing, 's'), dt=Q_(1, 'ms'))  # Time spacing between frames
-  # seq.plot()
+    # Add blocks to the sequence
+    time_spacing = Q_(parameters.TimeSpacing, 's') - (imaging.time_extent[1] - sp.rf.t_ref)
+    # for i in range(80):
+    #   seq.add_block(dummy.copy())  # Add dummy blocks to reach the steady state
+    #   seq.add_block(time_spacing, dt=Q_(1, 'ms'))  # Delay between imaging blocks
+    for fr in range(phantom.Nfr):
+      seq.add_block(imaging)
+      seq.add_block(time_spacing, dt=Q_(1, 'ms'))  # Time spacing between frames
+    # seq.plot()
 
-  # Bloch solver
-  solver = BlochSolver(seq, phantom, scanner=scanner, M0=1e+9, T1=Q_(parameters.T1, 's'), T2=Q_(parameters.T2star, 's'), delta_B=delta_B0.reshape((-1, 1)), pod_trajectory=pod_trajectory)
+    # Bloch solver
+    solver = BlochSolver(seq, phantom, scanner=scanner, M0=1e+9, T1=Q_(parameters.T1, 's'), T2=Q_(parameters.T2star, 's'), delta_B=delta_B0.reshape((-1, 1)), pod_trajectory=pod_trajectory)
 
-  # Solve for x and y directions
-  Mxy, Mz = solver.solve() 
+    # Solve for x and y directions
+    Mxy, Mz = solver.solve()
+    Mxy_PC[..., d] = Mxy
 
-  testfile = XDMFFile('test_new.xdmf', nodes=phantom.local_nodes, elements={'tetra': phantom.local_elements})
-  for i in range(Mxy.shape[1]):
-    testfile.write(pointData={'Mx': np.real(Mxy[:,i]), 'My': np.imag(Mxy[:,i]), 'Mz': Mz[:,i]}, time=i)
-  testfile.close()
+  # testfile = XDMFFile('test_new.xdmf', nodes=phantom.local_nodes, elements={'tetra': phantom.local_elements})
+  # for i in range(Mxy.shape[1]):
+  #   testfile.write(pointData={'Mx': np.real(Mxy[:,i]), 'My': np.imag(Mxy[:,i]), 'Mz': Mz[:,i]}, time=i)
+  # testfile.close()
 
   # Path to export the generated data
   export_path = Path('MRImages/{:s}_V{:.0f}.pkl'.format(parameters.Sequence, 100.0*parameters.VENC))
@@ -167,10 +183,10 @@ if __name__ == '__main__':
       # submesh_velocity = phantom.interpolate_to_submesh(velocity)
 
       # Generate 4D flow image
-      K[:,:,:,:,fr] = PC(MPI_rank, M, traj.points, traj.times.m_as('s'), phantom.local_nodes, delta_omega0, T2star, Mxy[:, fr])
+      K[:,:,:,:,fr] = PC(MPI_rank, M, traj.points, traj.times.m_as('s'), phantom.local_nodes, delta_omega0, T2star, Mxy_PC[:, fr, :])
 
-      MPI_print('Elapsed time frame {:d}: {:.2f} s'.format(fr, time.time()-t0_fr))
-
+      sys.stdout.flush()
+      sys.stdout.write("\r" + 'Elapsed time frame {:d}: {:.2f} s'.format(fr, time.time()-t0_fr))
 
   # Store elapsed time
   pc_time = time.time() - t0
@@ -182,6 +198,9 @@ if __name__ == '__main__':
   # Gather results
   K = gather_data(K)
 
+  # Add noise to kspace
+  K = add_cpx_noise(K, relative_std=0.01)
+
   # Export generated data
   if MPI_rank==0:
     with open(str(export_path), 'wb') as f:
@@ -192,7 +211,9 @@ if __name__ == '__main__':
 
   # Show reconstruction
   m = np.abs(I[...,0,:])
-  phi_x = np.angle(I[...,0,:])
+  phi = np.angle(I[...,0,:])
+  phi_ref = np.angle(I[...,1,:])
+  phi_cor = np.angle(I[...,0,:] * np.conj(I[...,1,:]))
   if MPI_rank == 0:
-    plotter = MRIPlotter(images=[m, phi_x], title=['Magnitude', 'phi_x'])
+    plotter = MRIPlotter(images=[m, phi, phi_ref, phi_cor], title=['Magnitude', '$\phi + \phi_0$ ', '$\phi_0$', '$\phi_{ref}$'],)
     plotter.show()
