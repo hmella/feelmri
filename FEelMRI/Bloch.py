@@ -1,0 +1,319 @@
+import copy
+import time
+import warnings
+
+import matplotlib.pyplot as plt
+import numpy as np
+from pint import Quantity as Q_
+
+from FEelMRI.BlochSimulator import solve_mri
+from FEelMRI.MPIUtilities import MPI_print, MPI_rank
+from FEelMRI.MRObjects import Scanner
+from FEelMRI.Phantom import FEMPhantom
+from FEelMRI.Motion import PODTrajectory
+
+
+class SequenceBlock:
+  def __init__(self, gradients=[], rf_pulses=[], dt_rf=Q_(0.01, 'ms'), dt_gr=Q_(-1, 'ms'), dt=Q_(10, 'ms'), dur=Q_(-1, 'ms'), empty=False, store_magnetization=False):
+    self.gradients = gradients
+    self.M_gradients = [g for g in self.gradients if g.axis == 0]
+    self.P_gradients = [g for g in self.gradients if g.axis == 1]
+    self.S_gradients = [g for g in self.gradients if g.axis == 2]
+    self.rf_pulses = rf_pulses
+    self.dt_rf = dt_rf
+    self.dt_gr = dt_gr
+    self.dt = dt
+    self.dur = dur
+    self.time_extent = self._get_extent()
+    self.discrete_times = self._discretization()
+    self.Nb_times = len(self.discrete_times)
+    self.empty = empty
+    self.store_magnetization = store_magnetization
+
+  def copy(self):
+    return copy.deepcopy(self)
+
+  def __call__(self, t):
+    rf = np.sum([rf(t) for rf in self.rf_pulses])
+    m_gr = np.sum([g(t) for g in self.M_gradients])
+    p_gr = np.sum([g(t) for g in self.P_gradients])
+    s_gr = np.sum([g(t) for g in self.S_gradients])
+    return rf, m_gr, p_gr, s_gr
+
+  def __repr__(self):
+    return f"Sequence(gradients={self.gradients}, rf_pulses={self.rf_pulses}, dt_rf={self.dt_rf}, dt_gr={self.dt_gr})"
+
+  def __str__(self):
+    return f"Sequence with {len(self.gradients)} gradients and {len(self.rf_pulses)} RF pulses."
+
+  def __len__(self):
+    return len(self.gradients) + len(self.rf_pulses)
+
+  def _get_extent(self):
+    # Get time extent depending on gradient or RF timings
+    # Get (t_min, t_max) for each gradient
+    if self.gradients:
+      time_extent_gr = Q_(np.array([(g.t_ref.m, g.t_ref.m + g.dur.m) for g in self.gradients]), units=self.gradients[0].timings.u)
+    else:
+      time_extent_gr = Q_(np.array([(0, 0)]), units='ms')
+
+    # Get (t_min, t_max) for each rf pulse
+    if self.rf_pulses:
+      time_extent_rf = Q_(np.array([(rf.t_ref.m - rf.dur1.m, rf.t_ref.m + rf.dur2.m) for rf in self.rf_pulses]), units=self.rf_pulses[0].t_ref.u)
+    else:
+      time_extent_rf = Q_(np.array([(0, 0)]), units='ms')
+
+    # Time extent
+    t_min = np.min([time_extent_gr.m_as('ms').min(axis=0), time_extent_rf.m_as('ms').min(axis=0)])
+    t_max = np.max([time_extent_gr.m_as('ms').max(axis=0), time_extent_rf.m_as('ms').max(axis=0)])
+    if (t_max - t_min) < self.dur.m_as('ms'):
+      t_max += self.dur.m_as('ms') - (t_max - t_min)
+
+    # Update duration if dur is negative
+    if self.dur.m_as('ms') < 0:
+      self.dur = Q_(t_max - t_min, 'ms')
+
+    return [Q_(t_min, 'ms'), Q_(t_max, 'ms')]
+
+  def _discrete_objects(self):
+    # TODO: make sure that both gradients and RF pulses keep the units. Do not use .m_as('ms') or .m here.
+    # Get gradient timings and amplitudes
+    M_d_gr = [(g.timings.m, g.amplitudes.m) for g in self.M_gradients]
+    P_d_gr = [(g.timings.m, g.amplitudes.m) for g in self.P_gradients]
+    S_d_gr = [(g.timings.m, g.amplitudes.m) for g in self.S_gradients]    
+
+    # Get (t_min, t_ref, t_max) for each rf pulse
+    rf_d = []
+    for rf in self.rf_pulses:
+      left  = rf.t_ref.m - 1.05*rf.dur1.m
+      right = rf.t_ref.m + 1.05*rf.dur2.m + self.dt_rf.m
+      time = np.linspace(left, right, int(np.ceil((right - left)/self.dt_rf.m)))
+      rf_d.append((time, rf(time)))
+
+    return rf_d, M_d_gr, P_d_gr, S_d_gr
+  
+  def _discretization(self):
+    # Get gradient timings while considering the dt_gr
+    if self.gradients:
+        gr_timings = np.concatenate([g.timings.m for g in self.gradients])
+        if self.dt_gr > 0:
+            gr_timings = np.concatenate([np.arange(g.timings[0].m, g.timings[-1].m, self.dt_gr.m) for g in self.gradients] + [gr_timings])
+    else:
+        gr_timings = np.array([])
+
+    # Get RF timings while considering the dt_rf
+    if self.rf_pulses:
+        rf_timings = np.concatenate([[rf.t_ref.m - rf.dur1.m, rf.t_ref.m, rf.t_ref.m + rf.dur2.m] for rf in self.rf_pulses])
+        if self.dt_rf > 0:
+            rf_timings = np.concatenate([np.arange(rf.t_ref.m - rf.dur1.m, rf.t_ref.m + rf.dur2.m, self.dt_rf.m) for rf in self.rf_pulses] + [rf_timings])
+    else:
+        rf_timings = np.array([])
+
+    # Sequence timings
+    seq_timings = np.arange(self.time_extent[0].m, self.time_extent[1].m, self.dt.m)
+
+    # Concatenate all timings, sort them and remove duplicates.
+    all_timings = np.concatenate((gr_timings, rf_timings, seq_timings))
+    all_timings = np.unique(np.sort(all_timings))
+
+    return Q_(all_timings, units='ms')
+  
+  def update_reference(self, t_ref):
+    # Update reference time for each gradient and RF pulse
+    [g.update_reference(g.t_ref + t_ref) for g in self.gradients]
+    self.M_gradients = [g for g in self.gradients if g.axis == 0]
+    self.P_gradients = [g for g in self.gradients if g.axis == 1]
+    self.S_gradients = [g for g in self.gradients if g.axis == 2]
+    [rf.update_reference(rf.t_ref + t_ref) for rf in self.rf_pulses]
+    self.time_extent[0] += t_ref
+    self.time_extent[1] += t_ref
+    self.discrete_times += t_ref
+    self.Nb_times = len(self.discrete_times)
+
+  def plot(self):
+    if MPI_rank == 0:
+      # Plot RF pulses and MR gradients
+      titles = ['RF', 'M', 'P', 'S']
+      objects = self._discrete_objects()
+
+      fig, ax = plt.subplots(4, 1)
+      for i, obj in enumerate(objects):
+        for t, amp in obj:
+          ax[i].plot(t, amp)
+        ax[i].set_ylabel(titles[i])
+        ax[i].set_xlabel('Time (ms)')
+        ax[i].set_xlim([self.time_extent[0].m, self.time_extent[1].m])
+        ax[i].hlines(0, xmin=self.time_extent[0].m, xmax=self.time_extent[1].m, color='k', linestyle='--')
+      plt.show()
+
+
+class Sequence:
+  def __init__(self, blocks=[]):
+    self.blocks = blocks
+    self.Nb_blocks = len(self.blocks)
+    self.time_extent = self._get_extent()
+    self.non_empty = [~block.empty for block in self.blocks if block is not None]
+
+  def add_block(self, block: SequenceBlock | Q_, dt: Q_ = Q_(10, 'ms')):
+    # Add a block to the sequence
+    if isinstance(block, SequenceBlock):
+      block = block.copy()  # Ensure we work with a copy
+      block.update_reference(self.time_extent[-1].to('ms') - block.time_extent[0].to('ms'))
+      self.blocks = [b for b in self.blocks + [block]]
+      self.Nb_blocks = len(self.blocks)
+      self.time_extent = self._get_extent()
+      self.non_empty.append(not block.empty)
+    elif isinstance(block, Q_):
+      # If a duration is provided, create a new block with that duration
+      if block > Q_(0, 'ms'):
+        block = SequenceBlock(dur=block.to('ms'), dt=dt, empty=True, store_magnetization=False)
+        block.update_reference(self.time_extent[-1].to('ms'))
+        self.blocks = [b for b in self.blocks + [block]]
+        self.Nb_blocks = len(self.blocks)
+        self.time_extent = self._get_extent()
+        self.non_empty.append(not block.empty)
+    else:
+      warnings.warn("Only SequenceBlock or Quantity instances can be added to the sequence.")
+
+  def update_block_references(self):
+    # Update reference time for each block
+    for i, block in enumerate(self.blocks):
+      shift = block.time_extent[-1].to('ms') + i * self.dt_blocks.to('ms') + self.dt_prep.to('ms')
+      block.update_reference(shift)
+
+  def _get_extent(self):
+    # Get time extent depending on gradient or RF timings
+    # Get (t_min, t_max) for each gradient
+    time_extent_b = np.array([(b.time_extent[0].m, b.time_extent[1].m) for b in self.blocks if b is not None])
+
+    # Time extent
+    if time_extent_b.size == 0:
+      # If no blocks, return zero extent
+      t_min = 0.0
+      t_max = 0.0
+    else:
+      t_min = np.min([time_extent_b.min(axis=0)])
+      t_max = np.max([time_extent_b.max(axis=0)])
+
+    return (Q_(t_min, 'ms'), Q_(t_max, 'ms'))
+  
+  def plot(self):
+    if MPI_rank == 0:
+      # Plot RF pulses and MR gradients
+      titles = ['RF', 'M', 'P', 'S']
+      discrete_blocks = [block._discrete_objects() for block in self.blocks]
+      extents = [block.time_extent for block in self.blocks]
+
+      fig, ax = plt.subplots(4, 1)
+      for i, objects in enumerate(discrete_blocks):
+        for j, obj in enumerate(objects):
+          for t, amp in obj:
+            ax[j].plot(t, amp)
+          ax[j].set_ylabel(titles[j])
+          ax[j].set_xlabel('Time (ms)')
+
+        # Add vertical lines for block extents
+        [ax[k].axvline(extents[i][0].m, color='b', linestyle='-.') for k in range(4)]
+        [ax[k].axvline(extents[i][1].m, color='r', linestyle='--') for k in range(4)]
+
+      # Add horizontal lines at zero
+      [ax[k].axhline(0, color='k', linestyle='--') for k in range(4)]
+
+      # Set x-limits
+      [ax[k].set_xlim([self.time_extent[0].m, self.time_extent[1].m]) for k in range(4)]
+
+      plt.show()
+
+
+class BlochSolver:
+  def __init__(self, sequence: Sequence, 
+               phantom: FEMPhantom, 
+               scanner: Scanner = Scanner(), 
+               M0: np.ndarray | float = 1.0, 
+               T1: Q_ = Q_(1000.0, 'ms'), 
+               T2: Q_ = Q_(100.0, 'ms'), 
+               delta_B: np.ndarray | float = 0.0,
+               pod_trajectory: PODTrajectory | None = None):
+    self.sequence = sequence
+    self.scanner = scanner
+    self.phantom = phantom
+    self.M0 = M0
+    self.T1 = T1
+    self.T2 = T2
+    self.delta_B = delta_B
+    self.initial_Mxy = np.zeros((phantom.local_nodes.shape[0], 1), dtype=np.complex64)
+    self.initial_Mz = np.zeros((phantom.local_nodes.shape[0], 1), dtype=np.float32)
+    self.pod_trajectory = pod_trajectory
+
+  def solve(self):
+    # Current machine time
+    t0 = time.time()
+
+    # Phantom position
+    x = self.phantom.local_nodes
+
+    # Dimensions
+    n_pos = x.shape[0]
+    n_blocks = len(self.sequence.blocks)
+
+    # List of indices indicating which blocks need to be stored
+    store_indices = np.array([i for i, block in enumerate(self.sequence.blocks) if block.store_magnetization])
+
+    # Allocate magnetizations
+    Mxy = np.zeros((n_pos, n_blocks), dtype=np.complex64)
+    Mz = np.zeros((n_pos, n_blocks), dtype=np.float32)
+    T2 = self.T2.m_as('ms') * np.ones((n_pos, ))
+    T1 = self.T1.m_as('ms') * np.ones((n_pos, ))
+    delta_B = self.delta_B * np.ones((n_pos, 1))
+
+    # Initial conditions for magnetizations
+    self.initial_Mz[:] = self.M0
+
+    # Gyromagnetic constant
+    gamma = self.scanner.gamma.m_as('rad/ms/mT')
+
+    # Solve the Bloch equations for each block
+    for i, block in enumerate(self.sequence.blocks):
+
+      # Update POD trajectory time shift
+      self.pod_trajectory.timeshift = block.time_extent[0].m_as('ms')
+
+      # Discrete time points
+      dtime = block._discretization().m_as('ms')
+      dt = np.diff(dtime, prepend=0)
+
+      # Precompute RF and gradients
+      rf_all, G_all = [], []
+      for t in dtime:
+          rf, m_gr, p_gr, s_gr = block(t)
+          rf_all.append(rf)
+          G_all.append([m_gr, p_gr, s_gr])
+
+      rf_all = np.array(rf_all)  # shape (n_time,)
+      G_all = np.array(G_all)    # shape (n_time, 3)
+
+      # Indicator array
+      regime_idx = (np.abs(rf_all) != 0.0).astype(int)
+
+      # Solve
+      Mxy_, Mz_ = solve_mri(x, T1, T2, delta_B, self.M0, gamma, rf_all, G_all, dt, regime_idx, self.initial_Mxy, self.initial_Mz, self.pod_trajectory)
+
+      # Update magnetizations
+      Mxy[:, i] = Mxy_[:, -1]
+      Mz[:, i]  = Mz_[:, -1]
+
+      # Store the initial magnetization for the next block
+      # TODO: I'm not sure if this is correct, it should be checked.
+      if block.empty is True:
+        self.initial_Mxy = Mxy_[:, -1]
+      else:
+        self.initial_Mxy = 0*Mxy_[:, -1]
+      self.initial_Mz = Mz_[:, -1]
+
+    # Print elapsed time
+    MPI_print('[BlochSolver] Elapsed time for solving the sequence: {:.2f} s'.format(time.time() - t0))
+
+    # Reset POD trajectory time shift
+    self.pod_trajectory.timeshift = 0.0
+
+    return Mxy[:, store_indices], Mz[:, store_indices]
