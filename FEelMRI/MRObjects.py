@@ -41,7 +41,7 @@ class Scanner:
 
 
 class BlochSolver:
-  def __init__(self, sequence, phantom, scanner=Scanner(), M0=1.0, T1=Q_(1000.0, 'ms'), T2=Q_(100.0, 'ms'), delta_B=0.0):
+  def __init__(self, sequence, phantom, scanner=Scanner(), M0=1.0, T1=Q_(1000.0, 'ms'), T2=Q_(100.0, 'ms'), delta_B=0.0, pod_trajectory=None):
     self.sequence = sequence
     self.scanner = scanner
     self.phantom = phantom
@@ -51,6 +51,7 @@ class BlochSolver:
     self.delta_B = delta_B
     self.initial_Mxy = np.zeros((phantom.local_nodes.shape[0], 1), dtype=np.complex64)
     self.initial_Mz = np.zeros((phantom.local_nodes.shape[0], 1), dtype=np.float32)
+    self.pod_trajectory = pod_trajectory
 
   def solve(self):
     # Current machine time
@@ -82,6 +83,8 @@ class BlochSolver:
     # Solve the Bloch equations for each block
     for i, block in enumerate(self.sequence.blocks):
 
+      self.pod_trajectory.timeshift = block.time_extent[0].m_as('ms')  # Update POD trajectory time shift
+
       # Discrete time points
       dtime = block._discretization().m_as('ms')
       dt = np.diff(dtime, prepend=0)
@@ -100,7 +103,7 @@ class BlochSolver:
       regime_idx = (np.abs(rf_all) != 0.0).astype(int)
 
       # Solve
-      Mxy_, Mz_ = solve_mri(x, T1, T2, delta_B, self.M0, gamma, rf_all, G_all, dt, regime_idx, self.initial_Mxy, self.initial_Mz)
+      Mxy_, Mz_ = solve_mri(x, T1, T2, delta_B, self.M0, gamma, rf_all, G_all, dt, regime_idx, self.initial_Mxy, self.initial_Mz, self.pod_trajectory)
 
       # Update magnetizations
       Mxy[:, i] = Mxy_[:, -1]
@@ -223,7 +226,7 @@ class SequenceBlock:
     all_timings = np.concatenate((gr_timings, rf_timings, seq_timings))
     all_timings = np.unique(np.sort(all_timings))
 
-    return Q_(all_timings, units=self.dur.units)
+    return Q_(all_timings, units='ms')
   
   def update_reference(self, t_ref):
     # Update reference time for each gradient and RF pulse

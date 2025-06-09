@@ -292,7 +292,7 @@ class FEMPhantom:
   def mass_matrix(self, lumped=False, use_submesh=False, quadrature_order=2):
     ''' Assemble mass matrix for integrals '''
     # Create finite element and quadrature rule according to the mesh type
-    cell_type = self.all_elements[0].type
+    cell_type = self.all_elements_[0].type
     fe = FiniteElement(family=family_dict[cell_type], 
                        cell_type=element_dict[cell_type], 
                        degree=degree_dict[cell_type], 

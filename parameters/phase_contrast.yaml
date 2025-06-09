@@ -1,0 +1,37 @@
+# Imaging parameters
+Imaging:
+  RES: [60, 30, 1]
+  FOV: [0.12, 0.06, 0.008] # meters
+  TimeSpacing: 0.031858     # seconds
+  Oversampling: 1
+  Sequence: "FFE"
+  LinesPerShot: 1
+
+VelocityEncoding:
+  VENC: 2.4   # meters per second
+  Directions:
+    dir1: [1.0, 0.0, 0.0]
+    dir2: [0.0, 1.0, 0.0]
+    dir3: [0.0, 0.0, 1.0]
+    dir4: [0.0, 0.0, 0.0]
+
+# Hardware parameters
+Hardware:
+  # G_sr: 195.0    # in mT/m/s
+  # G_max: 30.0    # in mT/m
+  G_sr: 180.0    # in mT/m/s
+  G_max: 33.0    # in mT/m
+  r_BW: 153.0e+3 # in Hz (equivalent to 450 Hz/pixel)
+
+# Imaging orientation (make sure about orthogonality)
+Formatting:
+  # Data taken from Box paraview filter
+  theta_x: 0.0    # degrees
+  theta_y: 0.0    # degrees
+  theta_z: -90.0  # degrees
+  # LOC: [-0.063242, 0.012783, -0.07]
+  LOC: [-0.063242, 0.017021, -0.055196]
+
+Phantom:
+  T2star: 0.2540  # seconds
+  T1: 1.000       # seconds 

@@ -3,7 +3,7 @@ Imaging:
   RES: [70, 55, 1]
   FOV: [0.16, 0.12, 0.008]  # meters
   TimeSpacing: 0.04         # seconds
-  RepetitionTime: 0.018     # seconds
+  RepetitionTime: 0.03      # seconds
   Oversampling: 2
   Sequence: "FFE"
   LinesPerShot: 1
@@ -12,7 +12,7 @@ Imaging:
 Hardware:
   G_sr: 180.0    # in mT/m/s
   G_max: 33.0    # in mT/m
-  r_BW: 120.0e+3 # in Hz (equivalent to 450 Hz/pixel)
+  r_BW: 50.0e+3  # in Hz (equivalent to 450 Hz/pixel)
 
 # Imaging orientation (make sure about orthogonality)
 Formatting:
