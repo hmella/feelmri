@@ -19,7 +19,7 @@ def get_segmentation_mask(u_image, tol=1.0e-15):
 
 
 # Add complex noise
-def add_cpx_noise(image, mask=[], std=[], relative_std=[], SNR=20, ref=0, recover_noise=False):
+def add_cpx_noise(image, mask=1, std=[], relative_std=[], SNR=20, ref=0, recover_noise=False):
   """
   Add complex noise to an input image.
 
