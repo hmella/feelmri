@@ -4,8 +4,73 @@
 from collections.abc import Callable
 
 import numpy as np
+from scipy.interpolate import interp1d
 
-from FEelMRI.MPIUtilities import MPI_print
+
+class RespiratoryMotion:
+  def __init__(self, time_array: np.ndarray,
+               data: np.ndarray,
+               timeshift: float = 0.0,
+               is_periodic: bool = False,
+               remove_mean: bool = False,
+               direction: np.ndarray = np.array([1, 0, 0])
+               ):
+    self.time_array = time_array
+    self.data = data
+    self.timeshift = timeshift
+    self.is_periodic = is_periodic
+    self.remove_mean = remove_mean
+    self.direction = direction.reshape((1, 3))/np.linalg.norm(direction)
+    self.interpolator = self.calculate_interpolator()
+
+  def __call__(self, t: float):
+      """ Evaluates the trajectory at time t using the POD modes and the Taylor coefficients.
+
+      :param t: time at which to evaluate the trajectory
+      :return: evaluated trajectory at time t
+      """
+      # if self.global_to_local is not None:
+      #   # If global_to_local mapping is provided, apply it to the modes
+      #   trajectory = self._evaluate_trajectory(t)[self.global_to_local, :]
+      # else:
+      #   # If no mapping is provided, return the modes directly
+      #   trajectory = self._evaluate_trajectory(t)
+      trajectory = self._evaluate_trajectory(t)
+
+      # Reshape trajectory to match the direction
+      trajectory = trajectory * self.direction
+
+      return trajectory
+
+  def calculate_interpolator(self):
+    # Data for interpolation
+    times = self.time_array
+    data  = self.data
+
+    # Remove mean if requested
+    print(data)
+    # TODO: fix this. Not working as expected
+    if self.remove_mean:
+      data_mean = np.mean(self.data, axis=0)
+      data -= data_mean
+    print(data)
+
+    # Secoond order spline interpolator
+    interpolator = interp1d(times, data, kind='cubic', bounds_error=False)
+
+    return interpolator
+
+  def _evaluate_trajectory(self, t: float):
+    """ Evaluates the trajectory at time t using the POD modes and the Taylor coefficients.
+
+    :param t: time at which to evaluate the trajectory
+    :return: evaluated trajectory at time t
+    """
+    t = t + self.timeshift  # Apply time shift if necessary
+    if self.is_periodic:
+      t = t % self.time_array[-1]
+
+    return self.interpolator(t)
 
 
 class PODTrajectory:
@@ -14,7 +79,8 @@ class PODTrajectory:
                global_to_local: np.ndarray = None,
                n_modes: int = 5, 
                taylor_order: int = 10, 
-               is_periodic: bool = False):
+               is_periodic: bool = False,
+               timeshift: float = 0.0):
       self.time_array = time_array
       self.data = data
       self.global_to_local = global_to_local
@@ -22,7 +88,7 @@ class PODTrajectory:
       self.taylor_order = taylor_order
       self.modes, self.weights = self.calculate_pod(remove_mean=False)
       self.taylor_coefficients = self.fit()
-      self.timeshift = 0.0
+      self.timeshift = timeshift
       self.is_periodic = is_periodic
 
   def __add__(self, other):
