@@ -39,12 +39,13 @@ class PODTrajectory:
       :param t: time at which to evaluate the trajectory
       :return: evaluated trajectory at time t
       """
-      if self.global_to_local is not None:
-        # If global_to_local mapping is provided, apply it to the modes
-        trajectory = self._evaluate_trajectory(t)[self.global_to_local, :]
-      else:
-        # If no mapping is provided, return the modes directly
-        trajectory = self._evaluate_trajectory(t)
+      # if self.global_to_local is not None:
+      #   # If global_to_local mapping is provided, apply it to the modes
+      #   trajectory = self._evaluate_trajectory(t)[self.global_to_local, :]
+      # else:
+      #   # If no mapping is provided, return the modes directly
+      #   trajectory = self._evaluate_trajectory(t)
+      trajectory = self._evaluate_trajectory(t)
 
       return trajectory
 
@@ -86,7 +87,12 @@ class PODTrajectory:
 
     weights = np.einsum('pn, pt -> nt', flat_sv, phi)
 
-    return phi.reshape((self.data.shape[0], -1, self.n_modes)), weights
+    # Reshape and distribute modes
+    phi = phi.reshape((self.data.shape[0], -1, self.n_modes))
+    if self.global_to_local is not None:
+      phi = phi[self.global_to_local, :, :]
+
+    return phi, weights
 
   def fit(self):
     """ Fits a Taylor polynomial of order self.order to the weights of the POD modes

@@ -66,9 +66,9 @@ if __name__ == '__main__':
   
   # Define respiratory motion object
   T = 3.0     # period
-  A = 0.00   # amplitude
+  A = 0.08    # amplitude
   times = np.linspace(0, T, 100)
-  def pod_resp_motion(t): return A*(1 - np.cos(2*np.pi*t/(2*T))**4) * np.array([[0, 1, 0]]).reshape((1, 3))
+  def pod_resp_motion(t): return A*(1 - np.cos(2*np.pi*t/(2*T))**4)
   # def expr(t): 
   #   return np.random.uniform(-0.5*A, 0.5*A, size=[1,]).reshape((1,1)) * np.array([[0, 1, 0]]).reshape((1, 3))
 
@@ -77,13 +77,13 @@ if __name__ == '__main__':
   #   plt.plot(times, expr(times))
   #   plt.show()
 
-  # direction = np.array([[0, 1, 0]]).reshape((1, 3, 1))
-  # motion = resp_motion(times).reshape((1, 1, -1)) * direction
-  # pod_resp_motion = PODTrajectory(time_array=times, 
-  #                             data=motion, 
-  #                             n_modes=10, 
-  #                             taylor_order=15,
-  #                             is_periodic=True)
+  direction = np.array([[0, 1, 0]]).reshape((1, 3, 1))
+  motion = pod_resp_motion(times).reshape((1, 1, -1)) * direction
+  pod_resp_motion = PODTrajectory(time_array=times, 
+                              data=motion, 
+                              n_modes=10, 
+                              taylor_order=15,
+                              is_periodic=True)
 
   # Create scanner object defining the gradient strength, slew rate and giromagnetic ratio
   scanner = Scanner(gradient_strength=Q_(parameters.G_max,'mT/m'), gradient_slew_rate=Q_(parameters.G_sr,'mT/m/ms'))
@@ -133,7 +133,7 @@ if __name__ == '__main__':
   # seq.plot()
 
   # Bloch solver
-  solver = BlochSolver(seq, phantom, scanner=scanner, M0=1000, T1=Q_(parameters.T1, 's'), T2=Q_(parameters.T2star, 's'), delta_B=delta_B0.reshape((-1, 1)))
+  solver = BlochSolver(seq, phantom, scanner=scanner, M0=1e+8, T1=Q_(parameters.T1, 's'), T2=Q_(parameters.T2star, 's'), delta_B=delta_B0.reshape((-1, 1)))
 
   # Solve
   Mxy, Mz = solver.solve()

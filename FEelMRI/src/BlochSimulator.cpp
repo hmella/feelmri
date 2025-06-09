@@ -14,7 +14,7 @@ std::pair<
     Matrix<std::complex<float>, Dynamic, Dynamic>,
     Matrix<float, Dynamic, Dynamic>
 >  solve_mri(
-    const Matrix<float, Dynamic, 3>& x,              // (n_pos, 3)
+    const Matrix<float, Dynamic, 3>& r0,             // (n_pos, 3)
     const Array<float, Dynamic, 1>& T1,              // (n_pos,)
     const Array<float, Dynamic, 1>& T2,              // (n_pos,)
     const Array<float, Dynamic, 1>& delta_B,         // (n_pos,)
@@ -25,12 +25,16 @@ std::pair<
     const Array<float, Dynamic, 1>& dt,              // (n_time,)
     const VectorXi& regime_idx,                  // (n_time,)
     const Array<std::complex<float>, Dynamic, 1> &Mxy_initial,
-    const Array<float, Dynamic, 1> &Mz_initial
+    const Array<float, Dynamic, 1> &Mz_initial,
+    const py::object &pod_trajectory
     ){
 
     // Number of nodes and time points
-    const int n_pos = x.rows();
+    const int n_pos = r0.rows();
     const int n_time = rf_all.size();
+
+    // Position at current time
+    Matrix<float, Dynamic, Dynamic> r(n_pos, 3);
 
     // Initialize matrices for Mxy and Mz and set initial conditions
     Matrix<std::complex<float>, Dynamic, Dynamic> Mxy = Matrix<std::complex<float>, Dynamic, Dynamic>::Zero(n_pos, n_time);
@@ -60,13 +64,16 @@ std::pair<
     // Solve the Bloch equations
     for (int i = 0; i < n_time - 1; ++i) {
 
+        // Update position
+        r.noalias() = r0 + (dt[i + 1] - dt[i])*py::cast<Matrix<float, Dynamic, Dynamic>>(pod_trajectory(dt[i + 1]));
+
         // External magnetic fields
         B1_real = rf_all[i + 1].real();
         B1_imag = rf_all[i + 1].imag();
-        Bz = (x * G_all.row(i + 1).transpose()).array() + delta_B;
+        Bz = (r * G_all.row(i + 1).transpose()).array() + delta_B;
         B.col(0) = B1_real;
         B.col(1) = B1_imag;
-        B.col(2) = (x * G_all.row(i + 1).transpose()).array() + delta_B;
+        B.col(2) = (r * G_all.row(i + 1).transpose()).array() + delta_B;
         // B.col(0).array() = rf_all[i + 1].real(); // B1_real
         // B.col(1).array() = rf_all[i + 1].imag(); // B1_imag
         // B.col(2) = (x * G_all.row(i + 1).transpose()).array() + delta_B;
