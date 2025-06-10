@@ -8,13 +8,14 @@ from pathlib import Path
 import numpy as np
 from pint import Quantity as Q_
 
-from FEelMRI.KSpaceTraj import CartesianStack, Gradient
+from FEelMRI.Bloch import BlochSolver, Sequence, SequenceBlock
+from FEelMRI.IO import XDMFFile
+from FEelMRI.KSpaceTraj import CartesianStack
 from FEelMRI.Math import Rx, Ry, Rz
 from FEelMRI.Motion import PODTrajectory
 from FEelMRI.MPIUtilities import MPI_print, MPI_rank, gather_data
 from FEelMRI.MRImaging import PositionEncoding, SliceProfile
-from FEelMRI.MRObjects import (RF, BlochSolver, Gradient, Scanner, Sequence,
-                               SequenceBlock)
+from FEelMRI.MRObjects import RF, Gradient, Scanner
 from FEelMRI.Parameters import ParameterHandler
 from FEelMRI.Phantom import FEMPhantom
 from FEelMRI.Plotter import MRIPlotter
@@ -50,18 +51,19 @@ if __name__ == '__main__':
   phantom.create_submesh(markers, refine=False, element_size=0.003)
 
   # Create POD trajectory object
-  trajectory = np.zeros([phantom.local_nodes.shape[0], phantom.local_nodes.shape[1], phantom.Nfr], dtype=np.float32)
+  trajectory = np.zeros([phantom.global_nodes.shape[0], phantom.global_nodes.shape[1], phantom.Nfr], dtype=np.float32)
   for fr in range(phantom.Nfr):
     # Read displacement data in frame fr
     phantom.read_data(fr)
     displacement = phantom.point_data['displacement'] @ MPS_ori
-    submesh_displacement = phantom.interpolate_to_submesh(displacement, local=True)
+    submesh_displacement = phantom.interpolate_to_submesh(displacement, local=False)
     trajectory[..., fr] = submesh_displacement
 
   # Define POD object
   times = np.linspace(0, (phantom.Nfr-1)*parameters.TimeSpacing, phantom.Nfr)
   pod_trajectory = PODTrajectory(time_array=times,
                                  data=trajectory,
+                                 global_to_local=phantom.global_to_local_nodes,
                                  n_modes=5,
                                  taylor_order=10,
                                  is_periodic=True)
@@ -73,7 +75,7 @@ if __name__ == '__main__':
   def spatial(x):
       return x[:,0] + x[:,1] + x[:,2]
   delta_B0 = spatial(phantom.local_nodes)
-  delta_B0 /= np.abs(spatial(phantom.local_nodes).flatten()).max()
+  delta_B0 /= np.abs(spatial(phantom.global_nodes).flatten()).max()
   delta_B0 *= 1.5 * 1e-6 # 1.5 ppm of the main magnetic field
   delta_omega0 = 2.0 * np.pi * scanner.gammabar.m_as('Hz/T') * delta_B0
 
@@ -87,11 +89,11 @@ if __name__ == '__main__':
     dt=Q_(1e-2, 'ms'), 
     plot=False, 
     bandwidth='maximum',
-    refocusing_area_frac=0.7758)
+    refocusing_area_frac=0.7455)
   # sp.optimize(frac_start=0.7, frac_end=0.8, N=100, profile_samples=100)
 
   # SPAMM magnetization
-  SPAMM_mag = [None,]*len(enc.directions)
+  Mxy_spamm = np.zeros((phantom.local_nodes.shape[0], phantom.Nfr, enc.nb_directions), dtype=np.complex64)
 
   # Simulate the SPAMM preparation block for each encoding direction
   t0 = time.time()
@@ -117,21 +119,34 @@ if __name__ == '__main__':
     imaging = SequenceBlock(gradients=[sp.dephasing, sp.rephasing], rf_pulses=[sp.rf], dt_rf=Q_(1e-2, 'ms'), dt_gr=Q_(1e-2, 'ms'), dt=Q_(1, 'ms'), store_magnetization=True)
 
     # Add blocks to the sequence
+    time_spacing = Q_(parameters.TimeSpacing, 's') - (imaging.time_extent[1] - sp.rf.t_ref)
     seq.add_block(prep)
     for fr in range(phantom.Nfr):
       seq.add_block(imaging)
-      seq.add_block(Q_(parameters.TimeSpacing, 's'), dt=Q_(1, 'ms'))  # Time spacing between frames
+      seq.add_block(Q_(time_spacing, 's'), dt=Q_(1, 'ms'))  # Time spacing between frames
 
     # Bloch solver
-    solver = BlochSolver(seq, phantom, scanner=scanner, M0=1e+9, T1=Q_(parameters.T1, 's'), T2=Q_(parameters.T2star, 's'), delta_B=delta_B0.reshape((-1, 1)))
+    solver = BlochSolver(seq, phantom, 
+                         scanner=scanner, 
+                         M0=1e+9, 
+                         T1=Q_(parameters.T1, 's'), 
+                         T2=Q_(parameters.T2star, 's'), 
+                         delta_B=delta_B0.reshape((-1, 1)),
+                         pod_trajectory=pod_trajectory)
 
     # Solve for x and y directions
     Mxy, Mz = solver.solve() 
 
     # Assign the magnetization to the corresponding direction
-    SPAMM_mag[i] = Mxy
+    Mxy_spamm[..., i] = Mxy
 
-  seq.plot()
+  # # seq.plot()
+  # file = XDMFFile('magnetization_{:d}.xdmf'.format(MPI_rank), nodes=phantom.local_nodes, elements={'tetra': phantom.local_elements})
+  # for fr in range(SPAMM_mag[0].shape[1]):
+  #   file.write(pointData={'Mx': np.real(SPAMM_mag[0][:, fr]), 
+  #                         'My': np.imag(SPAMM_mag[0][:, fr]),
+  #                         'Mz': Mz[:, fr]}, time=fr*parameters.TimeSpacing)
+  # file.close()
 
   # Store elapsed time
   bloch_time = time.time() - t0
@@ -170,16 +185,13 @@ if __name__ == '__main__':
     # Assemble mass matrix for integrals (just once)
     M = phantom.mass_matrix_2(phantom.local_nodes + submesh_displacement, lumped=True, quadrature_order=2)
 
-    # SPAMM magnetization for this frame
-    M_spamm = np.vstack((SPAMM_mag[0][:, fr], SPAMM_mag[1][:, fr])).T
-
     # Update reference time of POD trajectory
     pod_trajectory.timeshift = fr * parameters.TimeSpacing
 
     # Generate 4D flow image
     MPI_print('Generating frame {:d}'.format(fr))
     # K[:,:,:,:,fr] = SPAMM(MPI_rank, M, traj.points, traj.times.m_as('s'), phantom.local_nodes + submesh_displacement, M_spamm, delta_omega0, T2star, profile)
-    K[:,:,:,:,fr] = SPAMM(MPI_rank, M, traj.points, traj.times.m_as('s'), phantom.local_nodes, M_spamm, delta_omega0, T2star, pod_trajectory)
+    K[:,:,:,:,fr] = SPAMM(MPI_rank, M, traj.points, traj.times.m_as('s'), phantom.local_nodes, Mxy_spamm[:,fr,:], delta_omega0, T2star, pod_trajectory)
 
   # Store elapsed time
   spamm_time = time.time() - t0

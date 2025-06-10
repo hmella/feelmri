@@ -286,7 +286,7 @@ class SliceProfile:
 
 
 class VelocityEncoding:
-  def __init__(self, VENC, directions, dtype=np.float32):
+  def __init__(self, VENC: Q_, directions: list, dtype=np.float32):
     """
     Initializes the MRImaging object with VENC and directions.
 
@@ -297,7 +297,7 @@ class VelocityEncoding:
     Raises:
       ValueError: If the length of VENC does not match the number of directions.
     """
-    if isinstance(VENC, float):
+    if isinstance(VENC.m, float):
       self.VENC = (np.ones(directions.shape[0])*VENC).astype(dtype)
     elif len(VENC) == directions.shape[0]:
       self.VENC = (np.array(VENC)).astype(dtype)

@@ -24,6 +24,8 @@ from FEelMRI.Tagging import SPAMM
 
 if __name__ == '__main__':
 
+  print(type(Q_(np.array([1, 2, 3]), 'm')))
+
   # Import imaging parameters
   parameters = ParameterHandler('parameters/respiratory_motion.yaml')
 
@@ -74,15 +76,6 @@ if __name__ == '__main__':
                               is_periodic=True,
                               direction=np.array([0, 1, 0]),
                               remove_mean=True)
-  
-  import matplotlib.pyplot as plt
-  motion = []
-  times  = np.linspace(0, 2*T, 100)
-  for t in times:
-    pod_resp_motion.timeshift = t
-    motion.append(pod_resp_motion(0).max())
-  plt.plot(times, motion)
-  plt.show()
 
   # Create scanner object defining the gradient strength, slew rate and giromagnetic ratio
   scanner = Scanner(gradient_strength=Q_(parameters.G_max,'mT/m'), gradient_slew_rate=Q_(parameters.G_sr,'mT/m/ms'))

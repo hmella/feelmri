@@ -30,7 +30,9 @@ class Scanner:
   __init__(self, field_strength=1.5, gradient_strength=33, gradient_slew_rate=200)
     Initializes the Scanner with the given field strength, gradient strength, and gradient slew rate.
   """
-  def __init__(self, field_strength=Q_(1.5, 'T'), gradient_strength=Q_(33,'mT/m'), gradient_slew_rate=Q_(180,'mT/m/ms')):
+  def __init__(self, field_strength: Q_ = Q_(1.5, 'T'), 
+              gradient_strength: Q_ = Q_(33,'mT/m'),
+              gradient_slew_rate: Q_ = Q_(180,'mT/m/ms')):
     self.field_strength = field_strength
     self.gradient_strength = gradient_strength
     self.gradient_slew_rate = gradient_slew_rate

@@ -3,7 +3,7 @@ Imaging:
   RES: [70, 55, 1]
   FOV: [0.16, 0.12, 0.008]    # meters
   TimeSpacing: 0.04           # seconds
-  Oversampling: 2
+  Oversampling: 1
   Sequence: "FFE"
   LinesPerShot: 11
 
@@ -28,5 +28,5 @@ Formatting:
   LOC: [0.022945010601301028, 0.0014597910123357039, 0.0195306879396226624]
 
 Phantom:
-  T2star: 0.05     # seconds
+  T2star: 0.05    # seconds
   T1: 0.8         # seconds 
