@@ -17,7 +17,7 @@ from FEelMRI.MPIUtilities import MPI_print, MPI_rank, gather_data
 from FEelMRI.MRImaging import SliceProfile, VelocityEncoding
 from FEelMRI.MRObjects import RF, Gradient, Scanner
 from FEelMRI.Noise import add_cpx_noise
-from FEelMRI.Parameters import ParameterHandler
+from FEelMRI.Parameters import ParameterHandler2
 from FEelMRI.Phantom import FEMPhantom
 from FEelMRI.PhaseContrast import PC
 from FEelMRI.Plotter import MRIPlotter
@@ -26,53 +26,53 @@ from FEelMRI.Recon import CartesianRecon
 if __name__ == '__main__':
 
   # Import imaging parameters
-  parameters = ParameterHandler('parameters/phase_contrast.yaml')
-
-  # Imaging orientation paramters
-  theta_x = np.deg2rad(parameters.theta_x)
-  theta_y = np.deg2rad(parameters.theta_y)
-  theta_z = np.deg2rad(parameters.theta_z)
-  MPS_ori = Rz(theta_z)@Rx(theta_x)@Ry(theta_y)
-  LOC = parameters.LOC
-
-  # Velocity encoding parameters
-  venc_dirs = list(parameters.Directions.values())
-  enc = VelocityEncoding(parameters.VENC, np.array(venc_dirs))
+  parameters = ParameterHandler2('parameters/phase_contrast.yaml')
 
   # Create FEM phantom object
   phantom = FEMPhantom(path='phantoms/aorta_CFD.xdmf', velocity_label='velocity', scale_factor=0.01)
 
+  # Imaging orientation paramters
+  theta_x = np.deg2rad(parameters.Formatting.theta_x)
+  theta_y = np.deg2rad(parameters.Formatting.theta_y)
+  theta_z = np.deg2rad(parameters.Formatting.theta_z)
+  MPS_ori = Rz(theta_z)@Rx(theta_x)@Ry(theta_y)
+  LOC = parameters.Formatting.LOC
+
   # Translate phantom to obtain the desired slice location
   phantom.orient(MPS_ori, LOC)
 
-  # We can use only a submesh to speed up the simulation. The submesh is
-  # created by selecting the elements that are inside the FOV. We can also
-  # refine the submesh to increase the number of nodes and elements
-  midpoints = np.array([np.mean(phantom.global_nodes[e, :], axis=0) for e in phantom.global_elements])
-  condition = (np.abs(midpoints[:,2]) <= 0.6*parameters.FOV[2]) > 1e-3
-  markers = np.where(condition)[0]
+  # Velocity encoding parameters
+  venc_dirs = list(parameters.VelocityEncoding.Directions.values())
+  enc = VelocityEncoding(parameters.VelocityEncoding.VENC, np.array(venc_dirs))
+
+  # We can use only a submesh to speed up the simulation. The submesh is created by selecting the elements that are inside the FOV. We can also refine the submesh to increase the number of nodes and elements  
+  midpoints = phantom.global_nodes[phantom.global_elements].mean(axis=1)
+  markers = np.where(np.abs(midpoints[:, 2]) <= 0.6 * parameters.Imaging.FOV[2].m_as('m'))[0]
   phantom.create_submesh(markers, refine=False, element_size=0.0012)
 
   # Create POD trajectory object for velocity
-  trajectory = np.zeros([phantom.global_nodes.shape[0], phantom.global_nodes.shape[1], phantom.Nfr], dtype=np.float32)
+  shape = [phantom.global_nodes.shape[0], phantom.global_nodes.shape[1], phantom.Nfr]
+  trajectory = Q_(np.zeros(shape, dtype=np.float32), 'm/s')
   for fr in range(phantom.Nfr):
     # Read displacement data in frame fr
     phantom.read_data(fr)
     velocity = phantom.point_data['velocity'] @ MPS_ori
     submesh_velocity = phantom.interpolate_to_submesh(velocity, local=False)
-    trajectory[..., fr] = submesh_velocity
+    trajectory[..., fr] = Q_(submesh_velocity, 'm/s')
 
   # Define POD object
-  times = 1000*np.linspace(0, (phantom.Nfr-1)*parameters.TimeSpacing, phantom.Nfr)
-  pod_trajectory = PODTrajectory(time_array=times,
-                                 data=trajectory,
+  dt = parameters.Imaging.TimeSpacing
+  times = np.linspace(0, (phantom.Nfr-1)*dt, phantom.Nfr)
+  pod_trajectory = PODTrajectory(time_array=times.m_as('ms'),
+                                 data=trajectory.m_as('m/ms'),
                                  global_to_local=phantom.global_to_local_nodes,
                                  n_modes=5,
                                  taylor_order=10,
                                  is_periodic=True)
 
   # Create scanner object defining the gradient strength, slew rate and giromagnetic ratio
-  scanner = Scanner(gradient_strength=Q_(parameters.G_max,'mT/m'), gradient_slew_rate=Q_(parameters.G_sr,'mT/m/ms'))
+  scanner = Scanner(gradient_strength=parameters.Hardware.G_max,
+                    gradient_slew_rate=parameters.Hardware.G_sr)
 
   # Field inhomogeneity
   def spatial(x):
@@ -85,8 +85,13 @@ if __name__ == '__main__':
   # Slice profile
   # The slice profile prepulse is calculated based on a reference RF pulse with
   # user-defined characteristics. The slice profile object allows accessing the calculated adjusted RF pulse and dephasing and rephasing gradients
-  rf = RF(scanner=scanner, NbLobes=[4, 4], alpha=0.46, shape='apodized_sinc', flip_angle=Q_(np.deg2rad(8),'rad') , t_ref=Q_(0.0,'ms'))
-  sp = SliceProfile(delta_z=Q_(parameters.FOV[2], 'm'), 
+  rf = RF(scanner=scanner, 
+          NbLobes=[4, 4], 
+          alpha=0.46, 
+          shape='apodized_sinc', 
+          flip_angle=Q_(np.deg2rad(8),'rad'), 
+          t_ref=Q_(0.0,'ms'))
+  sp = SliceProfile(delta_z=parameters.Imaging.FOV[2].to('m'), 
     profile_samples=100,
     rf=rf,
     dt=Q_(1e-2, 'ms'), 
@@ -104,7 +109,8 @@ if __name__ == '__main__':
     # Bipolar gradient
     t_ref = sp.rephasing.t_ref + sp.rephasing.dur
     bp1 = Gradient(scanner=scanner, t_ref=t_ref, axis=2)
-    bp2 = bp1.make_bipolar(Q_(parameters.VENC, 'm/s'))
+    print(bp1.timings)
+    bp2 = bp1.make_bipolar(parameters.VelocityEncoding.VENC.to('m/s'))
     bp1 *= d + (-1)**d
     bp2 *= d + (-1)**d
 
@@ -119,42 +125,43 @@ if __name__ == '__main__':
     dummy.store_magnetization = False
 
     # Add blocks to the sequence
-    time_spacing = Q_(parameters.TimeSpacing, 's') - (imaging.time_extent[1] - sp.rf.t_ref)
+    time_spacing = parameters.Imaging.TimeSpacing.to('ms') - (imaging.time_extent[1] - sp.rf.t_ref)
     # for i in range(80):
     #   seq.add_block(dummy.copy())  # Add dummy blocks to reach the steady state
     #   seq.add_block(time_spacing, dt=Q_(1, 'ms'))  # Delay between imaging blocks
-    for fr in range(phantom.Nfr):
+    for fr in range(1):
       seq.add_block(imaging)
-      seq.add_block(time_spacing, dt=Q_(1, 'ms'))  # Time spacing between frames
-    # seq.plot()
+      # seq.add_block(time_spacing, dt=Q_(1, 'ms'))  # Time spacing between frames
+    seq.plot()
 
     # Bloch solver
-    solver = BlochSolver(seq, phantom, scanner=scanner, M0=1e+9, T1=Q_(parameters.T1, 's'), T2=Q_(parameters.T2star, 's'), delta_B=delta_B0.reshape((-1, 1)), pod_trajectory=pod_trajectory)
+    solver = BlochSolver(seq, phantom, 
+                         scanner=scanner, 
+                         M0=1e+9, 
+                         T1=parameters.Phantom.T1.to('ms'),
+                         T2=parameters.Phantom.T2star.to('ms'), 
+                         delta_B=delta_B0.reshape((-1, 1)),
+                         pod_trajectory=pod_trajectory)
 
     # Solve for x and y directions
     Mxy, Mz = solver.solve()
     Mxy_PC[..., d] = Mxy
 
-  # testfile = XDMFFile('test_new.xdmf', nodes=phantom.local_nodes, elements={'tetra': phantom.local_elements})
-  # for i in range(Mxy.shape[1]):
-  #   testfile.write(pointData={'Mx': np.real(Mxy[:,i]), 'My': np.imag(Mxy[:,i]), 'Mz': Mz[:,i]}, time=i)
-  # testfile.close()
-
   # Path to export the generated data
-  export_path = Path('MRImages/{:s}_V{:.0f}.pkl'.format(parameters.Sequence, 100.0*parameters.VENC))
+  export_path = Path('MRImages/{:s}_V{:.0f}.pkl'.format(parameters.Imaging.Sequence, parameters.VelocityEncoding.VENC.m_as('cm/s')))
 
   # Make sure the directory exist
   os.makedirs(str(export_path.parent), exist_ok=True)
 
   # Generate kspace trajectory
-  traj = CartesianStack(FOV=Q_(parameters.FOV,'m'),
-    t_start=imaging.time_extent[1] - sp.rf.t_ref,
-    res=parameters.RES, 
-    oversampling=parameters.Oversampling, 
-    lines_per_shot=parameters.LinesPerShot, 
-    MPS_ori=MPS_ori, 
-    LOC=LOC, 
-    receiver_bw=Q_(parameters.r_BW,'Hz'), 
+  traj = CartesianStack(FOV = parameters.Imaging.FOV.to('m'),
+    t_start = imaging.time_extent[1] - sp.rf.t_ref,
+    res = parameters.Imaging.RES, 
+    oversampling = parameters.Imaging.Oversampling, 
+    lines_per_shot = parameters.Imaging.LinesPerShot, 
+    MPS_ori = MPS_ori, 
+    LOC = LOC, 
+    receiver_bw=parameters.Hardware.r_BW, 
     plot_seq=False)
 
   # Print echo time
@@ -166,7 +173,7 @@ if __name__ == '__main__':
   slices = traj.slices
   K = np.zeros([ro_samples, ph_samples, slices, enc.nb_directions, phantom.Nfr], dtype=np.complex64)
 
-  T2star = (parameters.T2star * np.ones([phantom.local_nodes.shape[0]])).astype(np.float32)
+  T2star = (parameters.Phantom.T2star * np.ones([phantom.local_nodes.shape[0]])).astype(np.float32)
 
   # Assemble mass matrix for integrals (just once to accelerate the simulation)
   M = phantom.mass_matrix(lumped=True)
@@ -177,13 +184,8 @@ if __name__ == '__main__':
       
       t0_fr = time.time()
 
-      # # Read velocity data in peak-systolic frame
-      # phantom.read_data(fr)
-      # velocity = phantom.point_data['velocity'] @ traj.MPS_ori
-      # submesh_velocity = phantom.interpolate_to_submesh(velocity)
-
       # Generate 4D flow image
-      K[:,:,:,:,fr] = PC(MPI_rank, M, traj.points, traj.times.m_as('s'), phantom.local_nodes, delta_omega0, T2star, Mxy_PC[:, fr, :])
+      K[:,:,:,:,fr] = PC(MPI_rank, M, traj.points, traj.times.m_as('ms'), phantom.local_nodes, delta_omega0, T2star.m_as('ms'), Mxy_PC[:, fr, :])
 
       sys.stdout.flush()
       sys.stdout.write("\r" + 'Elapsed time frame {:d}: {:.2f} s'.format(fr, time.time()-t0_fr))

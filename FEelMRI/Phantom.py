@@ -4,6 +4,7 @@ import warnings
 import meshio
 import numpy as np
 import pymetis
+from pint import Quantity as Q_
 from scipy.interpolate import RBFInterpolator
 
 from FEelMRI.FEAssemble import MassAssemble
@@ -279,14 +280,14 @@ class FEMPhantom:
       return interp_data
 
 
-  def orient(self, MPS_ori, LOC):
+  def orient(self, MPS_ori: np.ndarray, LOC: Q_):
     ''' Translate phantom to obtain the desired slice location '''
     # Get orientation
     MPS_ori = MPS_ori.astype(self.dtype)
     LOC = LOC.astype(self.dtype)
 
     # Translate and rotate
-    self.global_nodes = (self.global_nodes - LOC) @ MPS_ori
+    self.global_nodes = (self.global_nodes - LOC.m) @ MPS_ori
 
 
   def mass_matrix(self, lumped=False, use_submesh=False, quadrature_order=2):

@@ -233,58 +233,69 @@ class BlochSolver:
                T1: Q_ = Q_(1000.0, 'ms'), 
                T2: Q_ = Q_(100.0, 'ms'), 
                delta_B: np.ndarray | float = 0.0,
-               pod_trajectory: PODTrajectory | None = None):
+               pod_trajectory: PODTrajectory | None = None,
+               initial_Mxy: np.ndarray | float = 0.0,
+               initial_Mz: np.ndarray | float = None):
+    ones = np.ones((phantom.local_nodes.shape[0], 1), dtype=np.float32)
     self.sequence = sequence
     self.scanner = scanner
     self.phantom = phantom
     self.M0 = M0
-    self.T1 = T1
-    self.T2 = T2
-    self.delta_B = delta_B
-    self.initial_Mxy = np.zeros((phantom.local_nodes.shape[0], 1), dtype=np.complex64)
-    self.initial_Mz = np.zeros((phantom.local_nodes.shape[0], 1), dtype=np.float32)
+    self.T1 = Q_(T1.m * ones, T1.units)
+    self.T2 = Q_(T2.m * ones, T2.units)
+    self.delta_B = delta_B * ones
+    self.initial_Mxy = initial_Mxy * ones.astype(np.complex64)
+    self.initial_Mz = initial_Mz * ones if initial_Mz is not None else M0 * ones
     self.pod_trajectory = pod_trajectory
 
-  def solve(self):
+  def solve(self, start_block: int = 0, end_block: int = -1):
     # Current machine time
     t0 = time.time()
 
     # Phantom position
     x = self.phantom.local_nodes
 
+    # Blocks to be solved
+    if end_block == -1:
+      end_block = len(self.sequence.blocks)
+    if start_block < 0 or end_block > len(self.sequence.blocks):
+      raise ValueError("Invalid block range specified. Please check start_block and end_block values.")
+    if start_block >= end_block:
+      raise ValueError("start_block must be less than end_block.")
+    blocks = self.sequence.blocks[start_block:end_block]
+
     # Dimensions
-    n_pos = x.shape[0]
-    n_blocks = len(self.sequence.blocks)
+    nb_nodes  = x.shape[0]
+    nb_blocks = len(blocks)
 
     # List of indices indicating which blocks need to be stored
-    store_indices = np.array([i for i, block in enumerate(self.sequence.blocks) if block.store_magnetization])
+    store_indices = np.array([i for i, block in enumerate(blocks) if block.store_magnetization])
 
     # Allocate magnetizations
-    Mxy = np.zeros((n_pos, n_blocks), dtype=np.complex64)
-    Mz = np.zeros((n_pos, n_blocks), dtype=np.float32)
-    T2 = self.T2.m_as('ms') * np.ones((n_pos, ))
-    T1 = self.T1.m_as('ms') * np.ones((n_pos, ))
-    delta_B = self.delta_B * np.ones((n_pos, 1))
+    Mxy = np.zeros((nb_nodes, nb_blocks), dtype=np.complex64)
+    Mz  = np.zeros((nb_nodes, nb_blocks), dtype=np.float32)
 
-    # Initial conditions for magnetizations
-    self.initial_Mz[:] = self.M0
+    # Stripe units of Bloch parameters just once
+    T1 = self.T1.m_as('ms')
+    T2 = self.T2.m_as('ms')
 
     # Gyromagnetic constant
     gamma = self.scanner.gamma.m_as('rad/ms/mT')
 
     # Solve the Bloch equations for each block
-    for i, block in enumerate(self.sequence.blocks):
+    for i, block in enumerate(blocks):
 
       # Update POD trajectory time shift
-      self.pod_trajectory.timeshift = block.time_extent[0].m_as('ms')
+      if self.pod_trajectory is not None:
+        self.pod_trajectory.timeshift = block.time_extent[0].m_as('ms')
 
-      # Discrete time points
-      dtime = block._discretization().m_as('ms')
-      dt = np.diff(dtime, prepend=0)
+      # Discrete time points and time intervals
+      discrete_times = block._discretization().m_as('ms')
+      dt = np.diff(discrete_times, prepend=0)
 
       # Precompute RF and gradients
       rf_all, G_all = [], []
-      for t in dtime:
+      for t in discrete_times:
           rf, m_gr, p_gr, s_gr = block(t)
           rf_all.append(rf)
           G_all.append([m_gr, p_gr, s_gr])
@@ -296,17 +307,18 @@ class BlochSolver:
       regime_idx = (np.abs(rf_all) != 0.0).astype(int)
 
       # Solve
-      Mxy_, Mz_ = solve_mri(x, T1, T2, delta_B, self.M0, gamma, rf_all, G_all, dt, regime_idx, self.initial_Mxy, self.initial_Mz, self.pod_trajectory)
+      Mxy_, Mz_ = solve_mri(x, T1, T2, self.delta_B, self.M0, gamma, rf_all, G_all, dt, regime_idx, self.initial_Mxy, self.initial_Mz, self.pod_trajectory)
 
       # Update magnetizations
       Mxy[:, i] = Mxy_[:, -1]
       Mz[:, i]  = Mz_[:, -1]
 
-      # Store the initial magnetization for the next block
+      # Update the initial magnetization for the next block
       # TODO: I'm not sure if this is correct, it should be checked.
       if block.empty is True:
         self.initial_Mxy = Mxy_[:, -1]
       else:
+        # This is done because gradient or RF spoiling cannot be applied on coarse meshes. Therefore, we need to artificially spoil the magnetization.
         self.initial_Mxy = 0*Mxy_[:, -1]
       self.initial_Mz = Mz_[:, -1]
 
@@ -314,6 +326,7 @@ class BlochSolver:
     MPI_print('[BlochSolver] Elapsed time for solving the sequence: {:.2f} s'.format(time.time() - t0))
 
     # Reset POD trajectory time shift
-    self.pod_trajectory.timeshift = 0.0
+    if self.pod_trajectory is not None:
+      self.pod_trajectory.timeshift = 0.0
 
     return Mxy[:, store_indices], Mz[:, store_indices]
