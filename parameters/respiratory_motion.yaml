@@ -1,18 +1,18 @@
 # Imaging parameters
 Imaging:
   RES: [70, 55, 1]
-  FOV: [0.16, 0.12, 0.008]  # meters
-  TimeSpacing: 0.04         # seconds
-  RepetitionTime: 0.03     # seconds
+  FOV: {value: [0.16, 0.12, 0.008], unit: "m"}
+  TimeSpacing: {value: 0.04, unit: "s"}
+  TR: {value: 0.017, unit: "s"}
   Oversampling: 2
   Sequence: "FFE"
   LinesPerShot: 1
 
 # Hardware parameters
 Hardware:
-  G_sr: 180.0    # in mT/m/s
-  G_max: 33.0    # in mT/m
-  r_BW: 50.0e+3  # in Hz (equivalent to 450 Hz/pixel)
+  G_sr: {value: 180.0, unit: "mT/m/ms"}
+  G_max: {value: 3.0, unit: "mT/m"}
+  r_BW: {value: 50.0e+3, unit: "Hz"}
 
 # Imaging orientation (make sure about orthogonality)
 Formatting:
@@ -20,8 +20,8 @@ Formatting:
   theta_x: -9.2091     # degrees
   theta_y: -90.7028    # degrees
   theta_z: 1.1159      # degrees
-  LOC: [0.02295, 0.001460, 0.01953]
+  LOC: {value: [0.02295, 0.001460, 0.01953], unit: "m"}
 
 Phantom:
-  T2star: 0.05     # seconds
-  T1: 0.8         # seconds 
+  T2star: {value: 0.05, unit: "s"}
+  T1: {value: 0.8, unit: "s"} 

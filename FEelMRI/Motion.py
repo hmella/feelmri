@@ -32,6 +32,14 @@ class RespiratoryMotion:
     self.interpolation_method = interpolation_method
     self.interpolator = self.calculate_interpolator()
 
+  def __add__(self, other):
+      """ Overloads the addition operator to allow for the addition of another
+      PODTrajectory or a callable object that returns a trajectory.
+      :param other: another PODTrajectory or a callable object
+      :return: a new PODSum object that represents the sum of the two trajectories
+      """      
+      return PODSum(self, other)
+
   def __call__(self, t: float):
       """ Evaluates the trajectory at time t using the interpolator.
       :param t: time at which to evaluate the trajectory
@@ -92,6 +100,12 @@ class PODTrajectory:
       self.taylor_coefficients = self.fit()
       self.timeshift = timeshift
       self.is_periodic = is_periodic
+
+  def __repr__(self):
+      """ Returns a string representation of the PODTrajectory object.
+      :return: string representation of the PODTrajectory object
+      """
+      return f"PODTrajectory(n_modes={self.n_modes}, taylor_order={self.taylor_order}, is_periodic={self.is_periodic})"
 
   def __add__(self, other):
       """ Overloads the addition operator to allow for the addition of another

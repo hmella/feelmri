@@ -69,8 +69,8 @@ Magnetization<T> solve_mri(
 
         // Update position
         t += dt[i + 1];
-        r.noalias() = r0 + t*py::cast<Matrix<T, Dynamic, Dynamic>>(pod_trajectory(0.0));
-        // r.noalias() = r0 + py::cast<Matrix<T, Dynamic, Dynamic>>(pod_trajectory(t/1000.0));
+        // r.noalias() = r0 + t*py::cast<Matrix<T, Dynamic, Dynamic>>(pod_trajectory(0.0));
+        r.noalias() = r0 + py::cast<Matrix<T, Dynamic, Dynamic>>(pod_trajectory(t));
         // r.noalias() = r0;
 
         // External magnetic fields
