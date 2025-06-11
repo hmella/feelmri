@@ -109,7 +109,6 @@ if __name__ == '__main__':
     # Bipolar gradient
     t_ref = sp.rephasing.t_ref + sp.rephasing.dur
     bp1 = Gradient(scanner=scanner, t_ref=t_ref, axis=2)
-    print(bp1.timings)
     bp2 = bp1.make_bipolar(parameters.VelocityEncoding.VENC.to('m/s'))
     bp1 *= d + (-1)**d
     bp2 *= d + (-1)**d
@@ -126,13 +125,12 @@ if __name__ == '__main__':
 
     # Add blocks to the sequence
     time_spacing = parameters.Imaging.TimeSpacing.to('ms') - (imaging.time_extent[1] - sp.rf.t_ref)
-    # for i in range(80):
-    #   seq.add_block(dummy.copy())  # Add dummy blocks to reach the steady state
-    #   seq.add_block(time_spacing, dt=Q_(1, 'ms'))  # Delay between imaging blocks
-    for fr in range(1):
+    for i in range(80):
+      seq.add_block(dummy.copy())  # Add dummy blocks to reach the steady state
+      seq.add_block(time_spacing, dt=Q_(1, 'ms'))  # Delay between imaging blocks
+    for fr in range(phantom.Nfr):
       seq.add_block(imaging)
-      # seq.add_block(time_spacing, dt=Q_(1, 'ms'))  # Time spacing between frames
-    seq.plot()
+      seq.add_block(time_spacing, dt=Q_(1, 'ms'))  # Time spacing between frames
 
     # Bloch solver
     solver = BlochSolver(seq, phantom, 
@@ -215,7 +213,7 @@ if __name__ == '__main__':
   m = np.abs(I[...,0,:])
   phi = np.angle(I[...,0,:])
   phi_ref = np.angle(I[...,1,:])
-  phi_cor = np.angle(I[...,0,:] * np.conj(I[...,1,:]))
+  phi_v = np.angle(I[...,0,:] * np.conj(I[...,1,:]))
   if MPI_rank == 0:
-    plotter = MRIPlotter(images=[m, phi, phi_ref, phi_cor], title=['Magnitude', '$\phi + \phi_0$ ', '$\phi_0$', '$\phi_{ref}$'],)
+    plotter = MRIPlotter(images=[m, phi_v, phi, phi_ref], title=['Magnitude', '$\\phi_v$ ', '$\\phi + \\phi_0$', '$\\phi_{ref}$'],)
     plotter.show()
