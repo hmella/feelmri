@@ -17,7 +17,7 @@ from FEelMRI.MPIUtilities import MPI_print, MPI_rank, gather_data
 from FEelMRI.MRImaging import SliceProfile, VelocityEncoding
 from FEelMRI.MRObjects import RF, Gradient, Scanner
 from FEelMRI.Noise import add_cpx_noise
-from FEelMRI.Parameters import ParameterHandler2
+from FEelMRI.Parameters import ParameterHandler
 from FEelMRI.Phantom import FEMPhantom
 from FEelMRI.PhaseContrast import PC
 from FEelMRI.Plotter import MRIPlotter
@@ -26,7 +26,7 @@ from FEelMRI.Recon import CartesianRecon
 if __name__ == '__main__':
 
   # Import imaging parameters
-  parameters = ParameterHandler2('parameters/phase_contrast.yaml')
+  parameters = ParameterHandler('parameters/phase_contrast.yaml')
 
   # Create FEM phantom object
   phantom = FEMPhantom(path='phantoms/aorta_CFD.xdmf', velocity_label='velocity', scale_factor=0.01)
@@ -103,8 +103,16 @@ if __name__ == '__main__':
   # Create sequence object and solve magnetization
   Mxy_PC = np.zeros([phantom.local_nodes.shape[0], phantom.Nfr, enc.nb_directions], dtype=np.complex64)
   for d in range(enc.nb_directions):
-    # Create sequence object
+
+    # Create sequence object and Bloch solver
     seq = Sequence()
+    solver = BlochSolver(seq, phantom, 
+                         scanner=scanner, 
+                         M0=1e+9, 
+                         T1=parameters.Phantom.T1.to('ms'),
+                         T2=parameters.Phantom.T2star.to('ms'), 
+                         delta_B=delta_B0.reshape((-1, 1)),
+                         pod_trajectory=pod_trajectory)
 
     # Bipolar gradient
     t_ref = sp.rephasing.t_ref + sp.rephasing.dur
@@ -125,24 +133,17 @@ if __name__ == '__main__':
 
     # Add blocks to the sequence
     time_spacing = parameters.Imaging.TimeSpacing.to('ms') - (imaging.time_extent[1] - sp.rf.t_ref)
-    for i in range(80):
-      seq.add_block(dummy.copy())  # Add dummy blocks to reach the steady state
+    for i in range(3*phantom.Nfr-3):
+      seq.add_block(dummy)  # Add dummy blocks to reach the steady state
       seq.add_block(time_spacing, dt=Q_(1, 'ms'))  # Delay between imaging blocks
+    solver.solve()
+
     for fr in range(phantom.Nfr):
       seq.add_block(imaging)
       seq.add_block(time_spacing, dt=Q_(1, 'ms'))  # Time spacing between frames
 
-    # Bloch solver
-    solver = BlochSolver(seq, phantom, 
-                         scanner=scanner, 
-                         M0=1e+9, 
-                         T1=parameters.Phantom.T1.to('ms'),
-                         T2=parameters.Phantom.T2star.to('ms'), 
-                         delta_B=delta_B0.reshape((-1, 1)),
-                         pod_trajectory=pod_trajectory)
-
     # Solve for x and y directions
-    Mxy, Mz = solver.solve()
+    Mxy, Mz = solver.solve(start=-2*phantom.Nfr)
     Mxy_PC[..., d] = Mxy
 
   # Path to export the generated data

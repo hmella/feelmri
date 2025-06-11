@@ -248,7 +248,7 @@ class BlochSolver:
     self.initial_Mz = initial_Mz * ones if initial_Mz is not None else M0 * ones
     self.pod_trajectory = pod_trajectory
 
-  def solve(self, start_block: int = 0, end_block: int = None):
+  def solve(self, start: int = 0, end: int = None):
     # Current machine time
     t0 = time.time()
 
@@ -256,10 +256,12 @@ class BlochSolver:
     x = self.phantom.local_nodes
 
     # Blocks to be solved
-    if end_block is None:
-      end_block = self.sequence.Nb_blocks
-    blocks = self.sequence.blocks[start_block:end_block]
-    MPI_print(f"[BlochSolver] Solving sequence blocks {start_block} to {end_block-1} ({len(blocks)} blocks).")
+    if start < 0:
+      start += self.sequence.Nb_blocks
+    if end is None:
+      end = self.sequence.Nb_blocks
+    blocks = self.sequence.blocks[start:end]
+    MPI_print(f"[BlochSolver] Solving sequence blocks {start} to {end-1} ({len(blocks)} blocks).")
 
     # Dimensions
     nb_nodes  = x.shape[0]
