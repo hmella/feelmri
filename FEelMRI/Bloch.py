@@ -248,7 +248,7 @@ class BlochSolver:
     self.initial_Mz = initial_Mz * ones if initial_Mz is not None else M0 * ones
     self.pod_trajectory = pod_trajectory
 
-  def solve(self, start_block: int = 0, end_block: int = -1):
+  def solve(self, start_block: int = 0, end_block: int = None):
     # Current machine time
     t0 = time.time()
 
@@ -256,20 +256,17 @@ class BlochSolver:
     x = self.phantom.local_nodes
 
     # Blocks to be solved
-    if end_block == -1:
-      end_block = len(self.sequence.blocks)
-    if start_block < 0 or end_block > len(self.sequence.blocks):
-      raise ValueError("Invalid block range specified. Please check start_block and end_block values.")
-    if start_block >= end_block:
-      raise ValueError("start_block must be less than end_block.")
+    if end_block is None:
+      end_block = self.sequence.Nb_blocks
     blocks = self.sequence.blocks[start_block:end_block]
+    MPI_print(f"[BlochSolver] Solving sequence blocks {start_block} to {end_block-1} ({len(blocks)} blocks).")
 
     # Dimensions
     nb_nodes  = x.shape[0]
     nb_blocks = len(blocks)
 
     # List of indices indicating which blocks need to be stored
-    store_indices = np.array([i for i, block in enumerate(blocks) if block.store_magnetization])
+    store_indices = [i for i, block in enumerate(blocks) if block.store_magnetization]
 
     # Allocate magnetizations
     Mxy = np.zeros((nb_nodes, nb_blocks), dtype=np.complex64)
