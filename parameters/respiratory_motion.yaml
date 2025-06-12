@@ -2,8 +2,8 @@
 Imaging:
   RES: [70, 55, 1]
   FOV: {value: [0.16, 0.12, 0.008], unit: "m"}
-  TimeSpacing: {value: 0.04, unit: "s"}
-  TR: {value: 0.017, unit: "s"}
+  TimeSpacing: {value: 40, unit: "ms"}
+  TR: {value: 18, unit: "ms"}
   Oversampling: 2
   Sequence: "FFE"
   LinesPerShot: 1
@@ -11,7 +11,7 @@ Imaging:
 # Hardware parameters
 Hardware:
   G_sr: {value: 180.0, unit: "mT/m/ms"}
-  G_max: {value: 3.0, unit: "mT/m"}
+  G_max: {value: 33.0, unit: "mT/m"}
   r_BW: {value: 50.0e+3, unit: "Hz"}
 
 # Imaging orientation (make sure about orthogonality)
@@ -23,5 +23,5 @@ Formatting:
   LOC: {value: [0.02295, 0.001460, 0.01953], unit: "m"}
 
 Phantom:
-  T2star: {value: 0.05, unit: "s"}
-  T1: {value: 0.8, unit: "s"} 
+  T2star: {value: 50, unit: "ms"}
+  T1: {value: 800, unit: "ms"} 
