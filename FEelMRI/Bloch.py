@@ -286,7 +286,7 @@ class BlochSolver:
 
       # Update POD trajectory time shift
       if self.pod_trajectory is not None:
-        self.pod_trajectory.timeshift = block.time_extent[0].m_as('ms')
+        self.pod_trajectory.update_timeshift(block.time_extent[0].m_as('ms'))
 
       # Discrete time points and time intervals
       discrete_times = block._discretization().m_as('ms')
@@ -326,6 +326,6 @@ class BlochSolver:
 
     # Reset POD trajectory time shift
     if self.pod_trajectory is not None:
-      self.pod_trajectory.timeshift = 0.0
+      self.pod_trajectory.update_timeshift(0.0)
 
     return Mxy[:, store_indices], Mz[:, store_indices]
