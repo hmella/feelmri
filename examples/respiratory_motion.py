@@ -24,8 +24,6 @@ from FEelMRI.Tagging import SPAMM
 
 if __name__ == '__main__':
 
-  print(type(Q_(np.array([1, 2, 3]), 'm')))
-
   # Import imaging parameters
   parameters = ParameterHandler('parameters/respiratory_motion.yaml')
 
@@ -68,7 +66,7 @@ if __name__ == '__main__':
   
   # Define respiratory motion object
   T = 3000.0      # period
-  A = 0.00       # amplitude
+  A = 0.008       # amplitude
   times  = np.linspace(0, T, 100)
   motion = A*(1 - np.cos(2*np.pi*times/(2*T))**4)
   pod_resp_motion = RespiratoryMotion(time_array=times, 
@@ -108,7 +106,7 @@ if __name__ == '__main__':
   # Simulate the SPAMM preparation block for each encoding direction
   t0 = time.time()
 
-  # Imaging block
+  # Imaging and dummy blocks
   imaging = SequenceBlock(gradients=[sp.dephasing, sp.rephasing], 
                           rf_pulses=[sp.rf], 
                           dt_rf=Q_(1e-2, 'ms'), 
@@ -117,38 +115,6 @@ if __name__ == '__main__':
                           store_magnetization=True)
   dummy = imaging.copy()
   dummy.store_magnetization = False
-
-  # Create and fill sequence object
-  seq = Sequence()
-  time_spacing = parameters.Imaging.TimeSpacing.to('ms') - (imaging.time_extent[1] - sp.rf.t_ref)
-  for i in range(80):
-    seq.add_block(dummy.copy())  # Add dummy blocks to reach the steady state
-    seq.add_block(time_spacing)  # Delay between imaging blocks
-  for i in range(phantom.Nfr):
-    seq.add_block(imaging.copy())
-    seq.add_block(time_spacing)  # Delay between imaging blocks
-  # seq.plot()
-
-  # Bloch solver
-  solver = BlochSolver(seq, phantom, 
-                      scanner=scanner, 
-                      M0=1e+8, 
-                      T1=parameters.Phantom.T1, 
-                      T2=parameters.Phantom.T2star, 
-                      delta_B=delta_B0.reshape((-1, 1)),
-                      pod_trajectory=pod_resp_motion)
-
-  # Solve
-  Mxy, Mz = solver.solve()
-
-  # # Export xdmf for debugging
-  # file = XDMFFile('magnetization_{:d}.xdmf'.format(MPI_rank), nodes=phantom.local_nodes, elements={'tetra': phantom.local_elements})
-  # for fr in range(Mxy.shape[1]):
-  #   file.write(pointData={'Mx': np.real(Mxy[:, fr]), 
-  #                         'My': np.imag(Mxy[:, fr]),
-  #                         'Mz': Mz[:, fr]}, 
-  #                         time=fr*parameters.Imaging.TR)
-  # file.close()
 
   # Store elapsed time
   bloch_time = time.time() - t0
@@ -175,10 +141,34 @@ if __name__ == '__main__':
   # T2star relaxation time
   T2star = np.ones([phantom.global_nodes.shape[0], ], dtype=np.float32)*parameters.Phantom.T2star
 
+  # Create and fill sequence object
+  seq = Sequence()
+  time_spacing = parameters.Imaging.TR.to('ms') - (imaging.time_extent[1] - sp.rf.t_ref)
+  # for i in range(80):
+  #   seq.add_block(dummy)  # Add dummy blocks to reach the steady state
+  #   seq.add_block(time_spacing)  # Delay between imaging blocks
+  # for i in range(phantom.Nfr):
+  #   seq.add_block(imaging)
+  #   seq.add_block(time_spacing)  # Delay between imaging blocks
+  # seq.plot()
+
+  # Bloch solver
+  solver = BlochSolver(seq, phantom, 
+                      scanner=scanner, 
+                      M0=1e+8, 
+                      T1=parameters.Phantom.T1, 
+                      T2=parameters.Phantom.T2star, 
+                      delta_B=delta_B0.reshape((-1, 1)),
+                      pod_trajectory=pod_sum)
+
+
+  # Create XDMF file for debugging
+  file = XDMFFile('magnetization_{:d}.xdmf'.format(MPI_rank), nodes=phantom.local_nodes, elements={'tetra': phantom.local_elements})
+
   # Assemble mass matrix for integrals (just once)
   M = phantom.mass_matrix(lumped=True, quadrature_order=2)
 
-  # Iterate over slices
+  # Generate k-space data for each shot and slice
   t0 = time.time()  
   for s in range(slices):
 
@@ -187,12 +177,16 @@ if __name__ == '__main__':
 
       MPI_print("Generating shot {:d}/{:d} for slice {:d}/{:d}".format(i+1, traj.nb_shots, s+1, K.shape[2]))
 
+      # Add imaging and delay blocks to the sequence
+      seq.add_block(imaging)
+      seq.add_block(time_spacing)  # Delay between imaging blocks
+      Mxy, Mz = solver.solve(start=-2)
+
       # Update reference time of POD trajectory
-      pod_trajectory.timeshift = i * parameters.Imaging.TR.m_as('ms')
-      pod_resp_motion.timeshift = i * parameters.Imaging.TR.m_as('ms')
+      pod_sum.update_timeshift(i * parameters.Imaging.TR.m_as('ms'))
 
       # Get displacement data in frame fr
-      displacement = pod_trajectory(0.0)
+      displacement = pod_sum(0.0)
 
       # # Assemble mass matrix for integrals (just once)
       # M = phantom.mass_matrix_2(phantom.local_nodes + displacement, lumped=True, quadrature_order=2)
@@ -204,9 +198,15 @@ if __name__ == '__main__':
       kspace_times = traj.times.m_as('ms')[:,sh,s,np.newaxis]
 
       # Generate 4D flow image
-      tmp = SPAMM(MPI_rank, M, kspace_points, kspace_times, phantom.local_nodes, Mxy[:, 0], delta_omega0, T2star.m_as('ms'), pod_sum)
+      tmp = SPAMM(MPI_rank, M, kspace_points, kspace_times, phantom.local_nodes, Mxy, delta_omega0, T2star.m_as('ms'), pod_sum)
       K[:,sh,s,:,0] = tmp.swapaxes(0, 1)[:,:,0]
 
+      # Export magnetization and displacement for debugging
+      file.write(pointData={'Mx': np.real(Mxy), 
+                            'My': np.imag(Mxy),
+                            'Mz': Mz,
+                            'displacement': pod_sum(0)},
+                            time=i*parameters.Imaging.TR)
 
   # Store elapsed time
   spamm_time = time.time() - t0
@@ -216,6 +216,9 @@ if __name__ == '__main__':
   MPI_print('Elapsed time-per-frame for SPAMM: {:.2f} s'.format(spamm_time/phantom.Nfr))
   MPI_print('Elapsed time for SPAMM: {:.2f} s'.format(spamm_time))
   MPI_print('Elapsed time for SPAMM + Bloch solver: {:.2f} s'.format(bloch_time + spamm_time))
+
+  # Close the file
+  file.close()
 
   # Gather results
   K = gather_data(K)
