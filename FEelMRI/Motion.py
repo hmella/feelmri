@@ -82,6 +82,12 @@ class RespiratoryMotion:
 
     return self.interpolator(t)
 
+  def update_timeshift(self, timeshift: float):
+    """ Updates the timeshift of the PODTrajectory.
+    :param timeshift: new timeshift value
+    """
+    self.timeshift = timeshift
+
 
 class PODTrajectory:
   def __init__(self, time_array: np.ndarray, 
@@ -196,6 +202,12 @@ class PODTrajectory:
     weights = self._evaluate_weights(t)[np.newaxis, np.newaxis, :]
 
     return np.sum(self.modes * weights, axis=-1)  
+  
+  def update_timeshift(self, timeshift: float):
+    """ Updates the timeshift of the PODTrajectory.
+    :param timeshift: new timeshift value
+    """
+    self.timeshift = timeshift
 
 
 class PODSum:
@@ -206,6 +218,7 @@ class PODSum:
   def __init__(self, pod1: PODTrajectory, pod2: Callable[[float], np.ndarray]):
     self.pod1 = pod1
     self.pod2 = pod2
+    self.timeshif = 0.0
 
   def __call__(self, t: float):
     """ Evaluates the sum of the PODTrajectory and the callable object at time t.
@@ -214,3 +227,11 @@ class PODSum:
     """
     # Evaluate the trajectory at time t
     return self.pod1(t) + self.pod2(t)
+  
+  def update_timeshift(self, timeshift: float):
+    """ Updates the timeshift of the PODTrajectory.
+    :param timeshift: new timeshift value
+    """
+    self.pod1.timeshift = timeshift
+    self.pod2.timeshift = timeshift
+    self.timeshift = timeshift
