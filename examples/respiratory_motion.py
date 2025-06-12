@@ -198,7 +198,7 @@ if __name__ == '__main__':
       kspace_times = traj.times.m_as('ms')[:,sh,s,np.newaxis]
 
       # Generate 4D flow image
-      tmp = SPAMM(MPI_rank, M, kspace_points, kspace_times, phantom.local_nodes, Mxy, delta_omega0, T2star.m_as('ms'), pod_sum)
+      tmp = SPAMM(MPI_rank, M, kspace_points, kspace_times, phantom.local_nodes + displacement, Mxy, delta_omega0, T2star.m_as('ms'), pod_sum)
       K[:,sh,s,:,0] = tmp.swapaxes(0, 1)[:,:,0]
 
       # Export magnetization and displacement for debugging
