@@ -4,6 +4,8 @@ import numpy as np
 import yaml
 from pint import Quantity as Q_
 
+from FEelMRI.Math import Rx, Ry, Rz
+
 
 class PVSMParser:
   """
@@ -25,9 +27,10 @@ class PVSMParser:
     self.box_name = box_name
     self.transform_name = transform_name
     self.length_units = length_units
+    self.Rotation = np.array(self.get_transform()['Rotation'])
     self.FOV = Q_(np.array(list(self.get_box_lengths().values())), length_units)
     self.LOC = Q_(np.array(self.get_transform()['Position']), length_units)
-    self.Rotation = np.array(self.get_transform()['Rotation'])
+    self.MPS = Rz(self.Rotation[2])@Rx(self.Rotation[0])@Ry(self.Rotation[1])
 
   def _get_proxy_id(self, proxy_name: str) -> str:
     """
