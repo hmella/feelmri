@@ -16,7 +16,8 @@ class PVSMParser:
   def __init__(self, filepath: str, 
                 box_name: str = "Box1", 
                 transform_name: str = "Transform1", 
-                length_units: str = "m"):
+                length_units: str = "m",
+                angle_units: str = "deg"):
     """
     :param filepath: path to the .pvsm file
     :param box_name: the 'name' attribute of your Box source
@@ -27,10 +28,12 @@ class PVSMParser:
     self.box_name = box_name
     self.transform_name = transform_name
     self.length_units = length_units
-    self.Rotation = np.array(self.get_transform()['Rotation'])
+    self.angle_units = angle_units
+    self.Rotation = Q_(np.array(self.get_transform()['Rotation']), angle_units)
     self.FOV = Q_(np.array(list(self.get_box_lengths().values())), length_units)
     self.LOC = Q_(np.array(self.get_transform()['Position']), length_units)
-    self.MPS = Rz(self.Rotation[2])@Rx(self.Rotation[0])@Ry(self.Rotation[1])
+    tx, ty, tz = self.Rotation.m_as('rad')
+    self.MPS = Rz(tz) @ Rx(tx) @ Ry(ty)
 
   def _get_proxy_id(self, proxy_name: str) -> str:
     """
