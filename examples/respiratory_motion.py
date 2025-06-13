@@ -24,7 +24,7 @@ from FEelMRI.Tagging import SPAMM
 if __name__ == '__main__':
 
   # Import imaging parameters
-  parameters = ParameterHandler('parameters/respiratory_motion_2.yaml')
+  parameters = ParameterHandler('parameters/respiratory_motion.yaml')
 
   # Import PVSM file to get the FOV, LOC and MPS orientation
   planning = PVSMParser(parameters.Formatting.planning,
