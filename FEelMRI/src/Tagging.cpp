@@ -146,7 +146,12 @@ Tensor<std::complex<T>, 4> SPAMM(
         for (i = 0; i < nb_meas; i++){
 
           // Update position
-          r.noalias() = r0 + py::cast<Matrix<T, Dynamic, Dynamic>>(pod_trajectory(t(i,j,k)));
+          auto traj = py::cast<Matrix<T, Dynamic, Dynamic>>(pod_trajectory(t(i,j,k)));
+          if (traj.rows() == 1) {
+              r.noalias() = r0 + traj.colwise().replicate(r0.rows());
+          } else {
+              r.noalias() = r0 + traj;
+          }
 
           // Update off-resonance phase
           phi_off.noalias() = phi_dB0 * t(i,j,k);
