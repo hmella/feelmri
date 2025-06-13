@@ -10,14 +10,14 @@ import numpy as np
 from pint import Quantity as Q_
 
 from FEelMRI.Bloch import BlochSolver, Sequence, SequenceBlock
+from FEelMRI.IO import XDMFFile
 from FEelMRI.KSpaceTraj import CartesianStack
-from FEelMRI.Math import Rx, Ry, Rz
-from FEelMRI.Motion import POD
+from FEelMRI.Motion import PODVelocity
 from FEelMRI.MPIUtilities import MPI_print, MPI_rank, gather_data
 from FEelMRI.MRImaging import SliceProfile, VelocityEncoding
 from FEelMRI.MRObjects import RF, Gradient, Scanner
 from FEelMRI.Noise import add_cpx_noise
-from FEelMRI.Parameters import ParameterHandler
+from FEelMRI.Parameters import ParameterHandler, PVSMParser
 from FEelMRI.Phantom import FEMPhantom
 from FEelMRI.PhaseContrast import PC
 from FEelMRI.Plotter import MRIPlotter
@@ -28,47 +28,45 @@ if __name__ == '__main__':
   # Import imaging parameters
   parameters = ParameterHandler('parameters/phase_contrast.yaml')
 
+  # Import PVSM file to get the FOV, LOC and MPS orientation
+  planning = PVSMParser(parameters.Formatting.planning,
+                          box_name='Box1',
+                          transform_name='Transform1',
+                          length_units=parameters.Formatting.units)
+
   # Create FEM phantom object
   phantom = FEMPhantom(path='phantoms/aorta_CFD.xdmf', velocity_label='velocity', scale_factor=0.01)
 
-  # Imaging orientation paramters
-  theta_x = np.deg2rad(parameters.Formatting.theta_x)
-  theta_y = np.deg2rad(parameters.Formatting.theta_y)
-  theta_z = np.deg2rad(parameters.Formatting.theta_z)
-  MPS_ori = Rz(theta_z)@Rx(theta_x)@Ry(theta_y)
-  LOC = parameters.Formatting.LOC
-
   # Translate phantom to obtain the desired slice location
-  phantom.orient(MPS_ori, LOC)
+  phantom.orient(planning.MPS, planning.LOC.to('m'))
 
   # Velocity encoding parameters
   venc_dirs = list(parameters.VelocityEncoding.Directions.values())
   enc = VelocityEncoding(parameters.VelocityEncoding.VENC, np.array(venc_dirs))
 
-  # We can use only a submesh to speed up the simulation. The submesh is created by selecting the elements that are inside the FOV. We can also refine the submesh to increase the number of nodes and elements  
-  midpoints = phantom.global_nodes[phantom.global_elements].mean(axis=1)
-  markers = np.where(np.abs(midpoints[:, 2]) <= 0.6 * parameters.Imaging.FOV[2].m_as('m'))[0]
-  phantom.create_submesh(markers, refine=False, element_size=0.0012)
+  # We can a submesh to speed up the simulation. The submesh is created by selecting the elements that are inside the FOV
+  mp = phantom.global_nodes[phantom.global_elements].mean(axis=1)
+  markers = np.abs(mp[:, 2]) <= 0.5 * planning.FOV[2].m_as('m')
+  markers *= np.abs(mp[:, 1]) <= 0.5 * planning.FOV[1].m_as('m')
+  markers *= np.abs(mp[:, 0]) <= 0.5 * planning.FOV[0].m_as('m')
+  phantom.create_submesh(markers)
 
-  # Create POD trajectory object for velocity
-  shape = [phantom.global_nodes.shape[0], phantom.global_nodes.shape[1], phantom.Nfr]
-  trajectory = Q_(np.zeros(shape, dtype=np.float32), 'm/s')
+  # Create array to store displacements
+  v = Q_(np.zeros([phantom.global_shape[0], 3, phantom.Nfr], dtype=np.float32), 'm/s')
   for fr in range(phantom.Nfr):
-    # Read displacement data in frame fr
+    # Read displacement data in frame fr and interpolate to the submesh
     phantom.read_data(fr)
-    velocity = phantom.point_data['velocity'] @ MPS_ori
-    submesh_velocity = phantom.interpolate_to_submesh(velocity, local=False)
-    trajectory[..., fr] = Q_(submesh_velocity, 'm/s')
+    v[..., fr] = Q_(phantom.interpolate_to_submesh(phantom.point_data['velocity'] @ planning.MPS, local=False), 'm/s')
 
   # Define POD object
   dt = parameters.Imaging.TimeSpacing
   times = np.linspace(0, (phantom.Nfr-1)*dt, phantom.Nfr)
-  pod_trajectory = POD(time_array=times.m_as('ms'),
-                                 data=trajectory.m_as('m/ms'),
-                                 global_to_local=phantom.global_to_local_nodes,
-                                 n_modes=5,
-                                 taylor_order=10,
-                                 is_periodic=True)
+  pod_velocity = PODVelocity(time_array=times.m_as('ms'),
+                              data=v.m_as('m/ms'),
+                              global_to_local=phantom.global_to_local_nodes,
+                              n_modes=5,
+                              taylor_order=10,
+                              is_periodic=True)
 
   # Create scanner object defining the gradient strength, slew rate and giromagnetic ratio
   scanner = Scanner(gradient_strength=parameters.Hardware.G_max,
@@ -79,8 +77,8 @@ if __name__ == '__main__':
       return x[:,0] + x[:,1] + x[:,2]
   delta_B0 = spatial(phantom.local_nodes)
   delta_B0 /= np.abs(spatial(phantom.global_nodes).flatten()).max()
-  delta_B0 *= 1.5 * 1e-6 * 0.0           # 1.5 ppm of the main magnetic field
-  delta_omega0 = 2.0 * np.pi * scanner.gammabar.m_as('Hz/T') * delta_B0
+  delta_B0 *= 1.5 * 1e-6           # 1.5 ppm of the main magnetic field
+  delta_omega0 = 2.0 * np.pi * scanner.gammabar.m_as('1/ms/T') * delta_B0
 
   # Slice profile
   # The slice profile prepulse is calculated based on a reference RF pulse with
@@ -89,9 +87,9 @@ if __name__ == '__main__':
           NbLobes=[4, 4], 
           alpha=0.46, 
           shape='apodized_sinc', 
-          flip_angle=Q_(np.deg2rad(8),'rad'), 
+          flip_angle=parameters.Imaging.FlipAngle.to('rad'), 
           t_ref=Q_(0.0,'ms'))
-  sp = SliceProfile(delta_z=parameters.Imaging.FOV[2].to('m'), 
+  sp = SliceProfile(delta_z=planning.FOV[2].to('m'), 
     profile_samples=100,
     rf=rf,
     dt=Q_(1e-2, 'ms'), 
@@ -112,7 +110,7 @@ if __name__ == '__main__':
                          T1=parameters.Phantom.T1.to('ms'),
                          T2=parameters.Phantom.T2star.to('ms'), 
                          delta_B=delta_B0.reshape((-1, 1)),
-                         pod_trajectory=pod_trajectory)
+                         pod_trajectory=pod_velocity)
 
     # Bipolar gradient
     t_ref = sp.rephasing.t_ref + sp.rephasing.dur
@@ -131,20 +129,30 @@ if __name__ == '__main__':
     dummy = imaging.copy()
     dummy.store_magnetization = False
 
-    # Add blocks to the sequence
+    # Add dummy blocks to the sequence to reach steady state
     time_spacing = parameters.Imaging.TimeSpacing.to('ms') - (imaging.time_extent[1] - sp.rf.t_ref)
-    for i in range(3*phantom.Nfr-3):
-      seq.add_block(dummy)  # Add dummy blocks to reach the steady state
-      seq.add_block(time_spacing, dt=Q_(1, 'ms'))  # Delay between imaging blocks
-    solver.solve()
+    for i in range(80):
+      seq.add_block(dummy)
+      seq.add_block(time_spacing, dt=Q_(1, 'ms'))
+    
+    # Add and additional block to synchornize the sequence with the cardiac cycle
+    seq.add_block(times[-1] - seq.blocks[-1].time_extent[1] % times[-1], dt=Q_(1, 'ms'))
 
+    # Add PC imaging sequence
     for fr in range(phantom.Nfr):
       seq.add_block(imaging)
       seq.add_block(time_spacing, dt=Q_(1, 'ms'))  # Time spacing between frames
 
     # Solve for x and y directions
-    Mxy, Mz = solver.solve(start=-2*phantom.Nfr)
+    Mxy, Mz = solver.solve()
     Mxy_PC[..., d] = Mxy
+
+    # # Export magnetization and displacement for debugging
+    # file = XDMFFile('magnetization_{:d}.xdmf'.format(MPI_rank), nodes=phantom.local_nodes, elements={'tetra': phantom.local_elements})
+    # for fr in range(Mxy.shape[1]):
+    #   # Write magnetization and displacement at each frame
+    #   file.write(pointData={'M': np.stack((np.real(Mxy[:,fr]), np.imag(Mxy[:,fr]), Mz[:,fr]), axis=1)}, time=fr*(parameters.Imaging.TimeSpacing.m_as('ms') + time_spacing.m_as('ms')))
+    # file.close()
 
   # Path to export the generated data
   export_path = Path('MRImages/{:s}_V{:.0f}.pkl'.format(parameters.Imaging.Sequence, parameters.VelocityEncoding.VENC.m_as('cm/s')))
@@ -153,13 +161,13 @@ if __name__ == '__main__':
   os.makedirs(str(export_path.parent), exist_ok=True)
 
   # Generate kspace trajectory
-  traj = CartesianStack(FOV = parameters.Imaging.FOV.to('m'),
+  traj = CartesianStack(FOV = planning.FOV.to('m'),
     t_start = imaging.time_extent[1] - sp.rf.t_ref,
     res = parameters.Imaging.RES, 
     oversampling = parameters.Imaging.Oversampling, 
     lines_per_shot = parameters.Imaging.LinesPerShot, 
-    MPS_ori = MPS_ori, 
-    LOC = LOC, 
+    MPS_ori = planning.MPS, 
+    LOC = planning.LOC, 
     receiver_bw=parameters.Hardware.r_BW, 
     plot_seq=False)
 
@@ -180,14 +188,19 @@ if __name__ == '__main__':
   # Iterate over cardiac phases
   t0 = time.time()
   for fr in range(phantom.Nfr):
-      
+
+      # Start time for the frame      
       t0_fr = time.time()
 
-      # Generate 4D flow image
-      K[:,:,:,:,fr] = PC(MPI_rank, M, traj.points, traj.times.m_as('ms'), phantom.local_nodes, delta_omega0, T2star.m_as('ms'), Mxy_PC[:, fr, :])
+      # Update timeshift in the POD velocity
+      pod_velocity.update_timeshift(fr * parameters.Imaging.TimeSpacing.m_as('ms'))
 
-      sys.stdout.flush()
-      sys.stdout.write("\r" + 'Elapsed time frame {:d}: {:.2f} s'.format(fr, time.time()-t0_fr))
+      # Generate 4D flow image
+      K[:,:,:,:,fr] = PC(MPI_rank, M, traj.points, traj.times.m_as('ms'), phantom.local_nodes, delta_omega0, T2star.m_as('ms'), Mxy_PC[:, fr, :], pod_velocity)
+
+      if MPI_rank == 0:
+        sys.stdout.flush()
+        sys.stdout.write("\r" + 'Elapsed time frame {:d}: {:.2f} s'.format(fr, time.time()-t0_fr))
 
   # Store elapsed time
   pc_time = time.time() - t0
@@ -200,12 +213,12 @@ if __name__ == '__main__':
   K = gather_data(K)
 
   # Add noise to kspace
-  K = add_cpx_noise(K, relative_std=0.01)
+  K = add_cpx_noise(K, relative_std=0.0025)
 
   # Export generated data
   if MPI_rank==0:
     with open(str(export_path), 'wb') as f:
-      pickle.dump({'kspace': K, 'MPS_ori': MPS_ori, 'LOC': LOC, 'traj': traj}, f)
+      pickle.dump({'kspace': K, 'MPS_ori': planning.MPS, 'LOC': planning.LOC, 'traj': traj}, f)
 
   # Image reconstruction
   I = CartesianRecon(K, traj)
@@ -216,5 +229,5 @@ if __name__ == '__main__':
   phi_ref = np.angle(I[...,1,:])
   phi_v = np.angle(I[...,0,:] * np.conj(I[...,1,:]))
   if MPI_rank == 0:
-    plotter = MRIPlotter(images=[m, phi_v, phi, phi_ref], title=['Magnitude', '$\\phi_v$ ', '$\\phi + \\phi_0$', '$\\phi_{ref}$'],)
+    plotter = MRIPlotter(images=[m, phi_v, phi, phi_ref], title=['Magnitude', '$\\phi_v$ ', '$\\phi + \\phi_0$', '$\\phi_{ref}$'], FOV=planning.FOV.m_as('m'))
     plotter.show()
