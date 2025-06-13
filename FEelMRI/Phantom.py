@@ -49,6 +49,7 @@ class FEMPhantom:
     self.global_elements = mesh['elements']
     self.all_global_elements = mesh['all_elements']
     self.global_nodes = mesh['nodes']
+    self.global_shape = self.global_nodes.shape
     self.bbox = self.bounding_box()
     self.point_data = None
     self.cell_data = None
@@ -146,11 +147,13 @@ class FEMPhantom:
     self.all_elements_ = self.all_global_elements
     self.global_nodes_ = self.global_nodes
     self.global_elements_ = self.global_elements
+    self.global_shape_ = self.global_shape
 
     # Update mesh parameters and backup original mesh
     self.global_nodes = submesh_nodes
     self.global_elements = submesh_elems
     self.mesh_to_submesh_nodes = submesh_nodes_map
+    self.global_shape = submesh_nodes.shape
 
     # Distribute the submesh
     self.distribute_mesh()
@@ -193,6 +196,7 @@ class FEMPhantom:
     # Update mesh parameters
     self.local_elements = local_elems
     self.local_nodes = local_nodes
+    self.local_shape = local_nodes.shape
 
     # Add global to local mapping
     self.global_to_local_nodes = local_nodes_idx
