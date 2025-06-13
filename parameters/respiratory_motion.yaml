@@ -15,7 +15,7 @@ Hardware:
 
 # Imaging orientation
 Formatting:
-  planning: "planning/beating_heart_2.pvsm"
+  planning: "planning/beating_heart.pvsm"
   units: "m"
   # # Data taken from Box paraview filter
   # theta_x: -9.2091     # degrees
