@@ -42,7 +42,7 @@ if __name__ == '__main__':
 
   # We can use only a submesh to speed up the simulation. The submesh is created by selecting the elements that are inside the FOV. We can also refine the submesh to increase the number of nodes and elements
   midpoints = phantom.global_nodes[phantom.global_elements].mean(axis=1)
-  markers = np.where(np.abs(midpoints[:, 2]) <= 0.6 * parameters.Imaging.FOV[2].m_as('m'))[0]
+  markers = np.where(np.abs(midpoints[:, 2]) <= 2.25 * parameters.Imaging.FOV[2].m_as('m'))[0]
   phantom.create_submesh(markers, refine=False, element_size=0.0012)
 
   # Create POD trajectory object
@@ -76,7 +76,7 @@ if __name__ == '__main__':
                               remove_mean=True)
 
   # Combine the POD trajectory and the respiratory motion
-  pod_sum = pod_trajectory + pod_resp_motion
+  pod_sum = pod_resp_motion + pod_trajectory
 
   # Create scanner object defining the gradient strength, slew rate and giromagnetic ratio
   scanner = Scanner(gradient_strength=parameters.Hardware.G_max,
@@ -86,9 +86,9 @@ if __name__ == '__main__':
   def spatial(x):
       return x[:,0] + x[:,1] + x[:,2]
   delta_B0 = spatial(phantom.local_nodes)
-  delta_B0 /= np.abs(spatial(phantom.local_nodes).flatten()).max()
-  delta_B0 *= 1.5 * 1e-6 * 0 # 1.5 ppm of the main magnetic field
-  delta_omega0 = 2.0 * np.pi * scanner.gammabar.m_as('Hz/T') * delta_B0
+  delta_B0 /= np.abs(spatial(phantom.global_nodes).flatten()).max()
+  delta_B0 *= 1.5 * 1e-6 # 1.5 ppm of the main magnetic field
+  delta_omega0 = 2.0 * np.pi * scanner.gammabar.m_as('1/ms/T') * delta_B0
 
   # Slice profile
   # The slice profile prepulse is calculated based on a reference RF pulse with
