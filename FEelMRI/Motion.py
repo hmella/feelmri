@@ -210,6 +210,37 @@ class POD:
     self.timeshift = timeshift
 
 
+class PODVelocity(POD):
+  """ Class to handle the POD of velocity data.
+  This class inherits from the POD class and is specifically designed to handle
+  velocity data, allowing for the evaluation of the trajectory at any given time point.
+  """
+  def __init__(self, *args, **kwargs):
+    super().__init__(*args, **kwargs)
+
+  def _evaluate_trajectory(self, t: float):
+    """ Evaluates the trajectory at time t using the POD modes and weights. It uses a first-order Taylor expansion to approximate the trajectory at time t.
+    :param t: time at which to evaluate the trajectory
+    :return: evaluated trajectory at time t
+    """
+    t = t + self.timeshift  # Apply time shift if necessary
+
+    # Check if t is within the bounds of the time array
+    if (t - self.timeshift) <= 0:
+      t_ro = t
+    else:
+      t_ro = (t - self.timeshift)
+
+    # Apply periodicity if necessary
+    if self.is_periodic:
+      t = self.timeshift % self.time_array[-1]
+
+    # Evaluate the weights at time t
+    weights = t_ro * self._evaluate_weights(t)[np.newaxis, np.newaxis, :]
+
+    return np.sum(self.modes * weights, axis=-1)    
+
+
 class PODSum:
   """ Class to handle the sum of a POD and a callable object.
   This class allows for the evaluation of the sum of a POD and a callable
