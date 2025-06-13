@@ -1,7 +1,6 @@
 # Imaging parameters
 Imaging:
   RES: [70, 55, 1]
-  FOV: {value: [0.16, 0.12, 0.008], unit: "m"}
   TimeSpacing: {value: 40, unit: "ms"}
   TR: {value: 18, unit: "ms"}
   Oversampling: 2
@@ -14,13 +13,15 @@ Hardware:
   G_max: {value: 33.0, unit: "mT/m"}
   r_BW: {value: 150.0e+3, unit: "Hz"}
 
-# Imaging orientation (make sure about orthogonality)
+# Imaging orientation
 Formatting:
-  # Data taken from Box paraview filter
-  theta_x: -9.2091     # degrees
-  theta_y: -90.7028    # degrees
-  theta_z: 1.1159      # degrees
-  LOC: {value: [0.02295, 0.001460, 0.01953], unit: "m"}
+  planning: "planning/beating_heart_2.pvsm"
+  units: "m"
+  # # Data taken from Box paraview filter
+  # theta_x: -9.2091     # degrees
+  # theta_y: -90.7028    # degrees
+  # theta_z: 1.1159      # degrees
+  # LOC: {value: [0.02295, 0.001460, 0.01953], unit: "m"}
 
 Phantom:
   T2star: {value: 50, unit: "ms"}
