@@ -69,8 +69,6 @@ Magnetization<T> solve_mri(
 
         // Update position
         t += dt[i + 1];
-        // auto traj = py::cast<Matrix<T, Dynamic, Dynamic>>(pod_trajectory(0.0));
-        // traj *= t; // Scale trajectory by time
         auto traj = py::cast<Matrix<T, Dynamic, Dynamic>>(pod_trajectory(t));
         if (traj.rows() == 1) {
             r.noalias() = r0 + traj.colwise().replicate(r0.rows());
