@@ -12,7 +12,7 @@ Imaging:
 Hardware:
   G_sr: {value: 180.0, unit: "mT/m/ms"}
   G_max: {value: 33.0, unit: "mT/m"}
-  r_BW: {value: 50.0e+3, unit: "Hz"}
+  r_BW: {value: 150.0e+3, unit: "Hz"}
 
 # Imaging orientation (make sure about orthogonality)
 Formatting:
