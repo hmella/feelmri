@@ -27,7 +27,7 @@ Tensor<std::complex<T>, 4> SPAMM(
   const Matrix<std::complex<T>, Dynamic, Dynamic> &M_spamm,
   const Vector<T, Dynamic> &phi_dB0,
   const Vector<T, Dynamic> &T2,
-  const py::object &pod_trajectory
+  const py::function &pod_trajectory
   );
 
 PYBIND11_MODULE(Tagging, m) {
@@ -63,7 +63,7 @@ PYBIND11_MODULE(Tagging, m) {
       const Matrix<std::complex<double>, Dynamic, Dynamic> &,
       const Vector<double, Dynamic> &,
       const Vector<double, Dynamic> &,
-      const py::object &
+      const py::function &
     >(&SPAMM<double>));
     m.def("SPAMM", py::overload_cast<
       const int &,
@@ -74,6 +74,6 @@ PYBIND11_MODULE(Tagging, m) {
       const Matrix<std::complex<float>, Dynamic, Dynamic> &,
       const Vector<float, Dynamic> &,
       const Vector<float, Dynamic> &,
-      const py::object &
+      const py::function &
     >(&SPAMM<float>));
 }
