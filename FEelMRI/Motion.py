@@ -34,8 +34,8 @@ class RespiratoryMotion:
 
   def __add__(self, other):
       """ Overloads the addition operator to allow for the addition of another
-      PODTrajectory or a callable object that returns a trajectory.
-      :param other: another PODTrajectory or a callable object
+      POD or a callable object that returns a trajectory.
+      :param other: another POD or a callable object
       :return: a new PODSum object that represents the sum of the two trajectories
       """      
       return PODSum(self, other)
@@ -83,13 +83,13 @@ class RespiratoryMotion:
     return self.interpolator(t)
 
   def update_timeshift(self, timeshift: float):
-    """ Updates the timeshift of the PODTrajectory.
+    """ Updates the timeshift of the POD.
     :param timeshift: new timeshift value
     """
     self.timeshift = timeshift
 
 
-class PODTrajectory:
+class POD:
   def __init__(self, time_array: np.ndarray, 
                data: np.ndarray,
                global_to_local: np.ndarray = None,
@@ -108,15 +108,15 @@ class PODTrajectory:
       self.is_periodic = is_periodic
 
   def __repr__(self):
-      """ Returns a string representation of the PODTrajectory object.
-      :return: string representation of the PODTrajectory object
+      """ Returns a string representation of the POD object.
+      :return: string representation of the POD object
       """
-      return f"PODTrajectory(n_modes={self.n_modes}, taylor_order={self.taylor_order}, is_periodic={self.is_periodic})"
+      return f"POD(n_modes={self.n_modes}, taylor_order={self.taylor_order}, is_periodic={self.is_periodic})"
 
   def __add__(self, other):
       """ Overloads the addition operator to allow for the addition of another
-      PODTrajectory or a callable object that returns a trajectory.
-      :param other: another PODTrajectory or a callable object
+      POD or a callable object that returns a trajectory.
+      :param other: another POD or a callable object
       :return: a new PODSum object that represents the sum of the two trajectories
       """      
       return PODSum(self, other)
@@ -204,24 +204,24 @@ class PODTrajectory:
     return np.sum(self.modes * weights, axis=-1)  
   
   def update_timeshift(self, timeshift: float):
-    """ Updates the timeshift of the PODTrajectory.
+    """ Updates the timeshift of the POD.
     :param timeshift: new timeshift value
     """
     self.timeshift = timeshift
 
 
 class PODSum:
-  """ Class to handle the sum of a PODTrajectory and a callable object.
-  This class allows for the evaluation of the sum of a PODTrajectory and a callable
+  """ Class to handle the sum of a POD and a callable object.
+  This class allows for the evaluation of the sum of a POD and a callable
   object that returns a trajectory at any given time point.
   """
-  def __init__(self, pod1: PODTrajectory, pod2: Callable[[float], np.ndarray]):
+  def __init__(self, pod1: POD, pod2: Callable[[float], np.ndarray]):
     self.pod1 = pod1
     self.pod2 = pod2
     self.timeshif = 0.0
 
   def __call__(self, t: float):
-    """ Evaluates the sum of the PODTrajectory and the callable object at time t.
+    """ Evaluates the sum of the POD and the callable object at time t.
     :param t: time at which to evaluate the sum
     :return: evaluated sum at time t
     """
@@ -229,7 +229,7 @@ class PODSum:
     return self.pod1(t) + self.pod2(t)
   
   def update_timeshift(self, timeshift: float):
-    """ Updates the timeshift of the PODTrajectory.
+    """ Updates the timeshift of the POD.
     :param timeshift: new timeshift value
     """
     self.pod1.timeshift = timeshift

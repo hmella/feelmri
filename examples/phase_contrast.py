@@ -12,7 +12,7 @@ from pint import Quantity as Q_
 from FEelMRI.Bloch import BlochSolver, Sequence, SequenceBlock
 from FEelMRI.KSpaceTraj import CartesianStack
 from FEelMRI.Math import Rx, Ry, Rz
-from FEelMRI.Motion import PODTrajectory
+from FEelMRI.Motion import POD
 from FEelMRI.MPIUtilities import MPI_print, MPI_rank, gather_data
 from FEelMRI.MRImaging import SliceProfile, VelocityEncoding
 from FEelMRI.MRObjects import RF, Gradient, Scanner
@@ -63,7 +63,7 @@ if __name__ == '__main__':
   # Define POD object
   dt = parameters.Imaging.TimeSpacing
   times = np.linspace(0, (phantom.Nfr-1)*dt, phantom.Nfr)
-  pod_trajectory = PODTrajectory(time_array=times.m_as('ms'),
+  pod_trajectory = POD(time_array=times.m_as('ms'),
                                  data=trajectory.m_as('m/ms'),
                                  global_to_local=phantom.global_to_local_nodes,
                                  n_modes=5,

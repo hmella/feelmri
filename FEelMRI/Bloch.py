@@ -10,7 +10,7 @@ from FEelMRI.BlochSimulator import solve_mri
 from FEelMRI.MPIUtilities import MPI_print, MPI_rank
 from FEelMRI.MRObjects import Scanner
 from FEelMRI.Phantom import FEMPhantom
-from FEelMRI.Motion import PODTrajectory
+from FEelMRI.Motion import POD
 
 
 class SequenceBlock:
@@ -233,7 +233,7 @@ class BlochSolver:
                T1: Q_ = Q_(1000.0, 'ms'), 
                T2: Q_ = Q_(100.0, 'ms'), 
                delta_B: np.ndarray | float = 0.0,
-               pod_trajectory: PODTrajectory | None = None,
+               pod_trajectory: POD | None = None,
                initial_Mxy: np.ndarray | float = 0.0,
                initial_Mz: np.ndarray | float = None):
     ones = np.ones((phantom.local_nodes.shape[0], 1), dtype=np.float32)
