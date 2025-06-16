@@ -46,10 +46,13 @@ class FEMPhantom:
     self.pressure_label = pressure_label
     self.dtype = dtype
     mesh, self.reader, self.Nfr = self._prepare_reader()
+    self.cell_type = mesh['cell_type']
     self.global_elements = mesh['elements']
-    self.all_global_elements = mesh['all_elements']
     self.global_nodes = mesh['nodes']
     self.global_shape = self.global_nodes.shape
+    self.local_elements = mesh['elements']
+    self.local_nodes = mesh['nodes']
+    self.local_shape = self.global_nodes.shape
     self.bbox = self.bounding_box()
     self.point_data = None
     self.cell_data = None
@@ -89,7 +92,7 @@ class FEMPhantom:
     # Mesh dictionary
     mesh = {'nodes': nodes, 
             'elements': elems, 
-            'all_elements': all_elems}
+            'cell_type': all_elems[0].type}
 
     return mesh, reader, Nfr
 
@@ -144,7 +147,6 @@ class FEMPhantom:
       MPI_print("[MeshRefinement] Elapsed time for refinement: {:.2f} s".format(time.time()-t0))
 
     # Backup original mesh
-    self.all_elements_ = self.all_global_elements
     self.global_nodes_ = self.global_nodes
     self.global_elements_ = self.global_elements
     self.global_shape_ = self.global_shape
@@ -292,12 +294,12 @@ class FEMPhantom:
 
     # Translate and rotate
     self.global_nodes = (self.global_nodes - LOC.m) @ MPS_ori
-
+    self.local_nodes = (self.local_nodes - LOC.m) @ MPS_ori
 
   def mass_matrix(self, lumped=False, use_submesh=False, quadrature_order=2):
     ''' Assemble mass matrix for integrals '''
     # Create finite element and quadrature rule according to the mesh type
-    cell_type = self.all_elements_[0].type
+    cell_type = self.cell_type
     fe = FiniteElement(family=family_dict[cell_type], 
                        cell_type=element_dict[cell_type], 
                        degree=degree_dict[cell_type], 
