@@ -181,9 +181,6 @@ if __name__ == '__main__':
       # Update reference time of POD trajectory
       pod_sum.update_timeshift(i * parameters.Imaging.TR.m_as('ms'))
 
-      # Get displacement data in frame fr
-      displacement = pod_sum(0.0)
-
       # # Assemble mass matrix for integrals (just once)
       # M = phantom.mass_matrix_2(phantom.local_nodes + displacement, lumped=True, quadrature_order=2)
 
@@ -194,10 +191,11 @@ if __name__ == '__main__':
       kspace_times = traj.times.m_as('ms')[:,sh,s,np.newaxis]
 
       # Generate 4D flow image
-      tmp = SPAMM(MPI_rank, M, kspace_points, kspace_times, phantom.local_nodes + displacement, Mxy, delta_omega0, T2star.m_as('ms'), pod_sum)
+      tmp = SPAMM(MPI_rank, M, kspace_points, kspace_times, phantom.local_nodes, Mxy, delta_omega0, T2star.m_as('ms'), pod_sum)
       K[:,sh,s,:,0] = tmp.swapaxes(0, 1)[:,:,0]
 
       # Export magnetization and displacement for debugging
+      displacement = pod_sum(0.0)
       file.write(pointData={'Mx': np.real(Mxy), 
                             'My': np.imag(Mxy),
                             'Mz': Mz,
