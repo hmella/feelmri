@@ -309,6 +309,7 @@ Tensor<std::complex<T>, 4> PC(
           for (k = 0; k < nb_kz; k++){
 
           if (t_old != t(i,j,k)){
+
             // Update position
             auto traj = py::cast<Matrix<T, Dynamic, Dynamic>>(pod_trajectory(t(i,j,k)));
             if (traj.rows() == 1) {

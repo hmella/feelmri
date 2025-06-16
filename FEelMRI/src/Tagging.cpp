@@ -135,6 +135,8 @@ Tensor<std::complex<T>, 4> SPAMM(
     // T2* decay
     Vector<T, Dynamic> T2_decay(nb_nodes);
 
+    float t_old = -1.0;
+
     // Iterate over slices
     uint i, j, k, l;
     for (k = 0; k < nb_kz; k++){
@@ -145,22 +147,28 @@ Tensor<std::complex<T>, 4> SPAMM(
         // Iterate over kspace readout points
         for (i = 0; i < nb_meas; i++){
 
-          // Update position
-          auto traj = py::cast<Matrix<T, Dynamic, Dynamic>>(pod_trajectory(t(i,j,k)));
-          if (traj.rows() == 1) {
-              r.noalias() = r0 + traj.colwise().replicate(r0.rows());
-          } else {
-              r.noalias() = r0 + traj;
-          }
+          if (t_old != t(i,j,k)){
 
-          // Update off-resonance phase
-          phi_off.noalias() = phi_dB0 * t(i,j,k);
+            // Update position
+            auto traj = py::cast<Matrix<T, Dynamic, Dynamic>>(pod_trajectory(t(i,j,k)));
+            if (traj.rows() == 1) {
+                r.noalias() = r0 + traj.colwise().replicate(r0.rows());
+            } else {
+                r.noalias() = r0 + traj;
+            }
+
+            // Update off-resonance phase
+            phi_off.noalias() = phi_dB0 * t(i,j,k);  
+
+            // Calculate T2/T2* decay
+            T2_decay = (-t(i,j,k) / T2.array()).exp();
+
+            // Update time
+            t_old = t(i,j,k);
+          }
 
           // Calculate Fourier exponential
           fourier = FourierEncoding(r, kx, ky, kz, phi_off, i, j, k);
-
-          // Calculate T2/T2* decay
-          T2_decay = (-t(i,j,k) / T2.array()).exp();
 
           // Calculate k-space values, add T2* decay, and assign value to output array
           for (l = 0; l < nb_enc; l++){
