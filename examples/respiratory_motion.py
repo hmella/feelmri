@@ -40,7 +40,7 @@ if __name__ == '__main__':
 
   # We can a submesh to speed up the simulation. The submesh is created by selecting the elements that are inside the FOV
   mp = phantom.global_nodes[phantom.global_elements].mean(axis=1)
-  markers = np.where(np.abs(mp[:, 2]) <= 1.0 * planning.FOV[2].m_as('m'))[0]
+  markers = np.where(np.abs(mp[:, 2]) <= 4.0 * planning.FOV[2].m_as('m'))[0]
   phantom.create_submesh(markers)
 
   # Create array to store displacements
@@ -69,7 +69,7 @@ if __name__ == '__main__':
                               data=motion.m_as('m'),
                               is_periodic=True,
                               direction=np.array([0, 1, 0]),
-                              remove_mean=True)
+                              remove_mean=False)
 
   # Combine the POD trajectory and the respiratory motion
   pod_sum = pod_resp_motion + pod_trajectory
@@ -83,13 +83,13 @@ if __name__ == '__main__':
       return x[:,0] + x[:,1] + x[:,2]
   delta_B0 = spatial(phantom.local_nodes)
   delta_B0 /= np.abs(spatial(phantom.global_nodes).flatten()).max()
-  delta_B0 *= 15.0 * 1e-6 # 1.5 ppm of the main magnetic field
+  delta_B0 *= 1.5 * 1e-6     # 1.5 ppm of the main magnetic field
   delta_omega0 = 2.0 * np.pi * scanner.gammabar.m_as('1/ms/T') * delta_B0
 
   # Slice profile
   # The slice profile prepulse is calculated based on a reference RF pulse with
   # user-defined characteristics. The slice profile object allows accessing the calculated adjusted RF pulse and dephasing and rephasing gradients
-  rf = RF(scanner=scanner, NbLobes=[4, 4], alpha=0.46, shape='apodized_sinc', flip_angle=Q_(np.deg2rad(12),'rad') , t_ref=Q_(0.0,'ms'))
+  rf = RF(scanner=scanner, NbLobes=[4, 4], alpha=0.46, shape='apodized_sinc', flip_angle=Q_(np.deg2rad(20),'rad') , t_ref=Q_(0.0,'ms'))
   sp = SliceProfile(delta_z=planning.FOV[2].to('m'), 
     profile_samples=100,
     rf=rf,
@@ -140,13 +140,9 @@ if __name__ == '__main__':
   # Create and fill sequence object
   seq = Sequence()
   time_spacing = parameters.Imaging.TR.to('ms') - (imaging.time_extent[1] - sp.rf.t_ref)
-  # for i in range(80):
-  #   seq.add_block(dummy)  # Add dummy blocks to reach the steady state
-  #   seq.add_block(time_spacing)  # Delay between imaging blocks
-  # for i in range(phantom.Nfr):
-  #   seq.add_block(imaging)
-  #   seq.add_block(time_spacing)  # Delay between imaging blocks
-  # seq.plot()
+  for i in range(80):
+    seq.add_block(dummy)  # Add dummy blocks to reach the steady state
+    seq.add_block(time_spacing)  # Delay between imaging blocks
 
   # Bloch solver
   solver = BlochSolver(seq, phantom, 
