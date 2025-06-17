@@ -292,11 +292,11 @@ class Gradient:
 
     return g
 
-  def area(self, t0=0.0, nb_samples=1000):
+  def area(self, t0: Q_ = Q_(0.0, 'ms'), nb_samples=1000):
     ''' Calculate the area of the gradient '''
     # Calculate area
     time = np.linspace(t0.m_as('ms'), (self.t_ref + self.dur).m_as('ms'), nb_samples)
-    area = np.trapz(self.interpolator(time), time)
+    area = np.trapezoid(self.interpolator(time), time)
 
     return Q_(area, 'mT*ms/m')
 
@@ -353,6 +353,77 @@ class Gradient:
 
     # Update timings and amplitudes in array
     _, self.timings, self.amplitudes, self.interpolator = self.group_timings()
+
+  def change_dur(self, new_dur: Q_):
+    """
+    Change the duration of the gradient while keeping the area.
+
+    Parameters:
+    dur (float): The new duration in milliseconds.
+
+    Returns:
+    None
+    """
+    if new_dur.to('ms') > self.dur.to('ms'):
+      # Calculate new gradient amplitude and lenc
+      self.G = self.area()/new_dur.to('ms')
+      self.lenc = new_dur.to('ms') - 2*self.slope.to('ms')
+      self.dur = new_dur.to('ms')
+
+      # Update timings and amplitudes in array
+      _, self.timings, self.amplitudes, self.interpolator = self.group_timings()
+
+    elif new_dur.to('ms') == self.dur.to('ms'):
+      # If the duration is the same, do nothing
+      if MPI_rank == 0:
+        warnings.warn("The gradient duration is already set to the requested value. No changes made.")  
+
+    else:
+      # At the moment, we do not allow to change the duration to a smaller value as the gradients are calculated considering the maximum gradient amplitude and slew rate
+      if MPI_rank == 0:
+        warnings.warn("Changing the gradient duration to a smaller value is not allowed. The gradient parameters are calculated considering the maximum gradient amplitude and slew rate. Gradient duration remains unchanged.")
+
+  def rotate(self, direction: np.ndarray):
+    """
+    Rotate the gradient direction.
+
+    Parameters:
+    direction (np.ndarray): The new direction vector for the gradient.
+
+    Returns:
+    None
+    """
+    if direction.shape != (3,):
+      raise ValueError("Direction must be a 3-element vector with [M, P, S] directions.")
+
+    # Normalize the direction vector
+    norm = np.linalg.norm(direction)
+    if norm != 0:
+      direction = direction / norm
+
+    # Gradient area and sign
+    area = self.area()
+
+    # Create gradients around each axis given by the direction vector
+    gradients = []
+    if norm == 0:
+      g = self.__copy__() * 0.0
+      gradients.append(g)
+    else:
+      for i, axis in enumerate(direction):
+        if axis != 0:
+          g = self.__copy__()
+          g.match_area(axis*area)
+          g.axis = i
+          gradients.append(g)
+
+    # Maximun gradient duration
+    max_dur = max([g.dur for g in gradients])
+
+    # Update all gradients to have the same duration
+    [g.change_dur(max_dur) for g in gradients]
+
+    return gradients
 
   def plot(self, linestyle='-', axes=[]):
     ''' Plot gradient '''
