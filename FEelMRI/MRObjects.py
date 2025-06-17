@@ -296,7 +296,7 @@ class Gradient:
     ''' Calculate the area of the gradient '''
     # Calculate area
     time = np.linspace(t0.m_as('ms'), (self.t_ref + self.dur).m_as('ms'), nb_samples)
-    area = np.trapezoid(self.interpolator(time), time)
+    area = np.trapz(self.interpolator(time), time)
 
     return Q_(area, 'mT*ms/m')
 
