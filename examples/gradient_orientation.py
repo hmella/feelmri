@@ -4,18 +4,12 @@ from pint import Quantity as Q_
 from FEelMRI.Bloch import Sequence, SequenceBlock
 from FEelMRI.MRImaging import VelocityEncoding
 from FEelMRI.MRObjects import Gradient, Scanner
-from FEelMRI.Parameters import ParameterHandler, PVSMParser
+from FEelMRI.Parameters import ParameterHandler
 
 if __name__ == '__main__':
 
   # Import imaging parameters
   parameters = ParameterHandler('parameters/gradient_direction.yaml')
-
-  # Import PVSM file to get the FOV, LOC and MPS orientation
-  planning = PVSMParser(parameters.Formatting.planning,
-                          box_name='Box1',
-                          transform_name='Transform1',
-                          length_units=parameters.Formatting.units)
 
   # Velocity encoding parameters
   venc_dirs = list(parameters.VelocityEncoding.Directions.values())
