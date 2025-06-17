@@ -10,8 +10,8 @@ Imaging:
 VelocityEncoding:
   VENC: {value: 2.2, unit: "m/s"}
   Directions:
-    dir1: [1.0, 0.0, 1.0]
-    dir2: [-1.0, 0.0, 1.0]
+    dir1: [0.25, 0.5, 1.0]
+    dir2: [-1.0, -0.5, 0.25]
 
 # Hardware parameters
 Hardware:
