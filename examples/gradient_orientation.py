@@ -1,22 +1,9 @@
-import os
-import sys
-
-os.environ["OPENBLAS_NUM_THREADS"] = "1" # export OPENBLAS_NUM_THREADS=1
-import pickle
-import time
-from pathlib import Path
-
 import numpy as np
 from pint import Quantity as Q_
 
-from FEelMRI.Bloch import BlochSolver, Sequence, SequenceBlock
-from FEelMRI.IO import XDMFFile
-from FEelMRI.KSpaceTraj import CartesianStack
-from FEelMRI.Motion import PODVelocity
-from FEelMRI.MPIUtilities import MPI_print, MPI_rank, gather_data
-from FEelMRI.MRImaging import SliceProfile, VelocityEncoding
-from FEelMRI.MRObjects import RF, Gradient, Scanner
-from FEelMRI.Noise import add_cpx_noise
+from FEelMRI.Bloch import Sequence, SequenceBlock
+from FEelMRI.MRImaging import VelocityEncoding
+from FEelMRI.MRObjects import Gradient, Scanner
 from FEelMRI.Parameters import ParameterHandler, PVSMParser
 
 if __name__ == '__main__':
@@ -38,29 +25,38 @@ if __name__ == '__main__':
   scanner = Scanner(gradient_strength=parameters.Hardware.G_max,
                     gradient_slew_rate=parameters.Hardware.G_sr)
 
-  # Create velocity encoding gradients for each direction
+  # Create sequence object to show original and rotated gradients
+  seq = Sequence()
+
+  # Create velocity encoding gradients and rotate them
   t_ref = Q_(0.0, 'ms')  # Reference time for gradients
   for d in range(enc.nb_directions):
 
-    # Create sequence object and Bloch solver
-    seq = Sequence()
-
-    # Bipolar gradients
-    bp1 = Gradient(scanner=scanner, t_ref=t_ref)
+    # Calculate bipolar gradients for the VENC given in the paramters file in the measurement direction (axis=0)
+    bp1 = Gradient(scanner=scanner, t_ref=t_ref, axis=0)
     bp2 = bp1.make_bipolar(parameters.VelocityEncoding.VENC.to('m/s'))
 
-    # Rotate the bipolar gradients to the desired direction
+    # Original block of gradients
+    original = SequenceBlock([bp1, bp2])
+
+    # Add original block to the sequence
+    seq.add_block(original)
+
+    # Rotate the bipolar gradients to the desired direction given in the parameters file. Directions can have a norm bigger than 1 but it is normalized inside the rotate function.
     bp1_rotated = bp1.rotate(enc.directions[d])
     bp2_rotated = bp2.rotate(enc.directions[d])
 
-    # Update reference time for second lobe
+    # Update reference time for second lobe (rotate function keep the time reference of the original gradient)
     [g.update_reference(g.t_ref - (bp1.dur - g.dur)) for g in bp2_rotated]
 
-    # Imaging block
-    imaging = SequenceBlock(gradients=bp1_rotated + bp2_rotated,
-                            dt_gr=Q_(1e-2, 'ms'), 
-                            dt=Q_(1, 'ms'), 
-                            store_magnetization=False)
+    # Rotated block of gradients
+    rotated = SequenceBlock(gradients=bp1_rotated + bp2_rotated)
 
-    # Plot sequence block
-    imaging.plot()
+    # Add rotated block to the sequence
+    seq.add_block(rotated)
+
+    # Add a delay between the original and rotated gradients
+    seq.add_block(Q_(0.25, 'ms'))
+
+  # Plot the sequence
+  seq.plot()
