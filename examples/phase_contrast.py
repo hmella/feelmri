@@ -77,7 +77,7 @@ if __name__ == '__main__':
       return x[:,0] + x[:,1] + x[:,2]
   delta_B0 = spatial(phantom.local_nodes)
   delta_B0 /= np.abs(spatial(phantom.global_nodes).flatten()).max()
-  delta_B0 *= 1.5 * 1e-6           # 1.5 ppm of the main magnetic field
+  delta_B0 *= 0.0 * 1.5 * 1e-6           # 1.5 ppm of the main magnetic field
   delta_omega0 = 2.0 * np.pi * scanner.gammabar.m_as('1/ms/T') * delta_B0
 
   # Slice profile
@@ -114,13 +114,18 @@ if __name__ == '__main__':
 
     # Bipolar gradient
     t_ref = sp.rephasing.t_ref + sp.rephasing.dur
-    bp1 = Gradient(scanner=scanner, t_ref=t_ref, axis=2)
+    bp1 = Gradient(scanner=scanner, t_ref=t_ref)
     bp2 = bp1.make_bipolar(parameters.VelocityEncoding.VENC.to('m/s'))
-    bp1 *= d + (-1)**d
-    bp2 *= d + (-1)**d
+
+    # Rotate the bipolar gradients to the desired direction
+    bp1_rotated = bp1.rotate(enc.directions[d])
+    bp2_rotated = bp2.rotate(enc.directions[d])
+
+    # Update reference time for second lobe
+    [g.update_reference(g.t_ref - (bp1.dur - g.dur)) for g in bp2_rotated]
 
     # Imaging block
-    imaging = SequenceBlock(gradients=[sp.dephasing, sp.rephasing, bp1, bp2],
+    imaging = SequenceBlock(gradients=[sp.dephasing, sp.rephasing] + bp1_rotated + bp2_rotated,
                             rf_pulses=[sp.rf], 
                             dt_rf=Q_(1e-2, 'ms'), 
                             dt_gr=Q_(1e-2, 'ms'), 
@@ -131,12 +136,12 @@ if __name__ == '__main__':
 
     # Add dummy blocks to the sequence to reach steady state
     time_spacing = parameters.Imaging.TimeSpacing.to('ms') - (imaging.time_extent[1] - sp.rf.t_ref)
-    for i in range(80):
-      seq.add_block(dummy)
-      seq.add_block(time_spacing, dt=Q_(1, 'ms'))
+    # for i in range(80):
+    #   seq.add_block(dummy)
+    #   seq.add_block(time_spacing, dt=Q_(1, 'ms'))
     
-    # Add and additional block to synchornize the sequence with the cardiac cycle
-    seq.add_block(times[-1] - seq.blocks[-1].time_extent[1] % times[-1], dt=Q_(1, 'ms'))
+    # # Add and additional block to synchronize the sequence with the cardiac cycle
+    # seq.add_block(times[-1] - seq.blocks[-1].time_extent[1] % times[-1], dt=Q_(1, 'ms'))
 
     # Add PC imaging sequence
     for fr in range(phantom.Nfr):
