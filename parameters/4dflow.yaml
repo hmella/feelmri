@@ -12,7 +12,7 @@ VelocityEncoding:
   Directions:
     dir1: [-1, 0, 0]
     dir2: [0, -1, 0]
-    dir3: [0,  0, 1]
+    dir3: [0,  0, -1]
     dir4: [0,  0, 0]
 
 # Hardware parameters
