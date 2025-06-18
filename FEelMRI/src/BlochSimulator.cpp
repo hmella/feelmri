@@ -81,8 +81,12 @@ Magnetization<T> solve_mri(
         B1_real = rf_all[i + 1].real();
         B1_imag = rf_all[i + 1].imag();
         Bz = (r * G_all.row(i + 1).transpose()).array() + delta_B;
-        B.col(0) = B1_real;
-        B.col(1) = B1_imag;
+        // B.col(0) = B1_real;
+        // B.col(1) = B1_imag;
+        // B.col(2) = Bz;
+        // TODO: Have a look on this!!!!!!
+        B.col(1) = B1_real;
+        B.col(0) = B1_imag;
         B.col(2) = Bz;
 
         Bnorm = B.rowwise().norm();
@@ -177,8 +181,12 @@ Magnetization<T> solve_mri(
         B1_real = rf_all[i + 1].real();
         B1_imag = rf_all[i + 1].imag();
         Bz = (r0 * G_all.row(i + 1).transpose()).array() + delta_B;
-        B.col(0) = B1_real;
-        B.col(1) = B1_imag;
+        // B.col(0) = B1_real;
+        // B.col(1) = B1_imag;
+        // B.col(2) = Bz;
+        // TODO: Have a look on this!!!!!!
+        B.col(1) = B1_real;
+        B.col(0) = B1_imag;
         B.col(2) = Bz;
 
         Bnorm = B.rowwise().norm();
