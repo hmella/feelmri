@@ -143,7 +143,7 @@ class SliceProfile:
       Mx.append(np.abs(np.imag(self.interp_profile(z_arr))).max())
       My.append(np.abs(np.real(self.interp_profile(z_arr))).max())
       if MPI_rank == 0:
-        print('Iteration {:d} / {:d} - Refocusing area fraction: {:.4f}, Mx/My: {:.4f}'.format(i+1, N, frac, Mx[-1]/My[-1]))
+        print('Iteration {:d} / {:d} - Refocusing area fraction: {:.5f}, Mx/My: {:.4f}'.format(i+1, N, frac, Mx[-1]/My[-1]))
 
     # Verify which fraction gives the best result
     idx = np.argmin(Mx)
