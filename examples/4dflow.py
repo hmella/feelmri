@@ -82,7 +82,7 @@ if __name__ == '__main__':
       return x[:,0] + x[:,1] + x[:,2]
   delta_B0 = spatial(phantom.local_nodes)
   delta_B0 /= np.abs(spatial(phantom.global_nodes).flatten()).max()
-  delta_B0 *= 0.0 * 1.5 * 1e-6           # 1.5 ppm of the main magnetic field
+  delta_B0 *= 1.5 * 1e-6           # 1.5 ppm of the main magnetic field
   delta_omega0 = 2.0 * np.pi * scanner.gammabar.m_as('1/ms/T') * delta_B0
 
   # Slice profile
