@@ -95,7 +95,7 @@ if __name__ == '__main__':
     dt=Q_(1e-2, 'ms'), 
     plot=False, 
     bandwidth=Q_(10000, 'Hz'), #'maximum',
-    refocusing_area_frac=0.7961)
+    refocusing_area_frac=0.78185)
   # sp.optimize(frac_start=0.79, frac_end=0.81, N=100)
 
   # Create sequence object and solve magnetization
@@ -226,13 +226,13 @@ if __name__ == '__main__':
       pickle.dump({'kspace': K, 'MPS_ori': planning.MPS, 'LOC': planning.LOC, 'traj': traj}, f)
 
   # Image reconstruction
-  I = CartesianRecon(K, traj)
+  Im = CartesianRecon(K, traj)
 
   # Show reconstruction
-  m = np.abs(I[...,0,:])
-  phi = np.angle(I[...,0,:])
-  phi_ref = np.angle(I[...,1,:])
-  phi_v = np.angle(I[...,0,:] * np.conj(I[...,1,:]))
+  mag = np.abs(Im[...,0,:])
+  phi_v = np.angle(Im[...,0,:] * np.conj(Im[...,1,:]))
+  phi_0 = np.angle(Im[...,1,:])
+  phi   = np.angle(Im[...,0,:])
   if MPI_rank == 0:
-    plotter = MRIPlotter(images=[m, phi_v, phi, phi_ref], title=['Magnitude', '$\\phi_v$ ', '$\\phi + \\phi_0$', '$\\phi_{ref}$'], FOV=planning.FOV.m_as('m'))
+    plotter = MRIPlotter(images=[mag, phi_v, phi, phi_0], title=['Magnitude', '$\\phi_v$ ', '$\\phi_v + \\phi_0$', '$\\phi_0$'], FOV=planning.FOV.m_as('m'))
     plotter.show()
