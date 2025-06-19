@@ -4,7 +4,7 @@ import warnings
 import matplotlib.pyplot as plt
 import numpy as np
 from pint import Quantity as Q_
-from scipy.interpolate import interp1d
+from scipy.interpolate import interp1d, make_interp_spline
 
 from FEelMRI.MPIUtilities import MPI_rank
 
@@ -435,27 +435,29 @@ class Gradient:
 
 
 class RF:
-  def __init__(self, scanner=Scanner(), NbLobes=[2,2], alpha=0.46, shape='apodized_sinc', flip_angle=Q_(np.pi/2,'rad'), dur=Q_(2.0,'ms'), t_ref=Q_(0.0,'ms'), nb_samples=1000):
+  def __init__(self, scanner=Scanner(), NbLobes=[2,2], alpha=0.46, shape='apodized_sinc', flip_angle=Q_(np.pi/2,'rad'), dur=Q_(2.0,'ms'), t_ref=Q_(0.0,'ms'), nb_samples=1000, phase_offset=Q_(0.0,'rad'), frequency_offset=Q_(0.0,'Hz')):
     self.scanner = scanner
     self.NbLobes = NbLobes
     self.alpha = alpha
     self.shape = shape
     if self.shape == 'sinc':
-      self._pulse = self._rf_apodized_sinc
+      self._pulse = self._unit_sinc
       if self.alpha != 0.0 and MPI_rank == 0:
         warnings.warn("For 'sinc' shape, the alpha parameter is automatically set to 0.0")
       self.alpha = 0.0
     elif self.shape == 'apodized_sinc':
-      self._pulse = self._rf_apodized_sinc
+      self._pulse = self._unit_sinc
     elif self.shape == 'hard':
-      self._pulse = self._rf_hard
+      self._pulse = self._unit_hard
     self.flip_angle = flip_angle.to('rad')
     self.t_ref = t_ref.to('ms')
     self.dur1 = (self.NbLobes[0] + 1)/(np.sum(self.NbLobes) + 2)*dur.to('ms')
     self.dur2 = (self.NbLobes[1] + 1)/(np.sum(self.NbLobes) + 2)*dur.to('ms')
     self.dur = dur.to('ms')
+    self.phase_offset = phase_offset.to('rad')
+    self.frequency_offset = frequency_offset.to('Hz')
     self.nb_samples = nb_samples
-    self.interpolator = self._get_interpolator()
+    self.interp_real, self.interp_imag = self._interpolator()
 
   def __str__(self):
     return f"RF(NbLobes={self.NbLobes}, alpha={self.alpha}, shape={self.shape}, flip_angle={self.flip_angle}, dur={self.dur}, t_ref={self.t_ref}, nb_samples={self.nb_samples})"
@@ -467,9 +469,12 @@ class RF:
     return self.__str__()
 
   def __call__(self, t):
-    return self.interpolator(t)
+    return self.interp_real(t) + 1j*self.interp_imag(t)
+  
+  def _window(self, t):
+    return (t >= -self.dur1.m_as('ms'))*(t <= self.dur2.m_as('ms'))
 
-  def _rf_apodized_sinc(self, t):
+  def _unit_sinc(self, t):
     """
     Generate an apodized sinc RF pulse.
 
@@ -498,11 +503,16 @@ class RF:
     B1e = (1/bw.m)
     B1e *= ((1-self.alpha) + self.alpha*np.cos(np.pi*bw.m*t/N))
     B1e *= np.sinc(bw.m*t)
-    B1e *= (t >= -self.dur1.m)*(t <= self.dur2.m)
+    B1e *= self._window(t)
+    B1 = B1e + 1j*np.zeros(B1e.shape)
 
-    return B1e
+    # Add phase and frequency offsets
+    if self.phase_offset.m != 0.0 or self.frequency_offset.m != 0.0:
+      B1 *= np.exp(1j*(self.phase_offset.m_as('rad') + 2*np.pi*self.frequency_offset.m_as('kHz')*t))
 
-  def _rf_hard(self, t):
+    return B1
+
+  def _unit_hard(self, t):
     """
     Generate a hard RF pulse for MRI imaging.
 
@@ -523,27 +533,38 @@ class RF:
     - The RF pulse is defined as a rectangular pulse within the calculated time window.
     """
     # RF pulse definition
-    B1e = 1.0*(t >= -self.dur1.m)*(t <= self.dur2.m)
+    B1e = 1.0
+    B1e *= self._window(t)
+    B1 = B1e + 1j*np.zeros(B1e.shape)
 
-    return B1e
+    # Add phase and frequency offsets
+    if self.phase_offset.m != 0.0 or self.frequency_offset.m != 0.0:
+      B1 *= np.exp(1j*(self.phase_offset.m_as('rad') + 2*np.pi*self.frequency_offset.m_as('kHz')*t))
+
+    return B1
 
   def _flip_angle_factor(self):
     # Timings
     dur1 = self.dur1.m_as('ms')
     dur2 = self.dur2.m_as('ms')
-    time = np.linspace(-dur1, dur2, self.nb_samples)
-    dt = time[1] - time[0]
+    t = np.linspace(-dur1, dur2, self.nb_samples)
+    dt = t[1] - t[0]
 
-    # Calculate factor to accoundt for flip angle
-    flip_angle_factor = self.flip_angle.m_as('rad')/(2.0*np.pi*self.scanner.gammabar.m_as('1/mT/ms') * self._pulse(time).sum() * dt)
+    # Calculate factor to account for flip angle
+    amplitude = self._pulse(t)
+    unit_flip_angle = np.sum((amplitude[1:] + amplitude[:-1])/2) * dt \
+      * self.scanner.gamma.m_as('rad/mT/ms')  # [mT*ms/m]
 
-    return flip_angle_factor
+    return self.flip_angle.m_as('rad')/unit_flip_angle
 
-  def _get_interpolator(self):
-    time = np.linspace(-self.dur1.m_as('ms'), self.dur2.m_as('ms'), self.nb_samples)
-    interpolator = interp1d(time + self.t_ref.m_as('ms'), self._flip_angle_factor()*self._pulse(time), kind='linear', fill_value=0.0, bounds_error=False)
-    return interpolator
-  
+  def _interpolator(self):
+    t = np.linspace(-self.dur1.m_as('ms'), self.dur2.m_as('ms'), self.nb_samples)
+    scaling = self._flip_angle_factor()
+    interp_real = interp1d(t + self.t_ref.m_as('ms'), np.abs(scaling) * np.real(self._pulse(t)), kind='linear', fill_value=0.0, bounds_error=False)
+    interp_imag = interp1d(t + self.t_ref.m_as('ms'), np.abs(scaling) * np.imag(self._pulse(t)), kind='linear', fill_value=0.0, bounds_error=False)
+
+    return interp_real, interp_imag
+
   def update_reference(self, t_ref):
     """
     Update the reference time for the RF pulse.
@@ -555,4 +576,4 @@ class RF:
     None
     """
     self.t_ref = t_ref
-    self.interpolator = self._get_interpolator()
+    self.interp_real, self.interp_imag = self._interpolator()

@@ -11,7 +11,9 @@ family_dict = {"P": ElementFamily.P,
 cell_type_dict = {"triangle": CellType.triangle, 
              "tetrahedron": CellType.tetrahedron, 
              "quadrilateral": CellType.quadrilateral, 
-             "hexahedron": CellType.hexahedron}
+             "hexahedron": CellType.hexahedron,
+             "prism": CellType.prism,
+             "pyramid": CellType.pyramid}
 
 variant_dict = {"equispaced": LagrangeVariant.equispaced, 
            "legendre": LagrangeVariant.legendre, 

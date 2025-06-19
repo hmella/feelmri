@@ -10,12 +10,8 @@ Tensor<std::complex<T>, 4> WaterFat(
   const Tensor<T, 3> &t,
   const Matrix<T, Dynamic, Dynamic> &r0,
   const Vector<T, Dynamic> &phi_dB0,
-  const Vector<T, Dynamic> &M0,
   const Vector<T, Dynamic> &T2,
-  const Vector<std::complex<T>, Dynamic> &profile,
-  const Vector<T, Dynamic> &rho_w,
-  const Vector<T, Dynamic> &rho_f,
-  const Vector<T, Dynamic> &chemical_shift  //
+  const Matrix<std::complex<T>, Dynamic, Dynamic> &Mxy
   ){
 
     // Nb of measurements in the readout direction
@@ -40,11 +36,8 @@ Tensor<std::complex<T>, 4> WaterFat(
     const Tensor<T, 3> kz = 2.0 * PI * kloc[2];
 
     // Kspace, Fourier exponential, and off-resonance phase
-    Matrix<std::complex<T>, Dynamic, Dynamic> Mxy_w = 1.0e+3 * nb_nodes * M0.array() * rho_w.array() * profile.array();
-    Matrix<std::complex<T>, Dynamic, Dynamic> Mxy(nb_nodes, 1);
     Vector<std::complex<T>, Dynamic> fourier(nb_nodes);
     Vector<T, Dynamic>  phi_off(nb_nodes);
-    Vector<T, Dynamic> phi_fat(nb_nodes);
 
     // kspace
     Tensor<std::complex<T>, 4> kspace(nb_meas, nb_lines, nb_kz, 1);
@@ -52,25 +45,29 @@ Tensor<std::complex<T>, 4> WaterFat(
     // T2* decay
     Vector<T, Dynamic> T2_decay;
 
-    // Iterate over kspace phase linesa
-    for (uint j = 0; j < nb_lines; ++j){
+    float t_old = -1.0;
 
-      // Debugging
-      if (MPI_rank == 0){ py::print("  ky location ", j); }
+    // Iterate over kspace readout points
+    for (uint i = 0; i < nb_meas; ++i){
 
-      // Iterate over kspace readout points
-      for (uint i = 0; i < nb_meas; ++i){
+        // Iterate over kspace phase linesa
+      for (uint j = 0; j < nb_lines; ++j){
 
         // Iterate over slices
         for (uint k = 0; k < nb_kz; ++k){
 
-          T2_decay = (-t(i,j,k) / T2.array()).exp();
+          if (t_old != t(i,j,k)){
 
-          // Update off-resonance phase
-          phi_off.noalias() = phi_dB0*t(i,j,k);
-          phi_fat.noalias() = chemical_shift*t(i,j,k);
-          Mxy = Mxy_w.array() + 1.0e+3 * nb_nodes * M0.array() * rho_f.array() * (i1 * phi_fat).array().exp() * profile.array();
+            // Update off-resonance phase
+            phi_off.noalias() = phi_dB0 * t(i,j,k);  
 
+            // Calculate T2/T2* decay
+            T2_decay = (-t(i,j,k) / T2.array()).exp();
+
+            // Update time
+            t_old = t(i,j,k);
+          }           
+          
           // Calculate Fourier exponential
           fourier = FourierEncoding(r0, kx, ky, kz, phi_off, i, j, k);
 

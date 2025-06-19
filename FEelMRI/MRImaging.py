@@ -29,9 +29,9 @@ class Bloch:
     dw = self.gamma*self.eval_gradient(t)*(self.z - self.z0)
 
     # Bloch equations
-    dMxdt = dw*M[1]
-    dMydt = self.gamma*self.B1e(t)*M[2] - dw*M[0]
-    dMzdt = -self.gamma*self.B1e(t)*M[1]
+    dMxdt = dw*M[1] - np.imag(self.B1e(t))*M[2]
+    dMydt = self.gamma*np.real(self.B1e(t))*M[2] - dw*M[0]
+    dMzdt = -self.gamma*np.real(self.B1e(t))*M[1]
 
     return np.array([dMxdt, dMydt, dMzdt]).reshape((3,))
 
@@ -40,9 +40,9 @@ class Bloch:
     dw = self.gamma*self.eval_gradient(t)*(self.z - self.z0)
 
     # Bloch equations
-    dMxdt = dw*M[1]
-    dMydt = self.gamma*self.B1e(t)*M[2] - dw*M[0]
-    dMzdt = -self.gamma*self.B1e(t)*M[1]*0.0
+    dMxdt = dw*M[1] - np.imag(self.B1e(t))*M[2]
+    dMydt = self.gamma*np.real(self.B1e(t))*M[2] - dw*M[0]
+    dMzdt = -self.gamma*np.real(self.B1e(t))*M[1]*0.0
 
     return np.array([dMxdt, dMydt, dMzdt]).reshape((3,))
 
@@ -77,10 +77,10 @@ class SliceProfile:
     _rf_sinc(t):
       Computes the sinc RF pulse at time t.
 
-    _rf_apodized_sinc(t):
+    _unit_sinc(t):
       Computes the apodized sinc RF pulse at time t.
 
-    _rf_hard(t):
+    _unit_hard(t):
       Computes the hard RF pulse at time t.
 
     B1e_norm(t):
@@ -157,7 +157,7 @@ class SliceProfile:
     self.profile_samples = _profile_samples
     self.plot = _plot
 
-  def calculate(self, y0=np.array([0,0,1]).reshape((3,))):
+  def calculate(self, y0=np.array([0,0,1], dtype=np.float32).reshape((3,))):
     """
     Calculate the slice profile for MRI imaging.
 
@@ -183,7 +183,31 @@ class SliceProfile:
     # RF pulse durations based on required bandwidth
     dur1 = ((self.rf.NbLobes[0]+1)/self.bandwidth).to('ms')
     dur2 = ((self.rf.NbLobes[1]+1)/self.bandwidth).to('ms')
-    rf_ss = RF(scanner=self.scanner, NbLobes=self.rf.NbLobes, alpha=self.rf.alpha, shape=self.rf.shape, flip_angle=self.rf.flip_angle, dur=dur1+dur2, t_ref=self.rf.t_ref)
+    rf_ss = RF(scanner=self.scanner, 
+               NbLobes=self.rf.NbLobes, 
+               alpha=self.rf.alpha, 
+               shape=self.rf.shape, 
+               flip_angle=self.rf.flip_angle, 
+               dur=dur1+dur2, 
+               t_ref=self.rf.t_ref,
+               phase_offset=self.rf.phase_offset,
+               frequency_offset=self.rf.frequency_offset)
+
+    # t = np.linspace((self.rf.t_ref - self.rf.dur1).m_as('ms'), (self.rf.t_ref + self.rf.dur2).m_as('ms'), 100)
+    # plt.plot(t, np.real(self.rf(t)), label='RF real')
+    # plt.plot(t, np.imag(self.rf(t)), label='RF imag')
+    # plt.xlabel('Time [ms]')
+    # plt.ylabel('RF [mT]')
+    # plt.legend()
+    # plt.show()
+
+    # t = np.linspace((rf_ss.t_ref - rf_ss.dur1).m_as('ms'), (rf_ss.t_ref + dur2).m_as('ms'), 100)
+    # plt.plot(t, np.real(rf_ss(t)), label='RF real')
+    # plt.plot(t, np.imag(rf_ss(t)), label='RF imag')
+    # plt.xlabel('Time [ms]')
+    # plt.ylabel('RF [mT]')
+    # plt.legend()
+    # plt.show()
 
     # # Calculate area needed for dephasing condition
     # area  = 1.0/(self.delta_z * self.Gss.scanner.gammabar) # Ec. 16.5 in Brown's book
@@ -247,10 +271,11 @@ class SliceProfile:
       
       # Plot RF and slice selection gradients
       fig, ax = plt.subplots(2, 1, figsize=(12, 4))
-      ax[0].plot(t, B1)
+      ax[0].plot(t, np.real(B1))
+      ax[0].plot(t, np.imag(B1))
       ax[0].set_xlim([t0.m, t_bound.m])
-      ax[0].legend(['B1'])
-      ax[0].set_ylabel('RF [mT/m]?')
+      ax[0].legend(['B1_real','B1_imag'])
+      ax[0].set_ylabel('RF [mT]?')
       ax[0].set_xticklabels([])
 
       ax[1].plot(dephasing.timings.m_as('ms'), dephasing.amplitudes.m_as('mT/m'))
@@ -279,7 +304,7 @@ class SliceProfile:
       plt.show()
 
     # Interpolator
-    p = M[1,:].astype(self.dtype) + 1j*M[0,:].astype(self.dtype)
+    p = M[0,:].astype(self.dtype) + 1j*M[1,:].astype(self.dtype)
     interp_profile = interp1d(z_arr.astype(self.dtype), p, kind='linear', bounds_error=False, fill_value=0.0)
 
     return interp_profile

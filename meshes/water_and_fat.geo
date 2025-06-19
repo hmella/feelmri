@@ -46,7 +46,7 @@ For i In {1:numCylinders}
   Curve Loop(10 + i) = {5 + i*numCylinders+1, 5 + i*numCylinders+2, 5 + i*numCylinders+3, 5 + i*numCylinders+4};
   Plane Surface(10 + i) = {10 + i};
   volumes[] = Extrude {0, 0, L} {
-    Surface{10 + i};
+    Surface{10 + i}; Layers{Round(L/lc)}; Recombine;
   };
   Physical Volume(i+1) = {volumes[1]};
 EndFor
@@ -55,6 +55,8 @@ EndFor
 Curve Loop(20) = {4, 1, 2, 3};
 Plane Surface(20) = {20,11,12,13,14,15,16,17,18,19};  
 volumes[] = Extrude {0, 0, L} {
-  Surface{20};
+  Surface{20}; Layers{Round(L/lc)}; Recombine;
 };
 Physical Volume(1) = {volumes[1]};
+
+Transfinite Volume{:};
