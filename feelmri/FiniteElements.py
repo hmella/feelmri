@@ -35,6 +35,14 @@ class FiniteElement:
         self.element = basix.create_element(self.family, self.cell_type, self.degree, self.variant)
         self.dimension = self.element.dim
 
+    def __str__(self):
+        """
+        String representation of the finite element.
+        
+        :return: A string describing the finite element.
+        """
+        return f"FiniteElement(family={self.family}, cell_type={self.cell_type}, degree={self.degree}, variant={self.variant})"
+
     def tabulate(self, derivative_order, points):
         """
         Tabulate the basis functions at the given points.

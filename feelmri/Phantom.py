@@ -17,7 +17,7 @@ element_dict = {
     'triangle': 'triangle',
     'tetra': 'tetrahedron',
     'tetra10': 'quadrilateral',
-    'wedge': 'pyramid',
+    'wedge': 'prism',
 }
 degree_dict = {
     'triangle': 1,
@@ -50,7 +50,6 @@ class FEMPhantom:
     self.dtype = dtype
     mesh, self.reader, self.Nfr = self._prepare_reader()
     self.cell_type = mesh['cell_type']
-    print("Cell type: {}".format(self.cell_type))
     self.global_elements = mesh['elements']
     self.global_nodes = mesh['nodes']
     self.global_shape = self.global_nodes.shape
