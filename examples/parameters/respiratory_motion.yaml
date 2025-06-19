@@ -1,0 +1,24 @@
+# Imaging parameters
+Imaging:
+  RES: [70, 55, 1]
+  TimeSpacing: {value: 40, unit: "ms"}
+  TR: {value: 18, unit: "ms"}
+  Oversampling: 2
+  Sequence: "FFE"
+  LinesPerShot: 1
+  FlipAngle: {value: 20, unit: "deg"}
+
+# Hardware parameters
+Hardware:
+  G_sr: {value: 180.0, unit: "mT/m/ms"}
+  G_max: {value: 33.0, unit: "mT/m"}
+  r_BW: {value: 150.0e+3, unit: "Hz"}
+
+# Imaging orientation
+Formatting:
+  planning: "planning/beating_heart.pvsm"
+  units: "m"
+
+Phantom:
+  T2star: {value: 50, unit: "ms"}
+  T1: {value: 800, unit: "ms"} 

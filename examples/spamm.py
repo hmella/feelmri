@@ -23,17 +23,20 @@ from feelmri.Tagging import SPAMM
 
 if __name__ == '__main__':
 
+  # Get path of this script to allow running from any directory
+  script_path = Path(__file__).parent
+
   # Import imaging parameters
-  parameters = ParameterHandler('parameters/spamm.yaml')
+  parameters = ParameterHandler(script_path/'parameters/spamm.yaml')
 
   # Import PVSM file to get the FOV, LOC and MPS orientation
-  planning = PVSMParser(parameters.Formatting.planning,
+  planning = PVSMParser(script_path/parameters.Formatting.planning,
                           box_name='Box1',
                           transform_name='Transform1',
                           length_units=parameters.Formatting.units)
 
   # Create FEM phantom object
-  phantom = FEMPhantom(path='phantoms/beating_heart.xdmf', scale_factor=1.0)
+  phantom = FEMPhantom(path=script_path/'phantoms/beating_heart.xdmf', scale_factor=1.0)
 
   # Translate phantom to obtain the desired slice location
   phantom.orient(planning.MPS, planning.LOC)
@@ -44,7 +47,7 @@ if __name__ == '__main__':
 
   # We can a submesh to speed up the simulation. The submesh is created by selecting the elements that are inside the FOV
   mp = phantom.global_nodes[phantom.global_elements].mean(axis=1)
-  markers = np.where(np.abs(mp[:, 2]) <= 1.5*planning.FOV[2].m_as('m'))[0]
+  markers = np.where(np.abs(mp[:, 2]) <= 4.0*planning.FOV[2].m_as('m'))[0]
   phantom.create_submesh(markers)
 
   # Create array to store displacements
@@ -151,14 +154,6 @@ if __name__ == '__main__':
 
     # Assign the magnetization to the corresponding direction
     Mxy_spamm[..., i] = Mxy
-
-  # # seq.plot()
-  # file = XDMFFile('magnetization_{:d}.xdmf'.format(MPI_rank), nodes=phantom.local_nodes, elements={'tetra': phantom.local_elements})
-  # for fr in range(SPAMM_mag[0].shape[1]):
-  #   file.write(pointData={'Mx': np.real(SPAMM_mag[0][:, fr]), 
-  #                         'My': np.imag(SPAMM_mag[0][:, fr]),
-  #                         'Mz': Mz[:, fr]}, time=fr*parameters.TimeSpacing)
-  # file.close()
 
   # Store elapsed time
   bloch_time = time.time() - t0

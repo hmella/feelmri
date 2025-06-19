@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import numpy as np
 from pint import Quantity as Q_
 
@@ -8,8 +10,11 @@ from feelmri.Parameters import ParameterHandler
 
 if __name__ == '__main__':
 
+  # Get path of this script to allow running from any directory
+  script_path = Path(__file__).parent
+
   # Import imaging parameters
-  parameters = ParameterHandler('parameters/gradient_direction.yaml')
+  parameters = ParameterHandler(script_path/'parameters/gradient_direction.yaml')
 
   # Velocity encoding parameters
   venc_dirs = list(parameters.VelocityEncoding.Directions.values())
