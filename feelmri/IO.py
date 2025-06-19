@@ -230,8 +230,13 @@ class VTIFile:
 
 # File class to write individual or cine VTI files
 class XDMFFile:
-  def __init__(self, filename='phantom.xdmf', nodes=None, elements=None):
-    self.filename = Path(filename) if '.xdmf' in filename else Path(filename+'.xdmf')
+  def __init__(self, filename: Path | str = 'phantom.xdmf', 
+               nodes: np.ndarray = None, 
+               elements: np.ndarray = None):
+    if isinstance(filename, str):
+      self.filename = Path(filename) if '.xdmf' in filename else Path(filename+'.xdmf')
+    elif isinstance(filename, Path):
+      self.filename = filename if '.xdmf' in filename.name else filename.with_suffix('.xdmf')
     self.nodes = nodes
     self.elements = elements
     self.__firstwrite__ = True
