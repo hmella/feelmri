@@ -23,17 +23,20 @@ from feelmri.Tagging import SPAMM
 
 if __name__ == '__main__':
 
+  # Get path of this script to allow running from any directory
+  script_path = Path(__file__).parent
+
   # Import imaging parameters
-  parameters = ParameterHandler('parameters/respiratory_motion.yaml')
+  parameters = ParameterHandler(script_path/'parameters/respiratory_motion.yaml')
 
   # Import PVSM file to get the FOV, LOC and MPS orientation
-  planning = PVSMParser(parameters.Formatting.planning,
-                          box_name='Box1',
-                          transform_name='Transform1',
-                          length_units=parameters.Formatting.units)
+  planning = PVSMParser(script_path/parameters.Formatting.planning,
+                      box_name='Box1',
+                      transform_name='Transform1',
+                      length_units=parameters.Formatting.units)
 
   # Create FEM phantom object
-  phantom = FEMPhantom(path='phantoms/beating_heart.xdmf', scale_factor=1.0)
+  phantom = FEMPhantom(script_path/'phantoms/beating_heart.xdmf', scale_factor=1.0)
 
   # Translate phantom to obtain the desired slice location
   phantom.orient(planning.MPS, planning.LOC)
@@ -160,7 +163,7 @@ if __name__ == '__main__':
 
 
   # Create XDMF file for debugging
-  file = XDMFFile('magnetization_{:d}.xdmf'.format(MPI_rank), nodes=phantom.local_nodes, elements={'tetra': phantom.local_elements})
+  file = XDMFFile(script_path/'magnetization_{:d}.xdmf'.format(MPI_rank), nodes=phantom.local_nodes, elements={'tetra': phantom.local_elements})
 
   # Assemble mass matrix for integrals (just once)
   M = phantom.mass_matrix(lumped=True, quadrature_order=2)

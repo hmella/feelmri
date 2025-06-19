@@ -25,17 +25,20 @@ from feelmri.Recon import CartesianRecon
 
 if __name__ == '__main__':
 
+  # Get path of this script to allow running from any directory
+  script_path = Path(__file__).parent
+
   # Import imaging parameters
-  parameters = ParameterHandler('parameters/phase_contrast.yaml')
+  parameters = ParameterHandler(script_path/'parameters/phase_contrast.yaml')
 
   # Import PVSM file to get the FOV, LOC and MPS orientation
-  planning = PVSMParser(parameters.Formatting.planning,
-                          box_name='Box1',
-                          transform_name='Transform1',
-                          length_units=parameters.Formatting.units)
+  planning = PVSMParser(script_path/parameters.Formatting.planning,
+                      box_name='Box1',
+                      transform_name='Transform1',
+                      length_units=parameters.Formatting.units)
 
   # Create FEM phantom object
-  phantom = FEMPhantom(path='phantoms/aorta_CFD.xdmf', velocity_label='velocity', scale_factor=0.01)
+  phantom = FEMPhantom(script_path/'phantoms/aorta_CFD.xdmf', velocity_label='velocity', scale_factor=0.01)
 
   # Translate phantom to obtain the desired slice location
   phantom.orient(planning.MPS, planning.LOC.to('m'))
@@ -161,7 +164,7 @@ if __name__ == '__main__':
     # file.close()
 
   # Path to export the generated data
-  export_path = Path('MRImages/{:s}_V{:.0f}.pkl'.format(parameters.Imaging.Sequence, parameters.VelocityEncoding.VENC.m_as('cm/s')))
+  export_path = Path(script_path/'MRImages/phase_contrast_{:s}_V{:.0f}.pkl'.format(parameters.Imaging.Sequence, parameters.VelocityEncoding.VENC.m_as('cm/s')))
 
   # Make sure the directory exist
   os.makedirs(str(export_path.parent), exist_ok=True)

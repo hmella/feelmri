@@ -12,27 +12,30 @@ from feelmri.Bloch import BlochSolver, Sequence, SequenceBlock
 from feelmri.IO import XDMFFile
 from feelmri.KSpaceTraj import CartesianStack
 from feelmri.MPIUtilities import MPI_print, MPI_rank, gather_data
+from feelmri.MRIEncoding import WaterFat
 from feelmri.MRImaging import SliceProfile
 from feelmri.MRObjects import RF, Scanner
 from feelmri.Parameters import ParameterHandler, PVSMParser
 from feelmri.Phantom import FEMPhantom
 from feelmri.Plotter import MRIPlotter
 from feelmri.Recon import CartesianRecon
-from feelmri.MRIEncoding import WaterFat
 
 if __name__ == '__main__':
 
+  # Get path of this script to allow running from any directory
+  script_path = Path(__file__).parent
+
   # Import imaging parameters
-  parameters = ParameterHandler('parameters/water_and_fat.yaml')
+  parameters = ParameterHandler(script_path/'parameters/water_and_fat.yaml')
 
   # Import PVSM file to get the FOV, LOC and MPS orientation
-  planning = PVSMParser(parameters.Formatting.planning,
+  planning = PVSMParser(script_path/parameters.Formatting.planning,
                           box_name='Box1',
                           transform_name='Transform1',
                           length_units=parameters.Formatting.units)
 
   # Create FEM phantom object
-  phantom = FEMPhantom(path='phantoms/water_and_fat.xdmf', scale_factor=0.01)
+  phantom = FEMPhantom(path=script_path/'phantoms/water_and_fat.xdmf', scale_factor=0.01)
 
   # Translate phantom to obtain the desired slice location
   phantom.orient(planning.MPS, planning.LOC)
@@ -139,7 +142,7 @@ if __name__ == '__main__':
   K = np.zeros([ro_samples, ph_samples, slices, 1, 1], dtype=np.complex64)
 
   # Create XDMF file for debugging
-  file = XDMFFile('magnetization_{:d}.xdmf'.format(MPI_rank), nodes=phantom.local_nodes, elements={phantom.cell_type: phantom.local_elements})
+  file = XDMFFile(script_path/'magnetization_{:d}.xdmf'.format(MPI_rank), nodes=phantom.local_nodes, elements={phantom.cell_type: phantom.local_elements})
 
   # Assemble mass matrix for integrals (just once)
   M = phantom.mass_matrix(lumped=True, quadrature_order=2)
