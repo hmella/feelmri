@@ -39,7 +39,7 @@ if __name__ == '__main__':
 
   # We can a submesh to speed up the simulation. The submesh is created by selecting the elements that are inside the FOV
   mp = phantom.global_nodes[phantom.global_elements].mean(axis=1)
-  markers = np.where(np.abs(mp[:, 2]) <= 1.0 * planning.FOV[2].m_as('m'))[0]
+  markers = np.where(np.abs(mp[:, 2]) <= 0.5 * planning.FOV[2].m_as('m'))[0]
   phantom.create_submesh(markers)
 
   # Create scanner object defining the gradient strength, slew rate and giromagnetic ratio
@@ -63,8 +63,7 @@ if __name__ == '__main__':
       return x[:,0] + x[:,1] + x[:,2]
   delta_B0 = spatial(phantom.local_nodes)
   delta_B0 /= np.abs(spatial(phantom.global_nodes).flatten()).max()
-  delta_B0 *= 1.5 * 1e-6 * 0
-  print(delta_B0.shape)
+  delta_B0 *= 1.5 * 1e-2
   delta_B0 += df.m_as('1/ms').reshape((-1,))
   delta_omega0 = 2.0 * np.pi * delta_B0
 
@@ -76,7 +75,7 @@ if __name__ == '__main__':
           alpha=0.46, shape='apodized_sinc', 
           flip_angle=Q_(np.deg2rad(12),'rad'), 
           t_ref=Q_(0.0,'ms'),
-          phase_offset=Q_(0.0,'rad'))
+          phase_offset=Q_(-np.pi/2,'rad'))
   sp = SliceProfile(delta_z=planning.FOV[2].to('m'), 
     profile_samples=100,
     rf=rf,
@@ -131,17 +130,24 @@ if __name__ == '__main__':
   # Bloch solver
   solver = BlochSolver(seq, phantom, 
                       scanner=scanner, 
-                      M0=1.0, 
+                      M0=1e+9, 
                       T1=T1, 
                       T2=T2,
                       delta_B=delta_B0.reshape((-1, 1)))
 
 
   # Create XDMF file for debugging
-  file = XDMFFile('magnetization_{:d}.xdmf'.format(MPI_rank), nodes=phantom.local_nodes, elements={phantom.cell_type: phantom.local_elements})
+  if MPI_rank == 0:
+    file = XDMFFile('magnetization_{:d}.xdmf'.format(MPI_rank), nodes=phantom.global_nodes, elements={phantom.cell_type: phantom.global_elements})
+
+    # Export mesh partitioning
+    file.write(cellData=phantom.partitioning)
+
+    # Close the file
+    file.close()
 
   # Assemble mass matrix for integrals (just once)
-  M = phantom.mass_matrix(lumped=False, quadrature_order=2)
+  M = phantom.mass_matrix(lumped=True, quadrature_order=2)
 
   # Generate k-space data for each shot and slice
   t0 = time.time()  
@@ -167,11 +173,11 @@ if __name__ == '__main__':
       tmp = WaterFat(MPI_rank, M, kspace_points, kspace_times, phantom.local_nodes, delta_omega0, T2.m_as('ms'), Mxy)
       K[:,sh,s,:,0] = tmp.swapaxes(0, 1)[:,:,0]
 
-      # Export magnetization and displacement for debugging
-      file.write(pointData={'Mx': np.real(Mxy), 
-                            'My': np.imag(Mxy),
-                            'Mz': Mz},
-                            time=i*parameters.Imaging.TR)
+      # # Export magnetization and displacement for debugging
+      # file.write(pointData={'Mx': np.real(Mxy), 
+      #                       'My': np.imag(Mxy),
+      #                       'Mz': Mz},
+      #                       time=i*parameters.Imaging.TR)
 
   # Store elapsed time
   spamm_time = time.time() - t0
@@ -182,8 +188,8 @@ if __name__ == '__main__':
   MPI_print('Elapsed time for SPAMM: {:.2f} s'.format(spamm_time))
   MPI_print('Elapsed time for SPAMM + Bloch solver: {:.2f} s'.format(bloch_time + spamm_time))
 
-  # Close the file
-  file.close()
+  # # Close the file
+  # file.close()
 
   # Gather results
   K = gather_data(K)
