@@ -23,7 +23,7 @@ USER root
 #         -o Dpkg::Options::="--force-confold" upgrade
 RUN apt-get update && apt-get install -y apt-transport-https && apt-get install -y sudo && apt-get -y upgrade
 
-# Install feelmri dependencies
+# Install FEelMRI dependencies
 RUN apt-get install -y python3-tk python3-setuptools cmake git && \
     apt-get install -y libopenmpi-dev mpich screen nano && \
     apt-get install -y build-essential python3-dev python3-pip
@@ -34,7 +34,7 @@ RUN cd /tmp/ && git clone https://github.com/eigenteam/eigen-git-mirror.git && \
     cd eigen-git-mirror && mkdir build && cd build/ && \
     cmake -DCMAKE_INSTALL_PREFIX=/usr .. && make install
 
-# Install feelmri
+# Install FEelMRI
 RUN mkdir /tmp/feelmri/ && mkdir /tmp/feelmri/feelmri/
 COPY feelmri /tmp/feelmri/feelmri/
 COPY setup.py /tmp/feelmri/

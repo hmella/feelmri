@@ -3,7 +3,7 @@
   <img height="150" src="gifs/logo.png" alt="color picker" />
 <!-- </p> -->
 
-**feelmri** is an open-source library for generating synthetic magnetic resonance images from finite-element (FE) simulations. The library is designed to handle complex phenomena whose behavior is described by partial differential equations and approximated using FEM. **feelmri** supports FE meshes with arbitrary cell geometries and simulations performed in any discrete function space.
+**FEelMRI** is an open-source library for generating synthetic magnetic resonance images from finite-element (FE) simulations. The library is designed to handle complex phenomena whose behavior is described by partial differential equations and approximated using FEM. **FEelMRI** supports FE meshes with arbitrary cell geometries and simulations performed in any discrete function space.
 
 <p align="center">
   <img height="216" src="gifs/spamm.gif" alt="color picker" /> <img height="216" src="gifs/aorta.gif" alt="color picker" />
@@ -25,7 +25,7 @@ or
 chmod a+x install_dependencies.sh && ./install_dependencies.sh
 ```
 
-### Installing feelmri
+### Installing FEelMRI
 To install the library, run:
 ```bash
 pip3 install .
@@ -43,10 +43,10 @@ docker build --build-arg UID=$(id -u) --build-arg GID=$(id -g) . -f docker/Docke
 ```
 Here, ```foo``` can be either ```cpu``` or ```gpu```, and ```image_name``` will be the tag for your image. The ```--build-arg UID=$(id -u)``` and ```--build-arg GID=$(id -g)``` arguments ensure that files created inside the container are owned by your user, avoiding permission issues.
 
-#### Starting a feelmri Docker Container
+#### Starting a FEelMRI Docker Container
 * **CPU container**:
   ```bash
-  docker run --name container_name --shm-size 256m -ti -v $(pwd):/home/feelmri/ image_name
+  docker run --name container_name --shm-size 256m -ti -v $(pwd):/home/FEelMRI/ image_name
   ```
 * **GPU container**:  
   ```bash
