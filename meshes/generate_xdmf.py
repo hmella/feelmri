@@ -3,7 +3,7 @@ from pathlib import Path
 import meshio
 import numpy as np
 import yaml
-from FEelMRI.IO import XDMFFile
+from feelmri.IO import XDMFFile
 
 # Cell type
 cell_type = 'wedge'

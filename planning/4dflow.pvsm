@@ -12393,7 +12393,7 @@
         <Domain name="array_list" id="16624.CellArrayStatus.array_list"/>
       </Property>
       <Property name="FileName" id="16624.FileName" number_of_elements="1">
-        <Element index="0" value="/home/hmella-eie/git/FEelMRI/phantoms/aorta_CFD.xdmf"/>
+        <Element index="0" value="/home/hmella-eie/git/feelmri/phantoms/aorta_CFD.xdmf"/>
         <Domain name="files" id="16624.FileName.files"/>
       </Property>
       <Property name="PointArrayInfo" id="16624.PointArrayInfo" number_of_elements="4">

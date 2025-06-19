@@ -3,13 +3,13 @@ from pathlib import Path
 
 import numpy as np
 
-from FEelMRI.IO import VTIFile, XDMFFile
-from FEelMRI.Math import Rx, Ry, Rz
-from FEelMRI.Noise import add_cpx_noise
-from FEelMRI.Phantom import FEMPhantom
-from FEelMRI.Plotter import MRIPlotter
-from FEelMRI.Parameters import ParameterHandler
-from FEelMRI.Recon import CartesianRecon
+from feelmri.IO import VTIFile, XDMFFile
+from feelmri.Math import Rx, Ry, Rz
+from feelmri.Noise import add_cpx_noise
+from feelmri.Phantom import FEMPhantom
+from feelmri.Plotter import MRIPlotter
+from feelmri.Parameters import ParameterHandler
+from feelmri.Recon import CartesianRecon
 
 if __name__ == '__main__':
 

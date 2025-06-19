@@ -7,13 +7,13 @@ import meshio
 import numpy as np
 from scipy.io import savemat
 
-from FEelMRI.MPIUtilities import MPI_comm, MPI_rank
+from feelmri.MPIUtilities import MPI_comm, MPI_rank
 
 try:
   from pyevtk.hl import imageToVTK
   from pyevtk.vtk import VtkGroup  
 except ImportError:
-  print("FEelMRI import error: pyevtk python module not available")
+  print("feelmri import error: pyevtk python module not available")
 
 
 # Save Python objects

@@ -1,10 +1,10 @@
 import numpy as np
 from pint import Quantity as Q_
 
-from FEelMRI.Bloch import Sequence, SequenceBlock
-from FEelMRI.MRImaging import VelocityEncoding
-from FEelMRI.MRObjects import Gradient, Scanner
-from FEelMRI.Parameters import ParameterHandler
+from feelmri.Bloch import Sequence, SequenceBlock
+from feelmri.MRImaging import VelocityEncoding
+from feelmri.MRObjects import Gradient, Scanner
+from feelmri.Parameters import ParameterHandler
 
 if __name__ == '__main__':
 

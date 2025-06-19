@@ -4,10 +4,10 @@ import numpy as np
 import scipy
 from skimage.transform import resize
 
-from FEelMRI.Filters import Riesz, Tukey
-from FEelMRI.Math import ktoi
-from FEelMRI.MPIUtilities import MPI_print
-from FEelMRI.KSpaceTraj import CartesianStack, RadialStack, SpiralStack
+from feelmri.Filters import Riesz, Tukey
+from feelmri.Math import ktoi
+from feelmri.MPIUtilities import MPI_print
+from feelmri.KSpaceTraj import CartesianStack, RadialStack, SpiralStack
 
 
 def CartesianRecon(K, trajectory, filter={'type': 'Tukey', 'width': 0.9, 'lift': 0.3}):

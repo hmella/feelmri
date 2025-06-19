@@ -11,7 +11,7 @@ order = ['F','C']
 m_dirs = [[0,1], [1,0]]
 
 # Check the croping indices inside the function
-# FEelMRI.MRImaging.acq_to_res
+# feelmri.MRImaging.acq_to_res
 def build_idx(n_lines, acq_matrix, dir):
     # Number of additional lines
     add = int(n_lines/2*acq_matrix[dir[0]])

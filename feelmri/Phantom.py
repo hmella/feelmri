@@ -7,10 +7,10 @@ import pymetis
 from pint import Quantity as Q_
 from scipy.interpolate import RBFInterpolator
 
-from FEelMRI.FEAssemble import MassAssemble
-from FEelMRI.FiniteElements import FiniteElement, QuadratureRule
-from FEelMRI.MeshRefinement import refine_mesh
-from FEelMRI.MPIUtilities import MPI_print, MPI_rank, MPI_size
+from feelmri.FEAssemble import MassAssemble
+from feelmri.FiniteElements import FiniteElement, QuadratureRule
+from feelmri.MeshRefinement import refine_mesh
+from feelmri.MPIUtilities import MPI_print, MPI_rank, MPI_size
 
 # Define a dictionary for the element types
 element_dict = {

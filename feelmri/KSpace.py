@@ -1,10 +1,10 @@
 import matplotlib.pyplot as plt
 import numpy as np
 
-from FEelMRI.Filters import Hamming_filter, Riesz, Tukey
-from FEelMRI.Helpers import build_idx, isodd, order
-from FEelMRI.IO import rescale_image, scale_data
-from FEelMRI.Math import itok, ktoi
+from feelmri.Filters import Hamming_filter, Riesz, Tukey
+from feelmri.Helpers import build_idx, isodd, order
+from feelmri.IO import rescale_image, scale_data
+from feelmri.Math import itok, ktoi
 
 
 # kspace class

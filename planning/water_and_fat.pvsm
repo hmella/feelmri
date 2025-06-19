@@ -8106,7 +8106,7 @@
         </Domain>
       </Property>
       <Property name="FileName" id="10340.FileName" number_of_elements="1">
-        <Element index="0" value="/home/hmella-fcyt/git/FEelMRI/phantoms/water_and_fat.xdmf"/>
+        <Element index="0" value="/home/hmella-fcyt/git/feelmri/phantoms/water_and_fat.xdmf"/>
         <Domain name="files" id="10340.FileName.files"/>
       </Property>
       <Property name="PointArrayInfo" id="10340.PointArrayInfo" number_of_elements="2">

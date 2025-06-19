@@ -1,7 +1,7 @@
 import numpy as np
 
-from FEelMRI.Helpers import iseven, isodd, round_to_even
-from FEelMRI.MPIUtilities import MPI_print
+from feelmri.Helpers import iseven, isodd, round_to_even
+from feelmri.MPIUtilities import MPI_print
 
 
 # Three dimensional images with number of slices greater than 1

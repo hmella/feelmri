@@ -4,14 +4,14 @@ from pathlib import Path
 import numpy as np
 from skimage.transform import resize
 
-from FEelMRI.Filters import Tukey
-from FEelMRI.IO import VTIFile, XDMFFile
-from FEelMRI.KSpaceTraj import CartesianStack, Radial, Spiral
-from FEelMRI.Math import Rx, Ry, Rz, itok, ktoi
-from FEelMRI.Noise import add_cpx_noise
-from FEelMRI.Phantom import FEMPhantom
-from FEelMRI.Plotter import MRIPlotter
-from FEelMRI.Parameters import ParameterHandler
+from feelmri.Filters import Tukey
+from feelmri.IO import VTIFile, XDMFFile
+from feelmri.KSpaceTraj import CartesianStack, Radial, Spiral
+from feelmri.Math import Rx, Ry, Rz, itok, ktoi
+from feelmri.Noise import add_cpx_noise
+from feelmri.Phantom import FEMPhantom
+from feelmri.Plotter import MRIPlotter
+from feelmri.Parameters import ParameterHandler
 
 if __name__ == '__main__':
 

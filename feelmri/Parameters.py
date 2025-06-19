@@ -4,7 +4,7 @@ import numpy as np
 import yaml
 from pint import Quantity as Q_
 
-from FEelMRI.Math import Rx, Ry, Rz
+from feelmri.Math import Rx, Ry, Rz
 
 
 class PVSMParser:

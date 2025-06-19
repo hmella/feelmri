@@ -2,9 +2,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 from pint import Quantity
 
-from FEelMRI.MPIUtilities import MPI_rank, scatterKspace
-from FEelMRI.MRObjects import Gradient, Scanner
-from FEelMRI.Units import *
+from feelmri.MPIUtilities import MPI_rank, scatterKspace
+from feelmri.MRObjects import Gradient, Scanner
+from feelmri.Units import *
 
 # plt.rcParams['text.usetex'] = True
 

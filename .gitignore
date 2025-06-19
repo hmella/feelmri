@@ -1,5 +1,5 @@
 build/
-FEelMRI.*/
+feelmri.*/
 tmp/
 MRImages/
 */__pycache__/

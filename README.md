@@ -3,16 +3,16 @@
   <img height="150" src="gifs/logo.png" alt="color picker" />
 <!-- </p> -->
 
-**FEelMRI** is an open-source library for generating synthetic magnetic resonance images from finite-element (FE) simulations. The library is designed to handle complex phenomena whose behavior is described by partial differential equations and approximated using FEM. **FEelMRI** supports FE meshes with arbitrary cell geometries and simulations performed in any discrete function space.
+**feelmri** is an open-source library for generating synthetic magnetic resonance images from finite-element (FE) simulations. The library is designed to handle complex phenomena whose behavior is described by partial differential equations and approximated using FEM. **feelmri** supports FE meshes with arbitrary cell geometries and simulations performed in any discrete function space.
 
 <p align="center">
   <img height="216" src="gifs/spamm.gif" alt="color picker" /> <img height="216" src="gifs/aorta.gif" alt="color picker" />
 </p>
 
 ## Installation instructions
-To install the library, first clone the repository and navigate to the ```FEelMRI/``` folder:
+To install the library, first clone the repository and navigate to the ```feelmri/``` folder:
 ```bash
-git clone https://github.com/hernanmella/FEelMRI && cd FEelMRI/
+git clone https://github.com/hernanmella/feelmri && cd feelmri/
 ```
 
 ### Dependencies
@@ -25,7 +25,7 @@ or
 chmod a+x install_dependencies.sh && ./install_dependencies.sh
 ```
 
-### Installing FEelMRI
+### Installing feelmri
 To install the library, run:
 ```bash
 pip3 install .
@@ -43,14 +43,14 @@ docker build --build-arg UID=$(id -u) --build-arg GID=$(id -g) . -f docker/Docke
 ```
 Here, ```foo``` can be either ```cpu``` or ```gpu```, and ```image_name``` will be the tag for your image. The ```--build-arg UID=$(id -u)``` and ```--build-arg GID=$(id -g)``` arguments ensure that files created inside the container are owned by your user, avoiding permission issues.
 
-#### Starting a FEelMRI Docker Container
+#### Starting a feelmri Docker Container
 * **CPU container**:
   ```bash
-  docker run --name container_name --shm-size 256m -ti -v $(pwd):/home/FEelMRI/ image_name
+  docker run --name container_name --shm-size 256m -ti -v $(pwd):/home/feelmri/ image_name
   ```
 * **GPU container**:  
   ```bash
-  docker run --name container_name  --runtime=nvidia --gpus all --shm-size 256m -ti -v $(pwd):/home/FEelMRI/ image_name
+  docker run --name container_name  --runtime=nvidia --gpus all --shm-size 256m -ti -v $(pwd):/home/feelmri/ image_name
   ```
 
 #### Allowing plots inside containers
@@ -65,5 +65,5 @@ docker run -it \
     --volume="/etc/shadow:/etc/shadow:ro" \
     --volume="/etc/sudoers.d:/etc/sudoers.d:ro" \
     --volume="/tmp/.X11-unix:/tmp/.X11-unix:rw" \
-    -v $(pwd):/home/FEelMRI/ image_name
+    -v $(pwd):/home/feelmri/ image_name
 ```

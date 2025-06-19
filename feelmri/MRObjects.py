@@ -6,7 +6,7 @@ import numpy as np
 from pint import Quantity as Q_
 from scipy.interpolate import interp1d, make_interp_spline
 
-from FEelMRI.MPIUtilities import MPI_rank
+from feelmri.MPIUtilities import MPI_rank
 
 
 # Scanner class
