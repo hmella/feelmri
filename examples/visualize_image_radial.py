@@ -4,13 +4,13 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
-from FEelMRI.IO import VTIFile, XDMFFile
-from FEelMRI.Math import Rx, Ry, Rz
-from FEelMRI.Noise import add_cpx_noise
-from FEelMRI.Parameters import ParameterHandler
-from FEelMRI.Phantom import FEMPhantom
-from FEelMRI.Plotter import MRIPlotter
-from FEelMRI.Recon import NUFFTRecon
+from feelmri.IO import VTIFile, XDMFFile
+from feelmri.Math import Rx, Ry, Rz
+from feelmri.Noise import add_cpx_noise
+from feelmri.Parameters import ParameterHandler
+from feelmri.Phantom import FEMPhantom
+from feelmri.Plotter import MRIPlotter
+from feelmri.Recon import NUFFTRecon
 
 if __name__ == '__main__':
 

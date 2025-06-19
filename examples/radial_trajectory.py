@@ -5,13 +5,13 @@ from pathlib import Path
 
 import numpy as np
 
-from FEelMRI.KSpaceTraj import RadialStack
-from FEelMRI.Math import Rx, Ry, Rz
-from FEelMRI.MPIUtilities import MPI_print, MPI_rank, gather_data
-from FEelMRI.MRImaging import Gradient, SliceProfile, VelocityEncoding
-from FEelMRI.Parameters import ParameterHandler
-from FEelMRI.Phantom import FEMPhantom
-from FEelMRI.PhaseContrast import PC
+from feelmri.KSpaceTraj import RadialStack
+from feelmri.Math import Rx, Ry, Rz
+from feelmri.MPIUtilities import MPI_print, MPI_rank, gather_data
+from feelmri.MRImaging import Gradient, SliceProfile, VelocityEncoding
+from feelmri.Parameters import ParameterHandler
+from feelmri.Phantom import FEMPhantom
+from feelmri.PhaseContrast import PC
 
 if __name__ == '__main__':
 

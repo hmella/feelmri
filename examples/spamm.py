@@ -8,18 +8,18 @@ from pathlib import Path
 import numpy as np
 from pint import Quantity as Q_
 
-from FEelMRI.Bloch import BlochSolver, Sequence, SequenceBlock
-from FEelMRI.IO import XDMFFile
-from FEelMRI.KSpaceTraj import CartesianStack
-from FEelMRI.Motion import POD, RespiratoryMotion
-from FEelMRI.MPIUtilities import MPI_print, MPI_rank, gather_data
-from FEelMRI.MRImaging import PositionEncoding, SliceProfile
-from FEelMRI.MRObjects import RF, Gradient, Scanner
-from FEelMRI.Parameters import ParameterHandler, PVSMParser
-from FEelMRI.Phantom import FEMPhantom
-from FEelMRI.Plotter import MRIPlotter
-from FEelMRI.Recon import CartesianRecon
-from FEelMRI.Tagging import SPAMM
+from feelmri.Bloch import BlochSolver, Sequence, SequenceBlock
+from feelmri.IO import XDMFFile
+from feelmri.KSpaceTraj import CartesianStack
+from feelmri.Motion import POD, RespiratoryMotion
+from feelmri.MPIUtilities import MPI_print, MPI_rank, gather_data
+from feelmri.MRImaging import PositionEncoding, SliceProfile
+from feelmri.MRObjects import RF, Gradient, Scanner
+from feelmri.Parameters import ParameterHandler, PVSMParser
+from feelmri.Phantom import FEMPhantom
+from feelmri.Plotter import MRIPlotter
+from feelmri.Recon import CartesianRecon
+from feelmri.Tagging import SPAMM
 
 if __name__ == '__main__':
 

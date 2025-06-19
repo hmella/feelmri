@@ -9,19 +9,19 @@ from pathlib import Path
 import numpy as np
 from pint import Quantity as Q_
 
-from FEelMRI.Bloch import BlochSolver, Sequence, SequenceBlock
-from FEelMRI.IO import XDMFFile
-from FEelMRI.KSpaceTraj import CartesianStack
-from FEelMRI.Motion import PODVelocity
-from FEelMRI.MPIUtilities import MPI_print, MPI_rank, gather_data
-from FEelMRI.MRImaging import SliceProfile, VelocityEncoding
-from FEelMRI.MRObjects import RF, Gradient, Scanner
-from FEelMRI.Noise import add_cpx_noise
-from FEelMRI.Parameters import ParameterHandler, PVSMParser
-from FEelMRI.Phantom import FEMPhantom
-from FEelMRI.PhaseContrast import PC
-from FEelMRI.Plotter import MRIPlotter
-from FEelMRI.Recon import CartesianRecon
+from feelmri.Bloch import BlochSolver, Sequence, SequenceBlock
+from feelmri.IO import XDMFFile
+from feelmri.KSpaceTraj import CartesianStack
+from feelmri.Motion import PODVelocity
+from feelmri.MPIUtilities import MPI_print, MPI_rank, gather_data
+from feelmri.MRImaging import SliceProfile, VelocityEncoding
+from feelmri.MRObjects import RF, Gradient, Scanner
+from feelmri.Noise import add_cpx_noise
+from feelmri.Parameters import ParameterHandler, PVSMParser
+from feelmri.Phantom import FEMPhantom
+from feelmri.PhaseContrast import PC
+from feelmri.Plotter import MRIPlotter
+from feelmri.Recon import CartesianRecon
 
 if __name__ == '__main__':
 

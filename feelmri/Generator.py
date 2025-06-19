@@ -3,19 +3,19 @@ import time
 import matplotlib.pyplot as plt
 import numpy as np
 
-from FEelMRI.Connectivity import getConnectivity3, update_p2s
-from FEelMRI.Helpers import (cropping_ranges, m_dirs, order,
+from feelmri.Connectivity import getConnectivity3, update_p2s
+from feelmri.Helpers import (cropping_ranges, m_dirs, order,
                                 restore_resolution)
-from FEelMRI.ImageBuilding import (CSPAMM_magnetizations,
+from feelmri.ImageBuilding import (CSPAMM_magnetizations,
                                       DENSE_magnetizations,
                                       EXACT_magnetizations,
                                       ORI_O_CSPAMM_magnetizations, get_images)
-from FEelMRI.KSpace import kspace
-from FEelMRI.Math import itok, ktoi
-from FEelMRI.MPIUtilities import MPI_print, MPI_rank, MPI_size, gather_data
-from FEelMRI.pySpinBasedUtils import (check_kspace_bw, check_nb_slices,
+from feelmri.KSpace import kspace
+from feelmri.Math import itok, ktoi
+from feelmri.MPIUtilities import MPI_print, MPI_rank, MPI_size, gather_data
+from feelmri.pySpinBasedUtils import (check_kspace_bw, check_nb_slices,
                                          update_s2p)
-from FEelMRI.Spins import Function
+from feelmri.Spins import Function
 
 
 # Complementary SPAMM images
@@ -174,8 +174,8 @@ def get_oriocspamm_image(image, epi, phantom, parameters, debug=False):
 
     # # Debug
     # if MPI_rank==0:
-    #     from FEelMRI.IO import write_vtk
-    #     from FEelMRI.Math import wrap
+    #     from feelmri.IO import write_vtk
+    #     from feelmri.Math import wrap
     #     S2P = Function(u.spins, dim=1)  # spins-to-pixel connectivity
     #     EXC = Function(u.spins, dim=1)  # excited slice (spins)
     #     rot = Function(u.spins, dim=1)
@@ -380,8 +380,8 @@ def get_cspamm_image(image, epi, phantom, parameters, debug=False):
 
     # # Debug
     # if MPI_rank==0:
-    #     from FEelMRI.IO import write_vtk
-    #     from FEelMRI.Math import wrap
+    #     from feelmri.IO import write_vtk
+    #     from feelmri.Math import wrap
     #     S2P = Function(u.spins, dim=1)  # spins-to-pixel connectivity
     #     EXC = Function(u.spins, dim=1)  # excited slice (spins)
     #     rot = Function(u.spins, dim=1)
@@ -584,8 +584,8 @@ def get_cdense_image(image, epi, phantom, parameters, debug=False):
 
     # # Debug
     # if MPI_rank==0:
-    #     from FEelMRI.IO import write_vtk
-    #     from FEelMRI.Math import wrap
+    #     from feelmri.IO import write_vtk
+    #     from feelmri.Math import wrap
     #     S2P = Function(u.spins, dim=1)  # spins-to-pixel connectivity
     #     EXC = Function(u.spins, dim=1)  # excited slice (spins)
     #     rot = Function(u.spins, dim=1)
@@ -758,8 +758,8 @@ def get_exact_image(image, epi, phantom, parameters, debug=False):
 
     # # Debug
     # if MPI_rank==0:
-    #     from FEelMRI.IO import write_vtk
-    #     from FEelMRI.Math import wrap
+    #     from feelmri.IO import write_vtk
+    #     from feelmri.Math import wrap
     #     S2P = Function(u.spins, dim=1)  # spins-to-pixel connectivity
     #     EXC = Function(u.spins, dim=1)  # excited slice (spins)
     #     rot = Function(u.spins, dim=1)
@@ -797,7 +797,7 @@ def get_exact_image(image, epi, phantom, parameters, debug=False):
         k1 = restore_resolution(itok(tmp1), r, c, dr, dc, enc_dir, image.resolution, ovrs_fac)
 
         # import matplotlib.pyplot as plt
-        # from FEelMRI.Math import ktoi
+        # from feelmri.Math import ktoi
         # fig,ax = plt.subplots(1,2)
         # ax[0].imshow(np.angle(ktoi(itok(tmp0)[1::ovrs_fac,:])))
         # ax[1].imshow(np.angle(ktoi(k0)))

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Install FEelMRI dependencies
+# Install feelmri dependencies
 sudo apt-get update -y
 sudo apt-get -y install build-essential python3-dev python3-pip python3-tk \
                  python3-setuptools libopenmpi-dev mpich cmake

@@ -1,7 +1,7 @@
 import meshio
 import numpy as np
 
-from FEelMRI.MPIUtilities import MPI_rank, MPI_size
+from feelmri.MPIUtilities import MPI_rank, MPI_size
 
 
 class Spins:

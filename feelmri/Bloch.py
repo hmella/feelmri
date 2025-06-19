@@ -6,11 +6,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 from pint import Quantity as Q_
 
-from FEelMRI.BlochSimulator import solve_mri
-from FEelMRI.MPIUtilities import MPI_print, MPI_rank
-from FEelMRI.MRObjects import Scanner
-from FEelMRI.Phantom import FEMPhantom
-from FEelMRI.Motion import POD
+from feelmri.BlochSimulator import solve_mri
+from feelmri.MPIUtilities import MPI_print, MPI_rank
+from feelmri.MRObjects import Scanner
+from feelmri.Phantom import FEMPhantom
+from feelmri.Motion import POD
 
 
 class SequenceBlock:

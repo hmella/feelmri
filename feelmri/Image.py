@@ -1,6 +1,6 @@
 import numpy as np
 
-from FEelMRI.Generator import (get_cdense_image, get_cspamm_image,
+from feelmri.Generator import (get_cdense_image, get_cspamm_image,
                                   get_exact_image, get_oriocspamm_image)
 
 

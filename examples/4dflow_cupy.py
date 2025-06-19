@@ -8,13 +8,13 @@ import numpy as np
 from cupyx.scipy.sparse import csr_matrix as cp_csr_matrix
 from pint import Quantity as Q_
 
-from FEelMRI.KSpaceTraj import CartesianStack
-from FEelMRI.Math import Rx, Ry, Rz
-from FEelMRI.MRImaging import SliceProfile, VelocityEncoding
-from FEelMRI.MRObjects import RF, Gradient, Scanner, Sequence, SequenceBlock
-from FEelMRI.Parameters import ParameterHandler
-from FEelMRI.Phantom import FEMPhantom
-from FEelMRI.pyMRIEncoding import PC
+from feelmri.KSpaceTraj import CartesianStack
+from feelmri.Math import Rx, Ry, Rz
+from feelmri.MRImaging import SliceProfile, VelocityEncoding
+from feelmri.MRObjects import RF, Gradient, Scanner, Sequence, SequenceBlock
+from feelmri.Parameters import ParameterHandler
+from feelmri.Phantom import FEMPhantom
+from feelmri.pyMRIEncoding import PC
 
 if __name__ == '__main__':
 

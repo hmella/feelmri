@@ -6,9 +6,9 @@ from pint import Quantity as Q_
 from scipy.integrate import RK45
 from scipy.interpolate import interp1d
 
-from FEelMRI.MPIUtilities import MPI_rank
-from FEelMRI.MRObjects import RF, Gradient, Scanner
-from FEelMRI.Units import *
+from feelmri.MPIUtilities import MPI_rank
+from feelmri.MRObjects import RF, Gradient, Scanner
+from feelmri.Units import *
 
 
 class Bloch:

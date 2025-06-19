@@ -2,9 +2,9 @@ import cupy as cp
 import numpy as np
 from fimpy.solver import create_fim_solver
 
-from FEelMRI.IO import XDMFFile
-from FEelMRI.Phantom import FEMPhantom
-from FEelMRI.FiniteElements import GradProjection
+from feelmri.IO import XDMFFile
+from feelmri.Phantom import FEMPhantom
+from feelmri.FiniteElements import GradProjection
 
 if __name__ == '__main__':
 

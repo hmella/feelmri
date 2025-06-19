@@ -9772,7 +9772,7 @@
         <Domain name="array_list" id="16997.CellArrayStatus.array_list"/>
       </Property>
       <Property name="FileName" id="16997.FileName" number_of_elements="1">
-        <Element index="0" value="/home/hmella-eie/git/FEelMRI/phantoms/LV_displacement.xdmf"/>
+        <Element index="0" value="/home/hmella-eie/git/feelmri/phantoms/LV_displacement.xdmf"/>
         <Domain name="files" id="16997.FileName.files"/>
       </Property>
       <Property name="PointArrayInfo" id="16997.PointArrayInfo" number_of_elements="2">
