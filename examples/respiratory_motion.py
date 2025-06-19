@@ -89,7 +89,12 @@ if __name__ == '__main__':
   # Slice profile
   # The slice profile prepulse is calculated based on a reference RF pulse with
   # user-defined characteristics. The slice profile object allows accessing the calculated adjusted RF pulse and dephasing and rephasing gradients
-  rf = RF(scanner=scanner, NbLobes=[4, 4], alpha=0.46, shape='apodized_sinc', flip_angle=Q_(np.deg2rad(20),'rad') , t_ref=Q_(0.0,'ms'))
+  rf = RF(scanner=scanner, 
+          NbLobes=[4, 4], 
+          alpha=0.46, 
+          shape='apodized_sinc', 
+          flip_angle=parameters.Imaging.FlipAngle.to('rad'), 
+          t_ref=Q_(0.0,'ms'))
   sp = SliceProfile(delta_z=planning.FOV[2].to('m'), 
     profile_samples=100,
     rf=rf,
