@@ -52,7 +52,7 @@ IsoMap IsoMapping(
   J(2, 2) = (dSdt.transpose() * nodes.col(2)).sum();
 
   // Jacobian determinant
-  const float detJ = J.determinant();
+  const float detJ = std::abs(J.determinant());
 
   // Jacobian inverse matrix
   const Eigen::Matrix3f invJ = J.inverse();
