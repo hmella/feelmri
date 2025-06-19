@@ -2,15 +2,16 @@
 Imaging:
   RES: [150, 150, 1]
   TR: {value: 18, unit: "ms"}
-  Oversampling: 1
+  Oversampling: 2
   Sequence: "FFE"
   LinesPerShot: 1
+  FlipAngle: {value: 20, unit: "deg"}
 
 # Hardware parameters
 Hardware:
   G_sr: {value: 180.0, unit: "mT/m/ms"}
   G_max: {value: 33.0, unit: "mT/m"}
-  r_BW: {value: 10.0e+3, unit: "Hz"}
+  r_BW: {value: 50.0e+3, unit: "Hz"}
 
 # Imaging orientation
 Formatting:

@@ -6,6 +6,7 @@ Imaging:
   Oversampling: 2
   Sequence: "FFE"
   LinesPerShot: 1
+  FlipAngle: {value: 20, unit: "deg"}
 
 # Hardware parameters
 Hardware:

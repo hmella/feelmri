@@ -73,7 +73,7 @@ if __name__ == '__main__':
   rf = RF(scanner=scanner, 
           NbLobes=[4, 4], 
           alpha=0.46, shape='apodized_sinc', 
-          flip_angle=Q_(np.deg2rad(12),'rad'), 
+          flip_angle=parameters.Imaging.FlipAngle.to('rad'), 
           t_ref=Q_(0.0,'ms'),
           phase_offset=Q_(-np.pi/2,'rad'))
   sp = SliceProfile(delta_z=planning.FOV[2].to('m'), 
@@ -98,7 +98,25 @@ if __name__ == '__main__':
   dummy = imaging.copy()
   dummy.store_magnetization = False
 
-  # Store elapsed time
+
+  # Create and fill sequence object with dummy blocks
+  seq = Sequence()
+  time_spacing = parameters.Imaging.TR.to('ms') - (imaging.time_extent[1] - sp.rf.t_ref)
+  for i in range(80):
+    seq.add_block(dummy)         # Add dummy blocks to reach the steady state
+    seq.add_block(time_spacing)  # Delay between imaging blocks
+
+  # Bloch solver
+  t0 = time.time()  # Start timer
+  solver = BlochSolver(seq, phantom, 
+                      scanner=scanner, 
+                      M0=1e+9, 
+                      T1=T1, 
+                      T2=T2,
+                      delta_B=delta_B0.reshape((-1, 1)))
+
+  # Solve dummy blocks to reach the steady state
+  solver.solve()
   bloch_time = time.time() - t0
 
   # Generate kspace trajectory
@@ -120,31 +138,8 @@ if __name__ == '__main__':
   slices = traj.slices
   K = np.zeros([ro_samples, ph_samples, slices, 1, 1], dtype=np.complex64)
 
-  # Create and fill sequence object
-  seq = Sequence()
-  time_spacing = parameters.Imaging.TR.to('ms') - (imaging.time_extent[1] - sp.rf.t_ref)
-  # for i in range(80):
-  #   seq.add_block(dummy)         # Add dummy blocks to reach the steady state
-  #   seq.add_block(time_spacing)  # Delay between imaging blocks
-
-  # Bloch solver
-  solver = BlochSolver(seq, phantom, 
-                      scanner=scanner, 
-                      M0=1e+9, 
-                      T1=T1, 
-                      T2=T2,
-                      delta_B=delta_B0.reshape((-1, 1)))
-
-
   # Create XDMF file for debugging
-  if MPI_rank == 0:
-    file = XDMFFile('magnetization_{:d}.xdmf'.format(MPI_rank), nodes=phantom.global_nodes, elements={phantom.cell_type: phantom.global_elements})
-
-    # Export mesh partitioning
-    file.write(cellData=phantom.partitioning)
-
-    # Close the file
-    file.close()
+  file = XDMFFile('magnetization_{:d}.xdmf'.format(MPI_rank), nodes=phantom.local_nodes, elements={phantom.cell_type: phantom.local_elements})
 
   # Assemble mass matrix for integrals (just once)
   M = phantom.mass_matrix(lumped=True, quadrature_order=2)
@@ -173,23 +168,22 @@ if __name__ == '__main__':
       tmp = WaterFat(MPI_rank, M, kspace_points, kspace_times, phantom.local_nodes, delta_omega0, T2.m_as('ms'), Mxy)
       K[:,sh,s,:,0] = tmp.swapaxes(0, 1)[:,:,0]
 
-      # # Export magnetization and displacement for debugging
-      # file.write(pointData={'Mx': np.real(Mxy), 
-      #                       'My': np.imag(Mxy),
-      #                       'Mz': Mz},
-      #                       time=i*parameters.Imaging.TR)
+      # Export magnetization and displacement for debugging
+      file.write(pointData={'Mx': np.real(Mxy), 
+                            'My': np.imag(Mxy),
+                            'Mz': Mz},
+                            time=i*parameters.Imaging.TR)
 
   # Store elapsed time
-  spamm_time = time.time() - t0
+  wf_time = time.time() - t0
 
   # Print elapsed times
   MPI_print('Elapsed time for Bloch solver: {:.2f} s'.format(bloch_time))
-  MPI_print('Elapsed time-per-frame for SPAMM: {:.2f} s'.format(spamm_time/phantom.Nfr))
-  MPI_print('Elapsed time for SPAMM: {:.2f} s'.format(spamm_time))
-  MPI_print('Elapsed time for SPAMM + Bloch solver: {:.2f} s'.format(bloch_time + spamm_time))
+  MPI_print('Elapsed for k-space generation: {:.2f} s'.format(wf_time))
+  MPI_print('Elapsed time for k-space + Bloch solver: {:.2f} s'.format(bloch_time + wf_time))
 
-  # # Close the file
-  # file.close()
+  # Close the file
+  file.close()
 
   # Gather results
   K = gather_data(K)
