@@ -220,7 +220,7 @@ if __name__ == '__main__':
     mx = np.abs(I[...,0,:])
     my = np.abs(I[...,1,:])
     mxy = np.abs(I[...,0,:] - I[...,1,:])
-    plotter = MRIPlotter(images=[mx, my, mxy], title=['SPAMM X', 'SPAMM Y', 'O-CSPAMM'], FOV=planning.FOV)
+    plotter = MRIPlotter(images=[mx, my, mxy], title=['SPAMM X', 'SPAMM Y', 'O-CSPAMM'], FOV=planning.FOV.m_as('m'))
     plotter.show()
 
     # mx = np.abs(K[...,0,:])

@@ -86,7 +86,7 @@ if __name__ == '__main__':
       return x[:,0] + x[:,1] + x[:,2]
   delta_B0 = spatial(phantom.local_nodes)
   delta_B0 /= np.abs(spatial(phantom.global_nodes).flatten()).max()
-  delta_B0 *= 1.5 * 1e-6     # 1.5 ppm of the main magnetic field
+  delta_B0 *= 1.5 * 1e-5     # 1.5 ppm of the main magnetic field
   delta_omega0 = 2.0 * np.pi * scanner.gammabar.m_as('1/ms/T') * delta_B0
 
   # Slice profile
@@ -162,9 +162,11 @@ if __name__ == '__main__':
                       delta_B=delta_B0.reshape((-1, 1)),
                       pod_trajectory=pod_sum)
 
+  # Solve dummy blocks to reach the steady state
+  solver.solve()
 
-  # Create XDMF file for debugging
-  file = XDMFFile(script_path/'magnetization_{:d}.xdmf'.format(MPI_rank), nodes=phantom.local_nodes, elements={'tetra': phantom.local_elements})
+  # # Create XDMF file for debugging
+  # file = XDMFFile(script_path/'magnetization_{:d}.xdmf'.format(MPI_rank), nodes=phantom.local_nodes, elements={phantom.cell_type: phantom.local_elements})
 
   # Assemble mass matrix for integrals (just once)
   M = phantom.mass_matrix(lumped=True, quadrature_order=2)
@@ -183,12 +185,6 @@ if __name__ == '__main__':
       seq.add_block(time_spacing)  # Delay between imaging blocks
       Mxy, Mz = solver.solve(start=-2)
 
-      # Update reference time of POD trajectory
-      pod_sum.update_timeshift(i * parameters.Imaging.TR.m_as('ms'))
-
-      # # Assemble mass matrix for integrals (just once)
-      # M = phantom.mass_matrix_2(phantom.local_nodes + displacement, lumped=True, quadrature_order=2)
-
       # k-space points per shot
       kspace_points = (traj.points[0][:,sh,s,np.newaxis], 
                       traj.points[1][:,sh,s,np.newaxis], 
@@ -199,13 +195,16 @@ if __name__ == '__main__':
       tmp = SPAMM(MPI_rank, M, kspace_points, kspace_times, phantom.local_nodes, Mxy, delta_omega0, T2star.m_as('ms'), pod_sum)
       K[:,sh,s,:,0] = tmp.swapaxes(0, 1)[:,:,0]
 
-      # Export magnetization and displacement for debugging
-      displacement = pod_sum(0.0)
-      file.write(pointData={'Mx': np.real(Mxy), 
-                            'My': np.imag(Mxy),
-                            'Mz': Mz,
-                            'displacement': pod_sum(0)},
-                            time=i*parameters.Imaging.TR)
+      # Update reference time of POD trajectory
+      pod_sum.update_timeshift(seq.blocks[-2].time_extent[1].m_as('ms'))
+
+      # # Export magnetization and displacement for debugging
+      # displacement = pod_sum(0.0)
+      # file.write(pointData={'Mx': np.real(Mxy), 
+      #                       'My': np.imag(Mxy),
+      #                       'Mz': Mz,
+      #                       'displacement': displacement},
+      #                       time=i*parameters.Imaging.TR)
 
   # Store elapsed time
   spamm_time = time.time() - t0
@@ -216,8 +215,8 @@ if __name__ == '__main__':
   MPI_print('Elapsed time for SPAMM: {:.2f} s'.format(spamm_time))
   MPI_print('Elapsed time for SPAMM + Bloch solver: {:.2f} s'.format(bloch_time + spamm_time))
 
-  # Close the file
-  file.close()
+  # # Close the file
+  # file.close()
 
   # Gather results
   K = gather_data(K)
