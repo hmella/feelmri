@@ -71,12 +71,14 @@ if __name__ == '__main__':
           alpha=0.46, 
           shape='apodized_sinc', 
           flip_angle=parameters.Imaging.FlipAngle.to('rad'), 
-          t_ref=Q_(0.0,'ms'))
+          t_ref=Q_(0.0,'ms'),
+          phase_offset=Q_(-np.pi/2, 'rad'))
+
   sp = SliceProfile(delta_z=planning.FOV[2].to('m'), 
     profile_samples=100,
     rf=rf,
     dt=Q_(1e-2, 'ms'), 
-    plot=False, 
+    plot=True, 
     bandwidth=Q_(10000, 'Hz'), #'maximum',
     refocusing_area_frac=0.78185)
   # sp.optimize(frac_start=0.78, frac_end=0.785, N=100)
@@ -105,9 +107,6 @@ if __name__ == '__main__':
   # for i in range(80):
   #   seq.add_block(dummy)
   #   seq.add_block(time_spacing, dt=Q_(1, 'ms'))
-  
-  # # Add and additional block to synchronize the sequence with the cardiac cycle
-  # seq.add_block(times[-1] - seq.blocks[-1].time_extent[1] % times[-1], dt=Q_(1, 'ms'))
 
   # Add PC imaging sequence
   for fr in range(phantom.Nfr):

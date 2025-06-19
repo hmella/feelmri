@@ -88,7 +88,8 @@ if __name__ == '__main__':
           alpha=0.46, 
           shape='apodized_sinc', 
           flip_angle=parameters.Imaging.FlipAngle.to('rad'), 
-          t_ref=Q_(0.0,'ms'))
+          t_ref=Q_(0.0,'ms'),
+          phase_offset=Q_(-90, 'deg'))
   sp = SliceProfile(delta_z=planning.FOV[2].to('m'), 
     profile_samples=100,
     rf=rf,
@@ -136,12 +137,12 @@ if __name__ == '__main__':
 
     # Add dummy blocks to the sequence to reach steady state
     time_spacing = parameters.Imaging.TimeSpacing.to('ms') - (imaging.time_extent[1] - sp.rf.t_ref)
-    # for i in range(80):
-    #   seq.add_block(dummy)
-    #   seq.add_block(time_spacing, dt=Q_(1, 'ms'))
+    for i in range(80):
+      seq.add_block(dummy)
+      seq.add_block(time_spacing, dt=Q_(1, 'ms'))
     
-    # # Add and additional block to synchronize the sequence with the cardiac cycle
-    # seq.add_block(times[-1] - seq.blocks[-1].time_extent[1] % times[-1], dt=Q_(1, 'ms'))
+    # Add and additional block to synchronize the sequence with the cardiac cycle
+    seq.add_block(times[-1] - seq.blocks[-1].time_extent[1] % times[-1], dt=Q_(1, 'ms'))
 
     # Add PC imaging sequence
     for fr in range(phantom.Nfr):
