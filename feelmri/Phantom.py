@@ -16,7 +16,7 @@ from feelmri.MPIUtilities import MPI_print, MPI_rank, MPI_size
 element_dict = {
     'triangle': 'triangle',
     'tetra': 'tetrahedron',
-    'tetra10': 'quadrilateral',
+    'tetra10': 'tetrahedron',
     'wedge': 'prism',
 }
 degree_dict = {
