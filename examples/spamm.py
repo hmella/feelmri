@@ -80,7 +80,7 @@ if __name__ == '__main__':
                               remove_mean=True)
 
   # Combine the POD trajectory and the respiratory motion
-  pod_sum = pod_trajectory # + pod_resp_motion
+  pod_sum = pod_trajectory + pod_resp_motion
 
   # Create scanner object defining the gradient strength, slew rate and giromagnetic ratio
   scanner = Scanner(gradient_strength=parameters.Hardware.G_max,
