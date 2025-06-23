@@ -43,7 +43,7 @@ if __name__ == '__main__':
 
   # Velocity encoding parameters
   ke_dirs = list(parameters.PositionEncoding.Directions.values())
-  enc = PositionEncoding(parameters.PositionEncoding.ke, np.array(ke_dirs))
+  enc = PositionEncoding(parameters.PositionEncoding.ke.m_as('1/m'), np.array(ke_dirs))
 
   # We can a submesh to speed up the simulation. The submesh is created by selecting the elements that are inside the FOV
   mp = phantom.global_nodes[phantom.global_elements].mean(axis=1)
@@ -97,7 +97,12 @@ if __name__ == '__main__':
   # Slice profile
   # The slice profile prepulse is calculated based on a reference RF pulse with
   # user-defined characteristics. The slice profile object allows accessing the calculated adjusted RF pulse and dephasing and rephasing gradients
-  rf = RF(scanner=scanner, NbLobes=[4, 4], alpha=0.46, shape='apodized_sinc', flip_angle=Q_(np.deg2rad(12),'rad') , t_ref=Q_(0.0,'ms'))
+  rf = RF(scanner=scanner, 
+          NbLobes=[4, 4], 
+          alpha=0.46, 
+          shape='apodized_sinc', 
+          flip_angle=parameters.Imaging.FlipAngle.to('rad'), 
+          t_ref=Q_(0.0,'ms'))
   sp = SliceProfile(delta_z=planning.FOV[2].to('m'), 
     profile_samples=100,
     rf=rf,
@@ -121,7 +126,7 @@ if __name__ == '__main__':
     rf1 = RF(scanner=scanner, shape='hard', dur=Q_(0.2, 'ms'), flip_angle=Q_(np.deg2rad(90),'rad'), t_ref=Q_(0.0, 'ms'))
 
     G_tag = Gradient(scanner=scanner, t_ref=rf1.t_ref + rf1.dur2, axis=i)
-    G_tag.match_area(Q_(parameters.PositionEncoding.ke/scanner.gamma.m_as('1/mT/ms'), 'mT*ms/m'))
+    G_tag.match_area(Q_(parameters.PositionEncoding.ke.m_as('1/m')/scanner.gamma.m_as('1/mT/ms'), 'mT*ms/m'))
 
     rf2 = RF(scanner=scanner, shape='hard', dur=Q_(0.2, 'ms'), flip_angle=Q_((-1)**i*np.deg2rad(90),'rad'), t_ref=G_tag.t_ref + G_tag.dur + rf1.t_ref + rf1.dur2)
 
@@ -188,11 +193,10 @@ if __name__ == '__main__':
   for fr in range(phantom.Nfr):
 
     # Update reference time of POD trajectory
-    pod_trajectory.update_timeshift(fr * parameters.Imaging.TimeSpacing.m_as('ms'))
+    pod_sum.update_timeshift(fr * parameters.Imaging.TimeSpacing.m_as('ms'))
 
     # Generate 4D flow image
     MPI_print('Generating frame {:d}'.format(fr))
-    # K[:,:,:,:,fr] = SPAMM(MPI_rank, M, traj.points, traj.times.m_as('s'), phantom.local_nodes + submesh_displacement, M_spamm, delta_omega0, T2star, profile)
     K[:,:,:,:,fr] = SPAMM(MPI_rank, M, traj.points, traj.times.m_as('ms'), phantom.local_nodes, Mxy_spamm[:,fr,:], delta_omega0, T2star.m_as('ms'), pod_sum)
 
   # Store elapsed time
