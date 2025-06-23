@@ -193,6 +193,7 @@ class FEMPhantom:
       local_nodes = self.global_nodes
       local_elems = self.global_elements
       local_nodes_idx = np.arange(self.global_nodes.shape[0], dtype=int)
+      local_elements_idx = np.arange(self.global_elements.shape[0], dtype=int)
       membership = [0,] * self.global_elements.shape[0]
 
     # Debugging info
@@ -205,6 +206,7 @@ class FEMPhantom:
 
     # Add global to local mapping
     self.global_to_local_nodes = local_nodes_idx
+    self.global_to_local_elems = local_elements_idx
 
     # Add mesh partition 
     self.partitioning = {'partitioning': np.array(membership).reshape(-1, 1)}
@@ -327,10 +329,10 @@ class FEMPhantom:
 
     return M
   
-  def mass_matrix_2(self, local_nodes, lumped=False, use_submesh=False, quadrature_order=2):
+  def moving_mass_matrix(self, local_nodes, lumped=False, use_submesh=False, quadrature_order=2):
     ''' Assemble mass matrix for integrals '''
     # Create finite element and quadrature rule according to the mesh type
-    cell_type = self.all_elements_[0].type
+    cell_type = self.cell_type
     fe = FiniteElement(family=family_dict[cell_type], 
                        cell_type=element_dict[cell_type], 
                        degree=degree_dict[cell_type], 
