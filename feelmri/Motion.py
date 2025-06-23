@@ -177,32 +177,39 @@ class POD:
     flat_coefficients = np.polynomial.polynomial.polyfit(self.time_array, self.weights, deg=self.taylor_order)
     return flat_coefficients
 
-  def _evaluate_weights(self, t: float):
-      """ Evaluates the weights at time t using the Taylor coefficients.
-      :param t: time at which to evaluate the weights
-      :return: evaluated weights at time t
-      """
-      factors = self.taylor_coefficients
-      exponents = np.arange(0, self.taylor_order + 1, dtype=np.float32)
-      exponents = np.tile(exponents, (self.n_modes, 1)).T
-      t_pow_n = t ** exponents  # (order, time)
-      out = np.sum(factors * t_pow_n, axis=0)
-      return out
-  
-  def _evaluate_trajectory(self, t: float):
-    """ Evaluates the trajectory at time t using the POD modes and weights.
-    :param t: time at which to evaluate the trajectory
-    :return: evaluated trajectory at time t
+  def _evaluate_weights(self, t: float) -> np.ndarray:
     """
-    t = t + self.timeshift  # Apply time shift if necessary
+    Evaluate all mode‐weights at time t using Horner's method.
+    self.taylor_coefficients has shape (order+1, n_modes).
+    Returns array of length n_modes.
+    """
+    # start from the highest coefficient row
+    coeffs = self.taylor_coefficients
+    weigths = coeffs[-1].copy()           # shape (n_modes,)
+    # Horner: w = (...((a_n * t + a_{n-1}) * t + a_{n-2}) ... ) * t + a_0
+    for c in coeffs[-2::-1]:
+        weigths = weigths * t + c   # still shape (n_modes,)
+
+    return weigths
+
+  def _evaluate_trajectory(self, t: float) -> np.ndarray:
+    """
+    Evaluate the full trajectory at time t:
+      1) apply shift + periodic
+      2) eval weights with Horner
+      3) one tensordot over modes
+    """
+    # Apply shift and verify periodicity
+    t_eff = t + self.timeshift
     if self.is_periodic:
-      t = t % self.time_array[-1]
+        t_eff %= self.time_array[-1]
 
-    # Evaluate the weights at time t
-    weights = self._evaluate_weights(t)[np.newaxis, np.newaxis, :]
+    # Evaluate weights at time t
+    w = self._evaluate_weights(t_eff)  # shape (n_modes,)
 
-    return np.sum(self.modes * weights, axis=-1)  
-  
+    # Combine modes (shape (..., n_modes)) with weights result will have shape of self.modes[...,0] (space dims)
+    return np.tensordot(self.modes, w, axes=([2], [0]))
+
   def update_timeshift(self, timeshift: float):
     """ Updates the timeshift of the POD.
     :param timeshift: new timeshift value
@@ -218,28 +225,46 @@ class PODVelocity(POD):
   def __init__(self, *args, **kwargs):
     super().__init__(*args, **kwargs)
 
+  def _evaluate_trajectory(self, t: float) -> np.ndarray:
+    """
+    Evaluate the full trajectory at time t:
+      1) apply shift + periodic
+      2) eval weights with Horner
+      3) one tensordot over modes
+    """
+    # Apply shift and verify periodicity
+    t_eff = t + self.timeshift
+    if self.is_periodic:
+        t_eff %= self.time_array[-1]
+
+    # Evaluate weights at time t
+    weights = self._evaluate_weights(t_eff)  # shape (n_modes,)
+
+    # Combine modes (shape (..., n_modes)) with weights result will have shape of self.modes[...,0] (space dims)
+    return np.tensordot(self.modes, weights, axes=([2], [0]))
+
   def _evaluate_trajectory(self, t: float):
     """ Evaluates the trajectory at time t using the POD modes and weights. It uses a first-order Taylor expansion to approximate the trajectory at time t.
     :param t: time at which to evaluate the trajectory
     :return: evaluated trajectory at time t
     """
-    t = t + self.timeshift  # Apply time shift if necessary
+    # Apply shift
+    t_eff = t + self.timeshift  # Apply time shift if necessary
 
     # Check if t is within the bounds of the time array
-    if (t - self.timeshift) <= 0:
-      t_ro = t
+    if (t_eff - self.timeshift) <= 0:
+      t_ro = t_eff
     else:
-      t_ro = (t - self.timeshift)
+      t_ro = (t_eff - self.timeshift)
 
     # Apply periodicity if necessary
     if self.is_periodic:
-      t = self.timeshift % self.time_array[-1]
+      t_eff = self.timeshift % self.time_array[-1]
 
     # Evaluate the weights at time t
-    weights = t_ro * self._evaluate_weights(t)[np.newaxis, np.newaxis, :]
+    weights = t_ro * self._evaluate_weights(t_eff)
 
-    return np.sum(self.modes * weights, axis=-1)    
-
+    return np.tensordot(self.modes, weights, axes=([2], [0]))
 
 class PODSum:
   """ Class to handle the sum of a POD and a callable object.
