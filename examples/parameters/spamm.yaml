@@ -2,12 +2,13 @@
 Imaging:
   RES: [70, 55, 1]
   TimeSpacing: {value: 40, unit: "ms"}
-  Oversampling: 2
+  Oversampling: 1
   Sequence: "FFE"
   LinesPerShot: 5
+  FlipAngle: {value: 20, unit: "deg"}
 
 PositionEncoding:
-  ke: 448.8                 # meters^-1
+  ke: {value: 448.8, unit: "1/m"}
   Directions:
     dir1: [1.0, 0.0, 0.0]
     dir2: [0.0, 1.0, 0.0]
