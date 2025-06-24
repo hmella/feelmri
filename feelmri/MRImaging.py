@@ -29,7 +29,7 @@ class Bloch:
     dw = self.gamma*self.eval_gradient(t)*(self.z - self.z0)
 
     # Bloch equations
-    dMxdt = dw*M[1] - np.imag(self.B1e(t))*M[2]
+    dMxdt = dw*M[1] - self.gamma*np.imag(self.B1e(t))*M[2]
     dMydt = self.gamma*np.real(self.B1e(t))*M[2] - dw*M[0]
     dMzdt = -self.gamma*np.real(self.B1e(t))*M[1]
 
@@ -40,7 +40,7 @@ class Bloch:
     dw = self.gamma*self.eval_gradient(t)*(self.z - self.z0)
 
     # Bloch equations
-    dMxdt = dw*M[1] - np.imag(self.B1e(t))*M[2]
+    dMxdt = dw*M[1] - self.gamma*np.imag(self.B1e(t))*M[2]
     dMydt = self.gamma*np.real(self.B1e(t))*M[2] - dw*M[0]
     dMzdt = -self.gamma*np.real(self.B1e(t))*M[1]*0.0
 
