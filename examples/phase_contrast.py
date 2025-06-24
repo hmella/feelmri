@@ -67,8 +67,8 @@ if __name__ == '__main__':
   pod_velocity = PODVelocity(time_array=times.m_as('ms'),
                               data=v.m_as('m/ms'),
                               global_to_local=phantom.global_to_local_nodes,
-                              n_modes=5,
-                              taylor_order=10,
+                              n_modes=25,
+                              taylor_order=15,
                               is_periodic=True)
 
   # Create scanner object defining the gradient strength, slew rate and giromagnetic ratio
@@ -80,8 +80,10 @@ if __name__ == '__main__':
       return x[:,0] + x[:,1] + x[:,2]
   delta_B0 = spatial(phantom.local_nodes)
   delta_B0 /= np.abs(spatial(phantom.global_nodes).flatten()).max()
-  delta_B0 *= 0.0 * 1.5 * 1e-6           # 1.5 ppm of the main magnetic field
-  delta_omega0 = 2.0 * np.pi * scanner.gammabar.m_as('1/ms/T') * delta_B0
+  delta_B0 *= scanner.field_strength * 1e-6 # 1.5 ppm of the main magnetic field
+
+  # Phase shift in rad/s
+  delta_omega0 = (2.0 * np.pi * scanner.gammabar * delta_B0).to('rad/ms')
 
   # Slice profile
   # The slice profile prepulse is calculated based on a reference RF pulse with
@@ -113,7 +115,7 @@ if __name__ == '__main__':
                          M0=1e+9, 
                          T1=parameters.Phantom.T1.to('ms'),
                          T2=parameters.Phantom.T2star.to('ms'), 
-                         delta_B=delta_B0.reshape((-1, 1)),
+                         delta_B=delta_B0.m_as('mT').reshape((-1, 1)),
                          pod_trajectory=pod_velocity)
 
     # Bipolar gradient
@@ -205,7 +207,7 @@ if __name__ == '__main__':
       pod_velocity.update_timeshift(fr * parameters.Imaging.TimeSpacing.m_as('ms'))
 
       # Generate 4D flow image
-      K[:,:,:,:,fr] = PC(MPI_rank, M, traj.points, traj.times.m_as('ms'), phantom.local_nodes, delta_omega0, T2star.m_as('ms'), Mxy_PC[:, fr, :], pod_velocity)
+      K[:,:,:,:,fr] = PC(MPI_rank, M, traj.points, traj.times.m_as('ms'), phantom.local_nodes, delta_omega0.m_as('rad/ms'), T2star.m_as('ms'), Mxy_PC[:, fr, :], pod_velocity)
 
       if MPI_rank == 0:
         sys.stdout.flush()
