@@ -72,8 +72,8 @@ if __name__ == '__main__':
   pod_velocity = PODVelocity(time_array=times.m_as('ms'),
                               data=v.m_as('m/ms'),
                               global_to_local=phantom.global_to_local_nodes,
-                              n_modes=5,
-                              taylor_order=10,
+                              n_modes=25,
+                              taylor_order=15,
                               is_periodic=True)
 
   # Create scanner object defining the gradient strength, slew rate and giromagnetic ratio
@@ -104,8 +104,8 @@ if __name__ == '__main__':
     dt=Q_(1e-2, 'ms'), 
     plot=False, 
     bandwidth=Q_(10000, 'Hz'), #'maximum',
-    refocusing_area_frac=0.7961)
-  # sp.optimize(frac_start=0.79, frac_end=0.81, N=100)
+    refocusing_area_frac=0.97657)
+  # sp.optimize(frac_start=0.96, frac_end=0.98, N=100)
 
   # Create sequence object and solve magnetization
   Mxy_PC = np.zeros([phantom.local_nodes.shape[0], phantom.Nfr, enc.nb_directions], dtype=np.complex64)
