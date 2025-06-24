@@ -207,8 +207,13 @@ class Sequence:
       fig, ax = plt.subplots(4, 1)
       for i, objects in enumerate(discrete_blocks):
         for j, obj in enumerate(objects):
-          for t, amp in obj:
-            ax[j].plot(t, amp)
+          if titles[j] == 'RF':
+            for t, amp in obj:
+              ax[j].plot(t, np.real(amp))
+              ax[j].plot(t, np.imag(amp))
+          else:
+            for t, amp in obj:
+              ax[j].plot(t, amp)
           ax[j].set_ylabel(titles[j])
           ax[j].set_xlabel('Time (ms)')
 
