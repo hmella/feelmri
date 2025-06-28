@@ -1,7 +1,7 @@
 # Imaging parameters
 Imaging:
   RES: [60, 30, 1]
-  TimeSpacing: {value: 0.031858, unit: "s"}
+  TimeSpacing: {value: 31.858, unit: "ms"}
   Oversampling: 1
   Sequence: "FFE"
   LinesPerShot: 1
@@ -18,7 +18,7 @@ Hardware:
   B0:    {value: 1.5, unit: "T"}
   G_sr:  {value: 180.0, unit: "mT/m/ms"}
   G_max: {value: 33.0, unit: "mT/m"}
-  r_BW:  {value: 153.0e+3, unit: "Hz"} # (equivalent to 450 Hz/pixel)
+  r_BW:  {value: 120.0e+3, unit: "Hz"} # (equivalent to 450 Hz/pixel)
 
 # Imaging orientation
 Formatting:

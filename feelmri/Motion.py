@@ -5,6 +5,7 @@ from collections.abc import Callable
 
 import numpy as np
 from scipy.interpolate import interp1d
+from feelmri.MPIUtilities import MPI_rank, MPI_print
 
 
 class RespiratoryMotion:
@@ -174,7 +175,11 @@ class POD:
   def fit(self):
     """ Fits a Taylor polynomial of order self.order to the weights of the POD modes
     """
-    flat_coefficients = np.polynomial.polynomial.polyfit(self.time_array, self.weights, deg=self.taylor_order)
+    flat_coefficients = np.zeros((self.taylor_order + 1, self.n_modes), dtype=np.float32)
+    for i in range(self.n_modes):
+      # Fit a polynomial of order self.taylor_order to the weights of the i-th mode
+      flat_coefficients[:, i] = np.polynomial.Polynomial.fit(self.time_array, self.weights[:, i], deg=self.taylor_order, domain=[self.time_array[0], self.time_array[-1]]).convert().coef
+
     return flat_coefficients
 
   def _evaluate_weights(self, t: float) -> np.ndarray:
@@ -225,24 +230,6 @@ class PODVelocity(POD):
   def __init__(self, *args, **kwargs):
     super().__init__(*args, **kwargs)
 
-  def _evaluate_trajectory(self, t: float) -> np.ndarray:
-    """
-    Evaluate the full trajectory at time t:
-      1) apply shift + periodic
-      2) eval weights with Horner
-      3) one tensordot over modes
-    """
-    # Apply shift and verify periodicity
-    t_eff = t + self.timeshift
-    if self.is_periodic:
-        t_eff %= self.time_array[-1]
-
-    # Evaluate weights at time t
-    weights = self._evaluate_weights(t_eff)  # shape (n_modes,)
-
-    # Combine modes (shape (..., n_modes)) with weights result will have shape of self.modes[...,0] (space dims)
-    return np.tensordot(self.modes, weights, axes=([2], [0]))
-
   def _evaluate_trajectory(self, t: float):
     """ Evaluates the trajectory at time t using the POD modes and weights. It uses a first-order Taylor expansion to approximate the trajectory at time t.
     :param t: time at which to evaluate the trajectory
@@ -263,6 +250,7 @@ class PODVelocity(POD):
 
     # Evaluate the weights at time t
     weights = t_ro * self._evaluate_weights(t_eff)
+    # MPI_print("(t_ro, t_eff) = ({:.4f}, {:.4f})".format(t_ro, t_eff))
 
     return np.tensordot(self.modes, weights, axes=([2], [0]))
 

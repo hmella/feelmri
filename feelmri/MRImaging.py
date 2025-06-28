@@ -89,7 +89,7 @@ class SliceProfile:
     calculate(y0=np.array([0,0,1]).reshape((3,))):
       Calculates the slice profile by solving the Bloch equations.
   """
-  def __init__(self, z0=Q_(0.0,'m'), delta_z=Q_(0.008,'m'), bandwidth='maximum', rf=RF(), dt=Q_(1e-4,'ms'), profile_samples=150, plot=False, small_angle=False, refocusing_area_frac=0.5, scanner=Scanner(), dtype=np.float32):
+  def __init__(self, z0=Q_(0.0,'m'), delta_z=Q_(0.008,'m'), bandwidth='maximum', rf=RF(), dt=Q_(1e-4,'ms'), profile_samples=150, plot=False, small_angle=False, refocusing_area_frac=1, scanner=Scanner(), dtype=np.float32):
     self.z0 = z0
     self.delta_z = delta_z
     self.rf = rf
@@ -181,19 +181,20 @@ class SliceProfile:
     Gz = Q_(np.min([self.bandwidth.m_as('Hz')/self.scanner.gammabar.m_as('Hz/T')/self.delta_z.m_as('m'), self.scanner.gradient_strength.m_as('T/m')]),'T/m')
 
     # RF pulse durations based on required bandwidth
-    dur1 = ((self.rf.NbLobes[0]+1)/self.bandwidth).to('ms')
-    dur2 = ((self.rf.NbLobes[1]+1)/self.bandwidth).to('ms')
+    half1 = ((self.rf.NbLobes[0]+1)/self.bandwidth).to('ms')
+    half2 = ((self.rf.NbLobes[1]+1)/self.bandwidth).to('ms')
     rf_ss = RF(scanner=self.scanner, 
                NbLobes=self.rf.NbLobes, 
                alpha=self.rf.alpha, 
                shape=self.rf.shape, 
                flip_angle=self.rf.flip_angle, 
-               dur=dur1+dur2, 
-               t_ref=self.rf.t_ref,
+               dur=half1+half2, 
+               ref=half1,
+               time=self.rf.time,
                phase_offset=self.rf.phase_offset,
                frequency_offset=self.rf.frequency_offset)
 
-    # t = np.linspace((self.rf.t_ref - self.rf.dur1).m_as('ms'), (self.rf.t_ref + self.rf.dur2).m_as('ms'), 100)
+    # t = np.linspace((self.rf.ref - self.rf.half1).m_as('ms'), (self.rf.ref + self.rf.half2).m_as('ms'), 100)
     # plt.plot(t, np.real(self.rf(t)), label='RF real')
     # plt.plot(t, np.imag(self.rf(t)), label='RF imag')
     # plt.xlabel('Time [ms]')
@@ -201,7 +202,7 @@ class SliceProfile:
     # plt.legend()
     # plt.show()
 
-    # t = np.linspace((rf_ss.t_ref - rf_ss.dur1).m_as('ms'), (rf_ss.t_ref + dur2).m_as('ms'), 100)
+    # t = np.linspace((rf_ss.ref - rf_ss.half1).m_as('ms'), (rf_ss.ref + half2).m_as('ms'), 100)
     # plt.plot(t, np.real(rf_ss(t)), label='RF real')
     # plt.plot(t, np.imag(rf_ss(t)), label='RF imag')
     # plt.xlabel('Time [ms]')
@@ -215,19 +216,24 @@ class SliceProfile:
     # dur   = (area - 0.5*slope*self._Gz)/self._Gz
 
     # Create slice selection gradient objects
-    dephasing = Gradient(G=Gz.to('mT/m'), scanner=self.scanner, lenc=(dur1 + dur2).to('ms'), t_ref=(rf_ss.t_ref-dur1).to('ms'), axis=2)
-    rephasing = Gradient(scanner=self.scanner, t_ref=dephasing.timings[-2].to('ms'), axis=2)
+    dephasing = Gradient(strength=Gz.to('mT/m'), 
+                         scanner=self.scanner, 
+                         lenc=(half1 + half2).to('ms'), 
+                         time=rf_ss.time.to('ms'), 
+                         axis=2)
+    rephasing = Gradient(scanner=self.scanner, 
+                         time=dephasing.timings[-2].to('ms'),
+                         axis=2)
 
-    # Match area lobe of the second gradient
-    half_area = dephasing.area(t0=rf_ss.t_ref).to('mT*ms/m')
-    rephasing.match_area(-half_area * self.refocusing_area_frac)
-
-    # Fix timings
-    dephasing.update_reference(dephasing.t_ref - dephasing.slope)
-    rephasing.update_reference(rephasing.t_ref - dephasing.slope)
+    # Change rf start time to match the gradients
+    rf_ss.change_time(rf_ss.time + dephasing.slope + 0.5*dephasing.lenc)
+    self.rf = rf_ss
     self.dephasing = dephasing
     self.rephasing = rephasing
-    self.rf = rf_ss
+
+    # Match area lobe of the second gradient
+    half_area = dephasing.area(t0=rf_ss.time).to('mT*ms/m')
+    rephasing.match_area(-half_area * self.refocusing_area_frac)
 
     def ss_gradient(t):
       return dephasing(t) + rephasing(t)
@@ -275,7 +281,7 @@ class SliceProfile:
       ax[0].plot(t, np.imag(B1))
       ax[0].set_xlim([t0.m, t_bound.m])
       ax[0].legend(['B1_real','B1_imag'])
-      ax[0].set_ylabel('RF [mT]?')
+      ax[0].set_ylabel('RF [mT]')
       ax[0].set_xticklabels([])
 
       ax[1].plot(dephasing.timings.m_as('ms'), dephasing.amplitudes.m_as('mT/m'))

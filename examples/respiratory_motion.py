@@ -97,7 +97,7 @@ if __name__ == '__main__':
           alpha=0.46, 
           shape='apodized_sinc', 
           flip_angle=parameters.Imaging.FlipAngle.to('rad'), 
-          t_ref=Q_(0.0,'ms'),
+          ref=Q_(0.0,'ms'),
           phase_offset=Q_(-np.pi/2, 'rad'))
   sp = SliceProfile(delta_z=planning.FOV[2].to('m'), 
     profile_samples=100,
@@ -126,7 +126,7 @@ if __name__ == '__main__':
 
   # Generate kspace trajectory
   traj = CartesianStack(FOV=planning.FOV.to('m'),
-                      t_start=imaging.time_extent[1] - sp.rf.t_ref,
+                      t_start=imaging.time_extent[1] - sp.rf.ref,
                       res=parameters.Imaging.RES, 
                       oversampling=parameters.Imaging.Oversampling, 
                       lines_per_shot=parameters.Imaging.LinesPerShot, 
@@ -148,7 +148,7 @@ if __name__ == '__main__':
 
   # Create and fill sequence object
   seq = Sequence()
-  time_spacing = parameters.Imaging.TR.to('ms') - (imaging.time_extent[1] - sp.rf.t_ref)
+  time_spacing = parameters.Imaging.TR.to('ms') - (imaging.time_extent[1] - sp.rf.ref)
   for i in range(80):
     seq.add_block(dummy)  # Add dummy blocks to reach the steady state
     seq.add_block(time_spacing)  # Delay between imaging blocks

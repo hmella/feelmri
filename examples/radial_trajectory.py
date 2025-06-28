@@ -55,7 +55,7 @@ if __name__ == '__main__':
   # profile = np.abs(nodes[:,2]) < parameters.FOV[2]/2
 
   # Bipolar gradient
-  bipolar = Gradient(Gr_max=parameters.G_max, Gr_sr=parameters.G_sr, t_ref=sp.rf_dur2)
+  bipolar = Gradient(Gr_max=parameters.G_max, Gr_sr=parameters.G_sr, ref=sp.rf_dur2)
   bipolar.make_bipolar(enc.VENC)
 
   # Field inhomogeneity

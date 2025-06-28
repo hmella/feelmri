@@ -63,12 +63,12 @@ if __name__ == '__main__':
 
   # Define POD object
   dt = parameters.Imaging.TimeSpacing
-  times = np.linspace(0, (phantom.Nfr-1)*dt, phantom.Nfr)
+  times = np.linspace(0, (phantom.Nfr-1)*dt, phantom.Nfr, dtype=np.float32)
   pod_velocity = PODVelocity(time_array=times.m_as('ms'),
                               data=v.m_as('m/ms'),
                               global_to_local=phantom.global_to_local_nodes,
                               n_modes=25,
-                              taylor_order=15,
+                              taylor_order=10,
                               is_periodic=True)
 
   # Create scanner object defining the gradient strength, slew rate and giromagnetic ratio
@@ -93,16 +93,23 @@ if __name__ == '__main__':
           alpha=0.46, 
           shape='apodized_sinc', 
           flip_angle=parameters.Imaging.FlipAngle.to('rad'), 
-          t_ref=Q_(0.0,'ms'),
           phase_offset=Q_(-90, 'deg'))
   sp = SliceProfile(delta_z=planning.FOV[2].to('m'), 
     profile_samples=100,
     rf=rf,
     dt=Q_(1e-2, 'ms'), 
     plot=False, 
-    bandwidth=Q_(10000, 'Hz'), #'maximum',
-    refocusing_area_frac=0.78185)
+    bandwidth='maximum')
   # sp.optimize(frac_start=0.79, frac_end=0.81, N=100)
+
+  # Create bipolar gradients
+  start = sp.rephasing.time + sp.rephasing.dur
+  bp1 = Gradient(scanner=scanner, time=start)
+  bp2 = bp1.make_bipolar(parameters.VelocityEncoding.VENC)
+
+  # Rotate the bipolar gradients to the desired direction
+  bp1r = bp1.rotate(enc.directions)
+  bp2r = bp2.rotate(enc.directions)
 
   # Create sequence object and solve magnetization
   Mxy_PC = np.zeros([phantom.local_nodes.shape[0], phantom.Nfr, enc.nb_directions], dtype=np.complex64)
@@ -118,20 +125,11 @@ if __name__ == '__main__':
                          delta_B=delta_B0.m_as('mT').reshape((-1, 1)),
                          pod_trajectory=pod_velocity)
 
-    # Bipolar gradient
-    t_ref = sp.rephasing.t_ref + sp.rephasing.dur
-    bp1 = Gradient(scanner=scanner, t_ref=t_ref)
-    bp2 = bp1.make_bipolar(parameters.VelocityEncoding.VENC.to('m/s'))
-
-    # Rotate the bipolar gradients to the desired direction
-    bp1_rotated = bp1.rotate(enc.directions[d])
-    bp2_rotated = bp2.rotate(enc.directions[d])
-
-    # Update reference time for second lobe
-    [g.update_reference(g.t_ref - (bp1.dur - g.dur)) for g in bp2_rotated]
+    # Update reference time for second lobe (rotate function keep the time reference of the original gradient)
+    [g.change_time(bp1r[d][0].time + bp1r[d][0].dur) for g in bp2r[d]]
 
     # Imaging block
-    imaging = SequenceBlock(gradients=[sp.dephasing, sp.rephasing] + bp1_rotated + bp2_rotated,
+    imaging = SequenceBlock(gradients=[sp.dephasing,sp.rephasing]+bp1r[d]+bp2r[d],
                             rf_pulses=[sp.rf], 
                             dt_rf=Q_(1e-2, 'ms'), 
                             dt_gr=Q_(1e-2, 'ms'), 
@@ -141,11 +139,11 @@ if __name__ == '__main__':
     dummy.store_magnetization = False
 
     # Add dummy blocks to the sequence to reach steady state
-    time_spacing = parameters.Imaging.TimeSpacing.to('ms') - (imaging.time_extent[1] - sp.rf.t_ref)
+    time_spacing = parameters.Imaging.TimeSpacing - imaging.dur
     for i in range(80):
       seq.add_block(dummy)
       seq.add_block(time_spacing, dt=Q_(1, 'ms'))
-    
+
     # Add and additional block to synchronize the sequence with the cardiac cycle
     seq.add_block(times[-1] - seq.blocks[-1].time_extent[1] % times[-1], dt=Q_(1, 'ms'))
 
@@ -159,11 +157,14 @@ if __name__ == '__main__':
     Mxy_PC[..., d] = Mxy
 
     # # Export magnetization and displacement for debugging
-    # file = XDMFFile('magnetization_{:d}.xdmf'.format(MPI_rank), nodes=phantom.local_nodes, elements={'tetra': phantom.local_elements})
-    # for fr in range(Mxy.shape[1]):
-    #   # Write magnetization and displacement at each frame
-    #   file.write(pointData={'M': np.stack((np.real(Mxy[:,fr]), np.imag(Mxy[:,fr]), Mz[:,fr]), axis=1)}, time=fr*(parameters.Imaging.TimeSpacing.m_as('ms') + time_spacing.m_as('ms')))
-    # file.close()
+    # if d == 0:
+    #   file = XDMFFile('magnetization_{:d}.xdmf'.format(MPI_rank), nodes=phantom.local_nodes, elements={phantom.cell_type: phantom.local_elements})
+    #   for fr in range(Mxy.shape[1]):
+    #     # Write magnetization and displacement at each frame
+    #     t = fr*parameters.Imaging.TimeSpacing.m_as('ms')
+    #     pod_velocity.update_timeshift(t)
+    #     file.write(pointData={'M': np.stack((np.real(Mxy[:,fr]), np.imag(Mxy[:,fr]), Mz[:,fr]), axis=1), 'displacement': pod_velocity(2.55)}, time=t)
+    #   file.close()
 
   # Path to export the generated data
   export_path = Path(script_path/'MRImages/phase_contrast_{:s}_V{:.0f}.pkl'.format(parameters.Imaging.Sequence, parameters.VelocityEncoding.VENC.m_as('cm/s')))
@@ -171,9 +172,9 @@ if __name__ == '__main__':
   # Make sure the directory exist
   os.makedirs(str(export_path.parent), exist_ok=True)
 
-  # Generate kspace trajectory
+  # # Generate kspace trajectory
   traj = CartesianStack(FOV = planning.FOV.to('m'),
-    t_start = imaging.time_extent[1] - sp.rf.t_ref,
+    t_start = imaging.time_extent[1] - sp.rf.time,
     res = parameters.Imaging.RES, 
     oversampling = parameters.Imaging.Oversampling, 
     lines_per_shot = parameters.Imaging.LinesPerShot, 
