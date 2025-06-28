@@ -122,7 +122,7 @@ if __name__ == '__main__':
 
   # Generate kspace trajectory
   traj = CartesianStack(FOV=planning.FOV.to('m'),
-                      t_start=imaging.time_extent[1] - sp.rf.t_ref,
+                      t_start=imaging.time_extent[1] - sp.rf.ref,
                       res=parameters.Imaging.RES, 
                       oversampling=parameters.Imaging.Oversampling, 
                       lines_per_shot=parameters.Imaging.LinesPerShot, 

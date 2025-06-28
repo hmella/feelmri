@@ -4,8 +4,8 @@ Imaging:
   TimeSpacing: {value: 40, unit: "ms"}
   Oversampling: 1
   Sequence: "FFE"
-  LinesPerShot: 5
-  FlipAngle: {value: 20, unit: "deg"}
+  LinesPerShot: 1
+  FlipAngle: {value: 15, unit: "deg"}
 
 PositionEncoding:
   ke: {value: 448.8, unit: "1/m"}

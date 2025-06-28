@@ -54,35 +54,35 @@ class CartesianStack(Trajectory):
     def kspace_points(self):
       ''' Get kspace points '''
       # k-space positioning gradients
-      ph_grad = Gradient(t_ref=0.0, scanner=self.scanner)
+      ph_grad = Gradient(time=Quantity(0.0, 'ms'), scanner=self.scanner)
       ph_grad.calculate(0.5*self.k_bw[1].to('1/m'))
 
-      ro_grad0 = Gradient(t_ref=0.0, scanner=self.scanner)
-      ro_grad0.calculate(-0.5*self.k_bw[0].to('1/m') - 0.5*ro_grad0.scanner.gammabar.to('1/mT/ms')*ro_grad0.G.to('mT/m')*ro_grad0.slope.to('ms'))
+      ro_grad0 = Gradient(time=Quantity(0.0, 'ms'), scanner=self.scanner)
+      ro_grad0.calculate(-0.5*self.k_bw[0].to('1/m') - 0.5*ro_grad0.scanner.gammabar.to('1/mT/ms')*ro_grad0.strength.to('mT/m')*ro_grad0.slope.to('ms'))
 
-      blip_grad = Gradient(t_ref=0.0, scanner=self.scanner)
+      blip_grad = Gradient(time=Quantity(0.0, 'ms'), scanner=self.scanner)
       blip_grad.calculate(-self.k_bw[1].to('1/m')/self.ph_samples)
 
       # Gradient duration is not used because can be shorter than second half of the slice selection gradient
       enc_time = Quantity(self.t_start.m_as('ms') - np.max([ph_grad.dur.m_as('ms'), ro_grad0.dur.m_as('ms')]), 'ms')
       
       # Update timings
-      ph_grad.update_reference(enc_time)
-      ro_grad0.update_reference(enc_time)
+      ph_grad.change_time(enc_time)
+      ro_grad0.change_time(enc_time)
 
       enc_gradients = []
       ro_gradients = [ro_grad0, ]
       ph_gradients = [ph_grad, ]
       for i in range(self.lines_per_shot):
         # Calculate readout gradient
-        ro_grad = Gradient(t_ref=ro_gradients[i].timings[-1], scanner=self.scanner)
+        ro_grad = Gradient(time=ro_gradients[i].timings[-1], scanner=self.scanner)
         ro_grad.calculate((-1)**i*self.k_bw[0].to('1/m'), receiver_bw=self.receiver_bw.to('Hz'), ro_samples=self.ro_samples, ofac=self.oversampling)
         ro_gradients.append(ro_grad)
 
         # Calculate blip gradient
         if self.lines_per_shot > 1 and i < self.lines_per_shot - 1:
-          ref = ro_gradients[-1].t_ref + ro_gradients[-1].dur - 0.5*blip_grad.dur
-          blip_grad = Gradient(t_ref=ref, scanner=self.scanner)
+          ref = ro_gradients[-1].time + ro_gradients[-1].dur - 0.5*blip_grad.dur
+          blip_grad = Gradient(time=ref, scanner=self.scanner)
           blip_grad.calculate(-self.k_bw[1].to('1/m')/self.ph_samples)
           ph_gradients.append(blip_grad)
 
@@ -108,8 +108,8 @@ class CartesianStack(Trajectory):
 
           # Add ADC readout
           for i in range(1, self.lines_per_shot+1):
-            a = [(ro_gradients[i].t_ref + ro_gradients[i].slope).m_as('ms'),
-                (ro_gradients[i].t_ref + ro_gradients[i].slope + ro_gradients[i].lenc).m_as('ms')]
+            a = [(ro_gradients[i].time + ro_gradients[i].slope).m_as('ms'),
+                (ro_gradients[i].time + ro_gradients[i].slope + ro_gradients[i].lenc).m_as('ms')]
             ax5 = ax[0].plot(a, [0, 0], 'm-', linewidth=4, zorder=101)
 
           # Set legend labels
@@ -124,7 +124,7 @@ class CartesianStack(Trajectory):
             ax[i].tick_params('both', length=3, width=1, which='minor', labelsize=16)
             ax[i].minorticks_on()
             ax[i].set_ylabel('$G~\mathrm{(mT/m)}$', fontsize=16)
-            ax[i].axis([0, ro_gradients[-1].t_ref.m_as('ms') + ro_gradients[-1].dur.m_as('ms'), -1.4*self.Gr_max.m_as('mT/m'), 1.4*self.Gr_max.m_as('mT/m')])
+            ax[i].axis([0, ro_gradients[-1].time.m_as('ms') + ro_gradients[-1].dur.m_as('ms'), -1.4*self.Gr_max.m_as('mT/m'), 1.4*self.Gr_max.m_as('mT/m')])
             ax[i].legend(fontsize=14, loc='upper right', ncol=4)
           ax[1].set_xlabel('$t~\mathrm{(ms)}$', fontsize=16)
           plt.tight_layout()
@@ -213,31 +213,31 @@ class RadialStack(Trajectory):
     def kspace_points(self):
       ''' Get kspace points '''
       # k-space positioning gradients
-      ro_grad0 = Gradient(t_ref=0.0, Gr_max=self.Gr_max, Gr_sr=self.Gr_sr)
+      ro_grad0 = Gradient(ref=0.0, Gr_max=self.Gr_max, Gr_sr=self.Gr_sr)
       ro_grad0.calculate(-0.5*self.k_bw[0] - 0.5*ro_grad0._gammabar*ro_grad0._G*ro_grad0.slope)
 
-      blip_grad = Gradient(t_ref=0.0, Gr_max=self.Gr_max, Gr_sr=self.Gr_sr)
+      blip_grad = Gradient(ref=0.0, Gr_max=self.Gr_max, Gr_sr=self.Gr_sr)
       blip_grad.calculate(-self.k_bw[1]/self.ph_samples)
 
       # Gradient duration is not used because can be shorter than second half of the slice selection gradient
       enc_time = (self.G_enc.timings[-1] - ro_grad0.dur).to('ms') 
 
       # Update timings
-      ro_grad0.update_reference(enc_time)
+      ro_grad0.change_ref(enc_time)
 
       enc_gradients = [self.G_enc, ]
       ro_gradients = [ro_grad0, ]
       ph_gradients = []
       for i in range(self.lines_per_shot):
         # Calculate readout gradient
-        ro_grad = Gradient(t_ref=ro_gradients[i].timings[-1], Gr_max=self.Gr_max, Gr_sr=self.Gr_sr)
+        ro_grad = Gradient(time=ro_gradients[i].timings[-1], Gr_max=self.Gr_max, Gr_sr=self.Gr_sr)
         ro_grad.calculate((-1)**i*self.k_bw[0], receiver_bw=self.receiver_bw, ro_samples=self.ro_samples, ofac=self.oversampling)
         ro_gradients.append(ro_grad)
 
         # Calculate blip gradient
         if self.lines_per_shot > 1 and i < self.lines_per_shot - 1:
-          ref = ro_gradients[-1].t_ref + ro_gradients[-1].dur - 0.5*blip_grad.dur
-          blip_grad = Gradient(t_ref=ref, Gr_max=self.Gr_max, Gr_sr=self.Gr_sr)
+          start = ro_gradients[-1].time + ro_gradients[-1].dur - 0.5*blip_grad.dur
+          blip_grad = Gradient(time=start, Gr_max=self.Gr_max, Gr_sr=self.Gr_sr)
           blip_grad.calculate(-self.k_bw[1]/self.ph_samples)
           ph_gradients.append(blip_grad)
 
@@ -263,8 +263,8 @@ class RadialStack(Trajectory):
 
           # Add ADC readout
           for i in range(1, self.lines_per_shot+1):
-            a = [ro_gradients[i].t_ref + ro_gradients[i].slope,
-                ro_gradients[i].t_ref + ro_gradients[i].slope + ro_gradients[i].lenc]
+            a = [ro_gradients[i].ref + ro_gradients[i].slope,
+                ro_gradients[i].ref + ro_gradients[i].slope + ro_gradients[i].lenc]
             ax5 = ax[0].plot(a, [0, 0], 'm-', linewidth=4, zorder=101)
 
           # Set legend labels
@@ -282,7 +282,7 @@ class RadialStack(Trajectory):
             ax[i].tick_params('both', length=3, width=1, which='minor', labelsize=16)
             ax[i].minorticks_on()
             ax[i].set_ylabel('$G~\mathrm{(mT/m)}$', fontsize=16)
-            ax[i].axis([0, ro_gradients[-1].t_ref + ro_gradients[-1].dur, -1.4*self.Gr_max, 1.4*self.Gr_max])
+            ax[i].axis([0, ro_gradients[-1].ref + ro_gradients[-1].dur, -1.4*self.Gr_max, 1.4*self.Gr_max])
             ax[i].legend(fontsize=14, loc='upper right', ncol=4)
           ax[1].set_xlabel('$t~\mathrm{(ms)}$', fontsize=16)
           plt.tight_layout()

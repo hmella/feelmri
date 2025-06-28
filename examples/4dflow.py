@@ -68,7 +68,7 @@ if __name__ == '__main__':
 
   # Define POD object
   dt = parameters.Imaging.TimeSpacing
-  times = np.linspace(0, (phantom.Nfr-1)*dt, phantom.Nfr)
+  times = np.linspace(0, (phantom.Nfr-1)*dt, phantom.Nfr, dtype=np.float32)
   pod_velocity = PODVelocity(time_array=times.m_as('ms'),
                               data=v.m_as('m/ms'),
                               global_to_local=phantom.global_to_local_nodes,
@@ -85,8 +85,10 @@ if __name__ == '__main__':
       return x[:,0] + x[:,1] + x[:,2]
   delta_B0 = spatial(phantom.local_nodes)
   delta_B0 /= np.abs(spatial(phantom.global_nodes).flatten()).max()
-  delta_B0 *= 1.5 * 1e-6           # 1.5 ppm of the main magnetic field
-  delta_omega0 = 2.0 * np.pi * scanner.gammabar.m_as('1/ms/T') * delta_B0
+  delta_B0 *= scanner.field_strength * 1e-6 # 1.5 ppm of the main magnetic field
+
+  # Phase shift in rad/s
+  delta_omega0 = (2.0 * np.pi * scanner.gammabar * delta_B0).to('rad/ms')
 
   # Slice profile
   # The slice profile prepulse is calculated based on a reference RF pulse with
@@ -96,16 +98,23 @@ if __name__ == '__main__':
           alpha=0.46, 
           shape='apodized_sinc', 
           flip_angle=parameters.Imaging.FlipAngle.to('rad'), 
-          t_ref=Q_(0.0,'ms'),
           phase_offset=Q_(-np.pi/2, 'rad'))
   sp = SliceProfile(delta_z=planning.FOV[2].to('m'), 
     profile_samples=100,
     rf=rf,
     dt=Q_(1e-2, 'ms'), 
     plot=False, 
-    bandwidth=Q_(10000, 'Hz'), #'maximum',
-    refocusing_area_frac=0.97657)
+    bandwidth='maximum')
   # sp.optimize(frac_start=0.96, frac_end=0.98, N=100)
+
+  # Create bipolar gradients
+  start = sp.rephasing.time + sp.rephasing.dur
+  bp1 = Gradient(scanner=scanner, time=start)
+  bp2 = bp1.make_bipolar(parameters.VelocityEncoding.VENC)
+
+  # Rotate the bipolar gradients to the desired directions
+  bp1r = bp1.rotate(enc.directions)
+  bp2r = bp2.rotate(enc.directions)
 
   # Create sequence object and solve magnetization
   Mxy_PC = np.zeros([phantom.local_nodes.shape[0], phantom.Nfr, enc.nb_directions], dtype=np.complex64)
@@ -118,23 +127,14 @@ if __name__ == '__main__':
                          M0=1e+9, 
                          T1=parameters.Phantom.T1.to('ms'),
                          T2=parameters.Phantom.T2star.to('ms'), 
-                         delta_B=delta_B0.reshape((-1, 1)),
+                         delta_B=delta_B0.m_as('mT').reshape((-1, 1)),
                          pod_trajectory=pod_velocity)
 
-    # Bipolar gradient
-    t_ref = sp.rephasing.t_ref + sp.rephasing.dur
-    bp1 = Gradient(scanner=scanner, t_ref=t_ref)
-    bp2 = bp1.make_bipolar(parameters.VelocityEncoding.VENC.to('m/s'))
-
-    # Rotate the bipolar gradients to the desired direction
-    bp1_rotated = bp1.rotate(enc.directions[d])
-    bp2_rotated = bp2.rotate(enc.directions[d])
-
-    # Update reference time for second lobe
-    [g.update_reference(g.t_ref - (bp1.dur - g.dur)) for g in bp2_rotated]
+    # Update reference time for second lobe (rotate function keep the time reference of the original gradient)
+    [g.change_time(bp1r[d][0].time + bp1r[d][0].dur) for g in bp2r[d]]
 
     # Imaging block
-    imaging = SequenceBlock(gradients=[sp.dephasing, sp.rephasing] + bp1_rotated + bp2_rotated,
+    imaging = SequenceBlock(gradients=[sp.dephasing,sp.rephasing]+bp1r[d]+bp2r[d],
                             rf_pulses=[sp.rf], 
                             dt_rf=Q_(1e-2, 'ms'), 
                             dt_gr=Q_(1e-2, 'ms'), 
@@ -144,11 +144,11 @@ if __name__ == '__main__':
     dummy.store_magnetization = False
 
     # Add dummy blocks to the sequence to reach steady state
-    time_spacing = parameters.Imaging.TimeSpacing.to('ms') - (imaging.time_extent[1] - sp.rf.t_ref)
+    time_spacing = parameters.Imaging.TimeSpacing - imaging.dur
     for i in range(80):
       seq.add_block(dummy)
       seq.add_block(time_spacing, dt=Q_(1, 'ms'))
-    
+
     # Add and additional block to synchronize the sequence with the cardiac cycle
     seq.add_block(times[-1] - seq.blocks[-1].time_extent[1] % times[-1], dt=Q_(1, 'ms'))
 
@@ -169,7 +169,7 @@ if __name__ == '__main__':
 
   # Generate kspace trajectory
   traj = CartesianStack(FOV = planning.FOV.to('m'),
-    t_start = imaging.time_extent[1] - sp.rf.t_ref,
+    t_start = imaging.time_extent[1] - sp.rf.time,
     res = parameters.Imaging.RES, 
     oversampling = parameters.Imaging.Oversampling, 
     lines_per_shot = parameters.Imaging.LinesPerShot, 
@@ -194,7 +194,7 @@ if __name__ == '__main__':
 
   # Iterate over cardiac phases
   t0 = time.time()
-  for fr in range(phantom.Nfr):
+  for fr in [5]: #range(phantom.Nfr):
 
       # Start time for the frame      
       t0_fr = time.time()
@@ -203,7 +203,7 @@ if __name__ == '__main__':
       pod_velocity.update_timeshift(fr * parameters.Imaging.TimeSpacing.m_as('ms'))
 
       # Generate 4D flow image
-      K[:,:,:,:,fr] = PC(MPI_rank, M, traj.points, traj.times.m_as('ms'), phantom.local_nodes, delta_omega0, T2star.m_as('ms'), Mxy_PC[:, fr, :], pod_velocity)
+      K[:,:,:,:,fr] = PC(MPI_rank, M, traj.points, traj.times.m_as('ms'), phantom.local_nodes, delta_omega0.m_as('rad/ms'), T2star.m_as('ms'), Mxy_PC[:, fr, :], pod_velocity)
 
       if MPI_rank == 0:
         sys.stdout.flush()

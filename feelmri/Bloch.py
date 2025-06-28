@@ -53,13 +53,13 @@ class SequenceBlock:
     # Get time extent depending on gradient or RF timings
     # Get (t_min, t_max) for each gradient
     if self.gradients:
-      time_extent_gr = Q_(np.array([(g.t_ref.m, g.t_ref.m + g.dur.m) for g in self.gradients]), units=self.gradients[0].timings.u)
+      time_extent_gr = Q_(np.array([(g.time.m, (g.time+g.dur).m) for g in self.gradients]), units=self.gradients[0].timings.u)
     else:
       time_extent_gr = Q_(np.array([(0, 0)]), units='ms')
 
     # Get (t_min, t_max) for each rf pulse
     if self.rf_pulses:
-      time_extent_rf = Q_(np.array([(rf.t_ref.m - rf.dur1.m, rf.t_ref.m + rf.dur2.m) for rf in self.rf_pulses]), units=self.rf_pulses[0].t_ref.u)
+      time_extent_rf = Q_(np.array([((rf.time-rf.ref).m, (rf.time-rf.ref+rf.dur).m) for rf in self.rf_pulses]), units=self.rf_pulses[0].ref.u)
     else:
       time_extent_rf = Q_(np.array([(0, 0)]), units='ms')
 
@@ -82,13 +82,14 @@ class SequenceBlock:
     P_d_gr = [(g.timings.m, g.amplitudes.m) for g in self.P_gradients]
     S_d_gr = [(g.timings.m, g.amplitudes.m) for g in self.S_gradients]    
 
-    # Get (t_min, t_ref, t_max) for each rf pulse
+    # Get (t_min, ref, t_max) for each rf pulse
     rf_d = []
     for rf in self.rf_pulses:
-      left  = rf.t_ref.m - 1.05*rf.dur1.m
-      right = rf.t_ref.m + 1.05*rf.dur2.m + self.dt_rf.m
-      time = np.linspace(left, right, int(np.ceil((right - left)/self.dt_rf.m)))
-      rf_d.append((time, rf(time)))
+      eps   = 1e-3 * self.dt_rf  # Small epsilon to avoid numerical issues
+      start = (rf.time - rf.ref - eps).m
+      end   = (rf.time - rf.ref + rf.dur + eps).m
+      t  = np.linspace(start, end, int(np.ceil((end - start)/self.dt_rf.m)))
+      rf_d.append((t, rf(t)))
 
     return rf_d, M_d_gr, P_d_gr, S_d_gr
   
@@ -103,9 +104,9 @@ class SequenceBlock:
 
     # Get RF timings while considering the dt_rf
     if self.rf_pulses:
-        rf_timings = np.concatenate([[rf.t_ref.m - rf.dur1.m, rf.t_ref.m, rf.t_ref.m + rf.dur2.m] for rf in self.rf_pulses])
+        rf_timings = np.concatenate([[(rf.time-rf.ref).m, (rf.time-rf.ref+rf.dur).m] for rf in self.rf_pulses])
         if self.dt_rf > 0:
-            rf_timings = np.concatenate([np.arange(rf.t_ref.m - rf.dur1.m, rf.t_ref.m + rf.dur2.m, self.dt_rf.m) for rf in self.rf_pulses] + [rf_timings])
+            rf_timings = np.concatenate([np.arange((rf.time-rf.ref).m, (rf.time-rf.ref+rf.dur).m, self.dt_rf.m) for rf in self.rf_pulses] + [rf_timings])
     else:
         rf_timings = np.array([])
 
@@ -118,16 +119,16 @@ class SequenceBlock:
 
     return Q_(all_timings, units='ms')
   
-  def update_reference(self, t_ref):
+  def change_time(self, time):
     # Update reference time for each gradient and RF pulse
-    [g.update_reference(g.t_ref + t_ref) for g in self.gradients]
+    [g.change_time(g.time + time) for g in self.gradients]
     self.M_gradients = [g for g in self.gradients if g.axis == 0]
     self.P_gradients = [g for g in self.gradients if g.axis == 1]
     self.S_gradients = [g for g in self.gradients if g.axis == 2]
-    [rf.update_reference(rf.t_ref + t_ref) for rf in self.rf_pulses]
-    self.time_extent[0] += t_ref
-    self.time_extent[1] += t_ref
-    self.discrete_times += t_ref
+    [rf.change_time(rf.time + time) for rf in self.rf_pulses]
+    self.time_extent[0] += time
+    self.time_extent[1] += time
+    self.discrete_times += time
     self.Nb_times = len(self.discrete_times)
 
   def plot(self):
@@ -158,7 +159,7 @@ class Sequence:
     # Add a block to the sequence
     if isinstance(block, SequenceBlock):
       block = block.copy()  # Ensure we work with a copy
-      block.update_reference(self.time_extent[-1].to('ms') - block.time_extent[0].to('ms'))
+      block.change_time(self.time_extent[-1].to('ms') - block.time_extent[0].to('ms'))
       self.blocks = [b for b in self.blocks + [block]]
       self.Nb_blocks = len(self.blocks)
       self.time_extent = self._get_extent()
@@ -167,7 +168,7 @@ class Sequence:
       # If a duration is provided, create a new block with that duration
       if block > Q_(0, 'ms'):
         block = SequenceBlock(dur=block.to('ms'), dt=dt, empty=True, store_magnetization=False)
-        block.update_reference(self.time_extent[-1].to('ms'))
+        block.change_time(self.time_extent[-1].to('ms'))
         self.blocks = [b for b in self.blocks + [block]]
         self.Nb_blocks = len(self.blocks)
         self.time_extent = self._get_extent()
@@ -179,7 +180,7 @@ class Sequence:
     # Update reference time for each block
     for i, block in enumerate(self.blocks):
       shift = block.time_extent[-1].to('ms') + i * self.dt_blocks.to('ms') + self.dt_prep.to('ms')
-      block.update_reference(shift)
+      block.change_time(shift)
 
   def _get_extent(self):
     # Get time extent depending on gradient or RF timings
@@ -224,7 +225,7 @@ class Sequence:
       # Add horizontal lines at zero
       [ax[k].axhline(0, color='k', linestyle='--') for k in range(4)]
 
-      # Set x-limits
+      # Set x- and y-limits
       [ax[k].set_xlim([self.time_extent[0].m, self.time_extent[1].m]) for k in range(4)]
 
       plt.show()

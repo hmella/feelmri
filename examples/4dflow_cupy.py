@@ -65,7 +65,7 @@ if __name__ == '__main__':
   scanner = Scanner(gradient_strength=Q_(parameters.G_max,'mT/m'), gradient_slew_rate=Q_(parameters.G_sr,'mT/m/ms'))
 
   # Slice profile
-  rf = RF(scanner=scanner, NbLobes=[8, 8], alpha=0.46, shape='apodized_sinc', flip_angle=Q_(np.deg2rad(8),'rad') , t_ref=Q_(0.0,'ms'))
+  rf = RF(scanner=scanner, NbLobes=[8, 8], alpha=0.46, shape='apodized_sinc', flip_angle=Q_(np.deg2rad(8),'rad') , ref=Q_(0.0,'ms'))
   sp = SliceProfile(delta_z=Q_(parameters.FOV[2], 'm'), 
     profile_samples=100,
     rf=rf,
@@ -78,7 +78,7 @@ if __name__ == '__main__':
   profile = cp.asarray((np.abs(cp_nodes[:,2].get()) < 0.5*parameters.FOV[2])*sp.interp_profile(cp_nodes[:,2].get()), dtype=cp.complex64).reshape(-1, 1)
 
   # Bipolar gradient
-  bp1 = Gradient(scanner=scanner, t_ref=sp.rf.t_ref + sp.rf.dur2, axis=1)
+  bp1 = Gradient(scanner=scanner, ref=sp.rf.ref + sp.rf.dur2, axis=1)
   bp2 = bp1.make_bipolar(Q_(enc.VENC, 'm/s'))
 
   # Excitation sequence to obtain slice profile
@@ -109,7 +109,7 @@ if __name__ == '__main__':
 
   # Generate kspace trajectory
   traj = CartesianStack(FOV=Q_(parameters.FOV,'m'),
-    t_start=block.time_extent[1] - sp.rf.t_ref,
+    t_start=block.time_extent[1] - sp.rf.ref,
     res=parameters.RES, 
     oversampling=parameters.Oversampling, 
     lines_per_shot=parameters.LinesPerShot, 
