@@ -60,7 +60,7 @@ if __name__ == '__main__':
 
   # Create POD for tissue displacements
   dt = parameters.Imaging.TimeSpacing.to('ms')
-  u_times = np.linspace(0, (phantom.Nfr-1)*dt, phantom.Nfr)
+  u_times = np.linspace(0, (phantom.Nfr-1)*dt, phantom.Nfr, dtype=np.float32)
   pod_trajectory = POD(time_array=u_times.m_as('ms'),
                       data=u,
                       global_to_local=phantom.global_to_local_nodes,
