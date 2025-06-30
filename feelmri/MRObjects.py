@@ -133,7 +133,7 @@ class Gradient:
                             0.0]), self.strength.u)
 
     # Add time reference wrt the sequence object
-    timings += self.time
+    timings += self.time - self.ref
 
     # Define interpolator for gradient evaluation
     interp = interp1d(timings.m, amplitudes.m, kind='linear', fill_value=0.0, bounds_error=False)
@@ -317,8 +317,8 @@ class Gradient:
     ''' Calculate the area of the gradient '''
     # Calculate area
     if t0 is None:
-      t0 = self.time
-    time = np.linspace(t0.m_as('ms'), (self.time + self.dur).m_as('ms'), nb_samples)
+      t0 = self.time - self.ref
+    time = np.linspace(t0.m_as('ms'), (self.time - self.ref + self.dur).m_as('ms'), nb_samples)
     area = np.trapz(self.interpolator(time), time)
 
     return Q_(area, 'mT*ms/m')
