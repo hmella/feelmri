@@ -94,7 +94,8 @@ class POD:
   def __init__(self, time_array: np.ndarray, 
                data: np.ndarray,
                global_to_local: np.ndarray = None,
-               n_modes: int = 5, 
+               n_modes: int = 5,
+               fit_type: str = 'polynomial', 
                taylor_order: int = 10, 
                is_periodic: bool = False,
                timeshift: float = 0.0):
@@ -102,11 +103,13 @@ class POD:
       self.data = data
       self.global_to_local = global_to_local
       self.n_modes = n_modes
+      self.fit_type = fit_type
       self.taylor_order = taylor_order
       self.modes, self.weights = self.calculate_pod(remove_mean=False)
       self.taylor_coefficients = self.fit()
       self.timeshift = timeshift
       self.is_periodic = is_periodic
+      self.fit_type = fit_type
 
   def __repr__(self):
       """ Returns a string representation of the POD object.
@@ -175,10 +178,21 @@ class POD:
   def fit(self):
     """ Fits a Taylor polynomial of order self.order to the weights of the POD modes
     """
-    flat_coefficients = np.zeros((self.taylor_order + 1, self.n_modes), dtype=np.float32)
-    for i in range(self.n_modes):
+    if self.fit_type == 'polynomial':
       # Fit a polynomial of order self.taylor_order to the weights of the i-th mode
-      flat_coefficients[:, i] = np.polynomial.Polynomial.fit(self.time_array, self.weights[:, i], deg=self.taylor_order, domain=[self.time_array[0], self.time_array[-1]]).convert().coef
+      # flat_coefficients = np.polynomial.polynomial.polyfit(self.time_array, self.weights, deg=self.taylor_order)
+      flat_coefficients = np.zeros((self.taylor_order + 1, self.n_modes), dtype=np.float32)
+      for i in range(self.n_modes):
+        # Fit a polynomial of order self.taylor_order to the weights of the i-th mode
+        flat_coefficients[:, i] = np.polynomial.Polynomial.fit(self.time_array, self.weights[:, i], deg=self.taylor_order, domain=[self.time_array[0], self.time_array[-1]]).convert().coef
+
+    elif self.fit_type == 'legendre':
+      # Fit a polynomial of order self.taylor_order to the weights of the i-th mode
+      flat_coefficients = np.polynomial.legendre.legfit(self.time_array, self.weights, deg=self.taylor_order)
+
+    elif self.fit_type == 'hermite':
+      # Evaluate Legendre polynomial at time t
+      flat_coefficients = np.polynomial.hermite.hermfit(self.time_array, self.weights, deg=self.taylor_order)
 
     return flat_coefficients
 
@@ -188,14 +202,22 @@ class POD:
     self.taylor_coefficients has shape (order+1, n_modes).
     Returns array of length n_modes.
     """
-    # start from the highest coefficient row
     coeffs = self.taylor_coefficients
-    weigths = coeffs[-1].copy()           # shape (n_modes,)
-    # Horner: w = (...((a_n * t + a_{n-1}) * t + a_{n-2}) ... ) * t + a_0
-    for c in coeffs[-2::-1]:
-        weigths = weigths * t + c   # still shape (n_modes,)
+    weights = np.zeros([self.n_modes,], dtype=np.float32)
+    if self.fit_type == 'polynomial':
+      # Evaluate polynomial at time t using Horner's method
+      for m in range(self.n_modes):
+        weights[m] = np.polyval(coeffs[::-1, m], t)
+    elif self.fit_type == 'legendre':
+      # Evaluate Legendre polynomial at time t
+      for m in range(self.n_modes):
+        weights[m] = np.polynomial.legendre.legval(t, coeffs[::-1, m])
+    elif self.fit_type == 'hermite':
+      # Evaluate Legendre polynomial at time t
+      for m in range(self.n_modes):
+        weights[m] = np.polynomial.hermite.hermval(t, coeffs[::-1, m])
 
-    return weigths
+    return weights
 
   def _evaluate_trajectory(self, t: float) -> np.ndarray:
     """
@@ -250,7 +272,6 @@ class PODVelocity(POD):
 
     # Evaluate the weights at time t
     weights = t_ro * self._evaluate_weights(t_eff)
-    # MPI_print("(t_ro, t_eff) = ({:.4f}, {:.4f})".format(t_ro, t_eff))
 
     return np.tensordot(self.modes, weights, axes=([2], [0]))
 
