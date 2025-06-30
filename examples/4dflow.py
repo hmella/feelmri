@@ -73,7 +73,7 @@ if __name__ == '__main__':
                               data=v.m_as('m/ms'),
                               global_to_local=phantom.global_to_local_nodes,
                               n_modes=25,
-                              taylor_order=15,
+                              taylor_order=10,
                               is_periodic=True)
 
   # Create scanner object defining the gradient strength, slew rate and giromagnetic ratio
@@ -161,6 +161,16 @@ if __name__ == '__main__':
     Mxy, Mz = solver.solve()
     Mxy_PC[..., d] = Mxy
 
+    # # Export magnetization and displacement for debugging
+    # if d == 0:
+    #   file = XDMFFile('magnetization_{:d}.xdmf'.format(MPI_rank), nodes=phantom.local_nodes, elements={phantom.cell_type: phantom.local_elements})
+    #   for fr in range(Mxy.shape[1]):
+    #     # Write magnetization and displacement at each frame
+    #     t = fr*parameters.Imaging.TimeSpacing.m_as('ms')
+    #     pod_velocity.update_timeshift(t)
+    #     file.write(pointData={'M': np.stack((np.real(Mxy[:,fr]), np.imag(Mxy[:,fr]), Mz[:,fr]), axis=1), 'displacement': pod_velocity(1.715)}, time=t)
+    #   file.close()
+
   # Path to export the generated data
   export_path = Path(script_path/'MRImages/4dflow_{:s}_V{:.0f}.pkl'.format(parameters.Imaging.Sequence, parameters.VelocityEncoding.VENC.m_as('cm/s')))
 
@@ -194,7 +204,7 @@ if __name__ == '__main__':
 
   # Iterate over cardiac phases
   t0 = time.time()
-  for fr in [5]: #range(phantom.Nfr):
+  for fr in range(phantom.Nfr):
 
       # Start time for the frame      
       t0_fr = time.time()
