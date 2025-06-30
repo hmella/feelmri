@@ -236,10 +236,12 @@ if __name__ == '__main__':
   Im = CartesianRecon(K, traj)
 
   # Show reconstruction
-  mag = np.abs(Im[...,0,:])
-  phi_v = np.angle(Im[...,0,:] * np.conj(Im[...,1,:]))
-  phi_0 = np.angle(Im[...,1,:])
-  phi   = np.angle(Im[...,0,:])
   if MPI_rank == 0:
-    plotter = MRIPlotter(images=[mag, phi_v, phi, phi_0], title=['Magnitude', '$\\phi_v$ ', '$\\phi_v + \\phi_0$', '$\\phi_0$'], FOV=planning.FOV.m_as('m'))
+    mag = np.abs(Im[...,0,:])
+    phi_v = np.angle(Im[...,0,:] * np.conj(Im[...,1,:]))
+    phi_0 = np.angle(Im[...,1,:])
+    phi   = np.angle(Im[...,0,:])
+    plotter = MRIPlotter(images=[mag, phi_v, phi, phi_0], 
+                          title=['M', '$\\phi_v$ ', '$\\phi_v + \\phi_0$', '$\\phi_0$'], 
+                          FOV=planning.FOV.m_as('m'))
     plotter.show()
