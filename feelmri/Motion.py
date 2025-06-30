@@ -5,6 +5,7 @@ from collections.abc import Callable
 
 import numpy as np
 from scipy.interpolate import interp1d
+from feelmri.Math import faster_polyval
 from feelmri.MPIUtilities import MPI_rank, MPI_print
 
 
@@ -207,7 +208,7 @@ class POD:
     if self.fit_type == 'polynomial':
       # Evaluate polynomial at time t using Horner's method
       for m in range(self.n_modes):
-        weights[m] = np.polyval(coeffs[::-1, m], t)
+        weights[m] = faster_polyval(coeffs[::-1, m], t)
     elif self.fit_type == 'legendre':
       # Evaluate Legendre polynomial at time t
       for m in range(self.n_modes):
