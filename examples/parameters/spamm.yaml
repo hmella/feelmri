@@ -10,8 +10,8 @@ Imaging:
 PositionEncoding:
   ke: {value: 448.8, unit: "1/m"}
   Directions:
-    dir1: [1.0, 0.0, 0.0]
-    dir2: [0.0, 1.0, 0.0]
+    dir1: [1.0, 1.0, 0.0]
+    dir2: [-1.0, 1.0, 0.0]
 
 # Hardware parameters
 Hardware:

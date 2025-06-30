@@ -65,7 +65,7 @@ if __name__ == '__main__':
                       data=u,
                       global_to_local=phantom.global_to_local_nodes,
                       n_modes=10,
-                      taylor_order=5,
+                      taylor_order=10,
                       is_periodic=True)
   
   # # Define respiratory motion object
@@ -79,8 +79,7 @@ if __name__ == '__main__':
   #                             direction=np.array([0, 1, 0]),
   #                             remove_mean=True)
 
-  # Combine the POD trajectory and the respiratory motion
-  pod_sum = pod_trajectory # + pod_resp_motion
+  pod_sum = pod_trajectory
 
   # Create scanner object defining the gradient strength, slew rate and giromagnetic ratio
   scanner = Scanner(gradient_strength=parameters.Hardware.G_max,
@@ -123,12 +122,13 @@ if __name__ == '__main__':
     # SPAMM preparation block
     rf1 = RF(scanner=scanner, shape='hard', dur=Q_(0.2, 'ms'), flip_angle=Q_(np.deg2rad(90),'rad'), time=Q_(0.0, 'ms'))
 
-    G_tag = Gradient(scanner=scanner, time=rf1.time + rf1.dur, axis=d)
-    G_tag.match_area(Q_(parameters.PositionEncoding.ke.m_as('1/m')/scanner.gamma.m_as('1/mT/ms'), 'mT*ms/m'))
+    G_tag = Gradient(scanner=scanner, time=rf1.time + rf1.dur)
+    G_tag.match_area((parameters.PositionEncoding.ke/scanner.gamma).to('mT*ms/m'))
+    G_tag_list = G_tag.rotate(enc.directions[d])
 
     rf2 = RF(scanner=scanner, shape='hard', dur=Q_(0.2, 'ms'), flip_angle=Q_((-1)**d*np.deg2rad(90),'rad'), time=G_tag.time + G_tag.dur)
 
-    prep = SequenceBlock(gradients=[G_tag], rf_pulses=[rf1, rf2], dt_rf=Q_(1e-2, 'ms'), dt_gr=Q_(1e-2, 'ms'), dt=Q_(1, 'ms'), store_magnetization=False)
+    prep = SequenceBlock(gradients=G_tag_list, rf_pulses=[rf1, rf2], dt_rf=Q_(1e-2, 'ms'), dt_gr=Q_(1e-2, 'ms'), dt=Q_(1, 'ms'), store_magnetization=False)
 
     # Imaging block
     imaging = SequenceBlock(gradients=[sp.dephasing, sp.rephasing], rf_pulses=[sp.rf], dt_rf=Q_(1e-2, 'ms'), dt_gr=Q_(1e-2, 'ms'), dt=Q_(1, 'ms'), store_magnetization=True)
