@@ -1,7 +1,11 @@
+import os
+
 import matplotlib.pyplot as plt
 import numpy as np
 from mpl_toolkits.axes_grid1 import make_axes_locatable
-import os
+
+from feelmri.MPIUtilities import MPI_rank
+
 
 class MRIPlotter:
   """
@@ -21,7 +25,17 @@ class MRIPlotter:
     previous_slice_key (str): Key to go to the previous slice.
   """
 
-  def __init__(self, images=[], FOV=[1, 1, 1], caxis=None, cmap=plt.get_cmap('Greys_r'), title=[], swap_axes=None, shape=None, next_frame_key='d', previous_frame_key='a', next_slice_key='w', previous_slice_key='s'):
+  def __init__(self, images: list = [], 
+               FOV: list | np.ndarray = [1, 1, 1], 
+               caxis: list | np.ndarray = None, 
+               cmap=plt.get_cmap('Greys_r'), 
+               title: list = [], 
+               swap_axes: list = None, 
+               shape: list | np.ndarray = None, 
+               next_frame_key: str = 'd', 
+               previous_frame_key: str = 'a', 
+               next_slice_key: str = 'w', 
+               previous_slice_key: str = 's'):
     """
     Initializes the MRIPlotter with given parameters.
 
@@ -93,8 +107,8 @@ class MRIPlotter:
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
+    # Set the extent for the images based on the field of view
     extent = [0, self._FOV[1], 0, self._FOV[0]]
-    flat_ax = self.ax.flatten()
 
     for i, im in enumerate(self._images):
         num_slices = im.shape[2]
