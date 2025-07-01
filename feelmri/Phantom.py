@@ -197,7 +197,7 @@ class FEMPhantom:
       membership = [0,] * self.global_elements.shape[0]
 
     # Debugging info
-    print("Process {:d} has {:d} elements and {:d} nodes".format(MPI_rank, len(local_elems), local_nodes.shape[0]))
+    print("[FEMPhantom] Process {:d} has {:d} elements and {:d} nodes after mesh distribution".format(MPI_rank, len(local_elems), local_nodes.shape[0]))
 
     # Update mesh parameters
     self.local_elements = local_elems
@@ -217,7 +217,7 @@ class FEMPhantom:
     bmin = np.min(self.global_nodes, axis=0)
     bmax = np.max(self.global_nodes, axis=0)
     if MPI_rank == 0:
-      print('Bounding box: ({:f},{:f},{:f}), ({:f},{:f},{:f})'.format(bmin[0],bmin[1],bmin[2],bmax[0],bmax[1],bmax[2]))
+      print('[FEMPhantom] Bounding box: ({:f},{:f},{:f}), ({:f},{:f},{:f})'.format(bmin[0],bmin[1],bmin[2],bmax[0],bmax[1],bmax[2]))
     return (bmin, bmax)
 
   def read_data(self, fr):
@@ -244,6 +244,44 @@ class FEMPhantom:
     if self.pressure_label in self.point_data:
       self.point_data[self.pressure_label] *= 1.0
 
+  def to_submesh(self, data, local=True):
+    """
+    Convert data defined on the global mesh to the submesh nodes.
+
+    Parameters
+    ----------
+    data : np.ndarray
+        The data to convert, shape (N, M) where N is the number of nodes and M is the number of channels.
+
+    Returns
+    -------
+    np.ndarray
+        The data converted to the submesh nodes.
+    """
+    try:
+      self.mesh_to_submesh_nodes
+    except KeyError:
+      raise ValueError("Submesh not created. Please create a submesh first using `create_submesh`.")
+
+    # Verify data shape
+    point_data = True
+    cell_data = False
+    if data.shape[0] != self.global_nodes_.shape[0]:
+      point_data = False
+      cell_data = True
+      if data.shape[0] != self.global_cells_.shape[0]:
+        raise ValueError("Data shape does not match the mesh nodes or cells.")
+
+    # Main mesh nodes and submesh nodes
+    if point_data:
+      if local:
+        idx = self.global_to_local_nodes
+      else:
+        idx = self.mesh_to_submesh_nodes
+    elif cell_data:
+      raise NotImplementedError("Cell data to submesh conversion is not implemented yet.")
+
+    return data[idx,...]    
 
   def interpolate_to_submesh(self, data, local=True, kernel='linear', neighbors=25):
       """
