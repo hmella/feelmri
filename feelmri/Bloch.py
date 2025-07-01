@@ -53,15 +53,15 @@ class SequenceBlock:
     # Get time extent depending on gradient or RF timings
     # Get (t_min, t_max) for each gradient
     if self.gradients:
-      time_extent_gr = Q_(np.array([(g.time.m, (g.time+g.dur).m) for g in self.gradients]), units=self.gradients[0].timings.u)
+      time_extent_gr = Q_(np.array([(g.time.m, (g.time+g.dur).m) for g in self.gradients], dtype=np.float32), units=self.gradients[0].timings.u)
     else:
-      time_extent_gr = Q_(np.array([(0, 0)]), units='ms')
+      time_extent_gr = Q_(np.array([(0, 0)], dtype=np.float32), units='ms')
 
     # Get (t_min, t_max) for each rf pulse
     if self.rf_pulses:
-      time_extent_rf = Q_(np.array([((rf.time-rf.ref).m, (rf.time-rf.ref+rf.dur).m) for rf in self.rf_pulses]), units=self.rf_pulses[0].ref.u)
+      time_extent_rf = Q_(np.array([((rf.time-rf.ref).m, (rf.time-rf.ref+rf.dur).m) for rf in self.rf_pulses], dtype=np.float32), units=self.rf_pulses[0].ref.u)
     else:
-      time_extent_rf = Q_(np.array([(0, 0)]), units='ms')
+      time_extent_rf = Q_(np.array([(0, 0)], dtype=np.float32), units='ms')
 
     # Time extent
     t_min = np.min([time_extent_gr.m_as('ms').min(axis=0), time_extent_rf.m_as('ms').min(axis=0)])
