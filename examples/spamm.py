@@ -55,8 +55,9 @@ if __name__ == '__main__':
   for fr in range(phantom.Nfr):
     # Read displacement data in frame fr and interpolate to the submesh
     phantom.read_data(fr)
-    u[..., fr] = phantom.interpolate_to_submesh(phantom.point_data['displacement'] @ planning.MPS, local=False)
+    # u[..., fr] = phantom.interpolate_to_submesh(phantom.point_data['displacement'] @ planning.MPS, local=False, neighbors=8)
     # u[..., fr] = phantom.point_data['displacement'] @ planning.MPS
+    u[..., fr] = phantom.to_submesh(phantom.point_data['displacement'] @ planning.MPS, local=False)
 
   # Create POD for tissue displacements
   dt = parameters.Imaging.TimeSpacing.to('ms')

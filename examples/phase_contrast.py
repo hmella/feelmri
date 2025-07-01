@@ -59,7 +59,8 @@ if __name__ == '__main__':
   for fr in range(phantom.Nfr):
     # Read displacement data in frame fr and interpolate to the submesh
     phantom.read_data(fr)
-    v[..., fr] = Q_(phantom.interpolate_to_submesh(phantom.point_data['velocity'] @ planning.MPS, local=False), 'm/s')
+    # v[..., fr] = Q_(phantom.interpolate_to_submesh(phantom.point_data['velocity'] @ planning.MPS, local=False), 'm/s')
+    v[..., fr] = Q_(phantom.to_submesh(phantom.point_data['velocity'] @ planning.MPS, local=False), 'm/s')
 
   # Define POD object
   dt = parameters.Imaging.TimeSpacing
