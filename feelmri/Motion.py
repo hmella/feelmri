@@ -267,6 +267,7 @@ class PODVelocity(POD):
     t_eff = t + self.timeshift  # Apply time shift if necessary
 
     # Check if t is within the bounds of the time array
+    # TODO: verify if this is necessary (t_ro = t?)
     if (t_eff - self.timeshift) <= 0:
       t_ro = t_eff
     else:
