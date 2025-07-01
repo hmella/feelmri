@@ -38,6 +38,16 @@ class get_pybind_include(object):
 
 ext_modules = [
     Pybind11Extension(
+        'feelmri.MathCpp',
+        sources=['feelmri/src/Math.cpp'],
+        include_dirs=[
+            # Path to pybind11 headers
+            get_pybind_include(),
+            '/usr/include/eigen3/',
+        ],
+        language='c++',
+    ),
+    Pybind11Extension(
         'feelmri.FEAssemble',
         sources=['feelmri/src/FEAssemble.cpp'],
         include_dirs=[

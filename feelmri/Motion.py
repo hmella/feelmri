@@ -1,12 +1,13 @@
 # This piece of code was inspired by CMRSim toolbox
 # TODO: add additional information about the original authors and license
-
+import time
 from collections.abc import Callable
 
 import numpy as np
 from scipy.interpolate import interp1d
-from feelmri.Math import faster_polyval
-from feelmri.MPIUtilities import MPI_rank, MPI_print
+
+from feelmri.MathCpp import faster_polyval
+from feelmri.MPIUtilities import MPI_print, MPI_rank
 
 
 class RespiratoryMotion:
@@ -100,8 +101,8 @@ class POD:
                taylor_order: int = 10, 
                is_periodic: bool = False,
                timeshift: float = 0.0):
-      self.time_array = time_array
-      self.data = data
+      self.time_array = time_array  # (t,)
+      self.data = data              # (P, C, t)
       self.global_to_local = global_to_local
       self.n_modes = n_modes
       self.fit_type = fit_type
@@ -141,6 +142,9 @@ class POD:
     :param remove_mean: if True, removes the temporal mean from the data before calculating POD
     :return: tuple of (modes, weights) where modes are the POD modes and weights are the corresponding weights
     """
+    start = time.time()
+    MPI_print(f"[POD] Calculating POD with {self.n_modes} modes and {self.taylor_order} order")
+
     n_tsteps = self.time_array.shape[0]
     flat_sv = self.data.reshape(-1, n_tsteps)
 
@@ -174,6 +178,8 @@ class POD:
     if self.global_to_local is not None:
       phi = phi[self.global_to_local, :, :]
 
+    MPI_print(f"[POD] Finished POD calculation in {time.time() - start:.2f} seconds")
+
     return phi, weights
 
   def fit(self):
@@ -181,7 +187,6 @@ class POD:
     """
     if self.fit_type == 'polynomial':
       # Fit a polynomial of order self.taylor_order to the weights of the i-th mode
-      # flat_coefficients = np.polynomial.polynomial.polyfit(self.time_array, self.weights, deg=self.taylor_order)
       flat_coefficients = np.zeros((self.taylor_order + 1, self.n_modes), dtype=np.float32)
       for i in range(self.n_modes):
         # Fit a polynomial of order self.taylor_order to the weights of the i-th mode
@@ -208,7 +213,7 @@ class POD:
     if self.fit_type == 'polynomial':
       # Evaluate polynomial at time t using Horner's method
       for m in range(self.n_modes):
-        weights[m] = faster_polyval(coeffs[::-1, m], t)
+        weights[m] = faster_polyval(t, coeffs[::-1, m])
     elif self.fit_type == 'legendre':
       # Evaluate Legendre polynomial at time t
       for m in range(self.n_modes):
