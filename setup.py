@@ -39,7 +39,7 @@ class get_pybind_include(object):
 ext_modules = [
     Pybind11Extension(
         'feelmri.MathCpp',
-        sources=['feelmri/src/Math.cpp'],
+        sources=['feelmri/cpp/Math.cpp'],
         include_dirs=[
             # Path to pybind11 headers
             get_pybind_include(),
@@ -49,7 +49,7 @@ ext_modules = [
     ),
     Pybind11Extension(
         'feelmri.FEAssemble',
-        sources=['feelmri/src/FEAssemble.cpp'],
+        sources=['feelmri/cpp/FEAssemble.cpp'],
         include_dirs=[
             # Path to pybind11 headers
             get_pybind_include(),
@@ -60,18 +60,18 @@ ext_modules = [
     ),
     Pybind11Extension(
         'feelmri.BlochSimulator',
-        sources=['feelmri/src/BlochSimulator.cpp'],
+        sources=['feelmri/cpp/BlochSimulator.cpp'],
         include_dirs=[
             # Path to pybind11 headers
             get_pybind_include(),
             '/usr/include/eigen3/',
-            'feelmri/src/'
+            'feelmri/cpp/'
         ],
         language='c++',
     ),
     Pybind11Extension(
         'feelmri.MeshRefinement',
-        sources=['feelmri/src/MeshRefinement.cpp'],
+        sources=['feelmri/cpp/MeshRefinement.cpp'],
         include_dirs=[
             # Path to pybind11 headers
             get_pybind_include(),
@@ -81,31 +81,31 @@ ext_modules = [
     ),
     Pybind11Extension(
         'feelmri.MRIEncoding',
-        ['feelmri/src/MRIEncoding.cpp', 'feelmri/src/Signal.cpp'],
+        ['feelmri/cpp/MRIEncoding.cpp', 'feelmri/cpp/Signal.cpp'],
         include_dirs=[
             # Path to pybind11 headers
             get_pybind_include(),
-            '/usr/include/eigen3/','feelmri/src/'
+            '/usr/include/eigen3/','feelmri/cpp/'
         ],
         language='c++',
     ),
     Pybind11Extension(
         'feelmri.Tagging',
-        ['feelmri/src/Tagging.cpp', 'feelmri/src/Signal.cpp'],
+        ['feelmri/cpp/Tagging.cpp', 'feelmri/cpp/Signal.cpp'],
         include_dirs=[
             # Path to pybind11 headers
             get_pybind_include(),
-            '/usr/include/eigen3/','feelmri/src/'
+            '/usr/include/eigen3/','feelmri/cpp/'
         ],
         language='c++',
     ),
     Pybind11Extension(
         'feelmri.PhaseContrast',
-        sources=['feelmri/src/PhaseContrast.cpp', 'feelmri/src/Signal.cpp'],
+        sources=['feelmri/cpp/PhaseContrast.cpp', 'feelmri/cpp/Signal.cpp'],
         include_dirs=[
             # Path to pybind11 headers
             get_pybind_include(),
-            '/usr/include/eigen3/','feelmri/src/'
+            '/usr/include/eigen3/','feelmri/cpp/'
         ],
         language='c++',
     ),
