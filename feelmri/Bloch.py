@@ -2,15 +2,16 @@ import copy
 import time
 import warnings
 
+import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
 from pint import Quantity as Q_
 
 from feelmri.BlochSimulator import solve_mri
-from feelmri.MPIUtilities import MPI_print, MPI_rank
+from feelmri.Motion import POD
+from feelmri.MPIUtilities import MPI_print, MPI_rank, MPI_comm
 from feelmri.MRObjects import Scanner
 from feelmri.Phantom import FEMPhantom
-from feelmri.Motion import POD
 
 
 class SequenceBlock:
@@ -24,7 +25,7 @@ class SequenceBlock:
     self.dt_gr = dt_gr
     self.dt = dt
     self.dur = dur
-    self.time_extent = self._get_extent()
+    self.time_extent = self._get_extent()    
     self.discrete_times = self._discretization()
     self.Nb_times = len(self.discrete_times)
     self.empty = empty
@@ -85,10 +86,11 @@ class SequenceBlock:
     # Get (t_min, ref, t_max) for each rf pulse
     rf_d = []
     for rf in self.rf_pulses:
-      eps   = 1e-3 * self.dt_rf  # Small epsilon to avoid numerical issues
+      eps   = self.dt_rf  # Small epsilon to avoid numerical issues
       start = (rf.time - rf.ref - eps).m
       end   = (rf.time - rf.ref + rf.dur + eps).m
-      t  = np.linspace(start, end, int(np.ceil((end - start)/self.dt_rf.m)))
+      steps = int(np.ceil((end - start)/self.dt_rf.m))
+      t  = np.linspace(start, end, steps)
       rf_d.append((t, rf(t)))
 
     return rf_d, M_d_gr, P_d_gr, S_d_gr
@@ -131,21 +133,38 @@ class SequenceBlock:
     self.discrete_times += time
     self.Nb_times = len(self.discrete_times)
 
-  def plot(self):
+  def plot(self, tight_layout=True, figsize=None, export_to=None):
     if MPI_rank == 0:
       # Plot RF pulses and MR gradients
       titles = ['RF', 'M', 'P', 'S']
       objects = self._discrete_objects()
 
-      fig, ax = plt.subplots(4, 1)
+      fig, ax = plt.subplots(4, 1, figsize=figsize)
       for i, obj in enumerate(objects):
         for t, amp in obj:
-          ax[i].plot(t, amp)
+          if titles[i] == 'RF':
+            for t, amp in obj:
+              ax[i].plot(t, np.real(amp), label='Real', color='b')
+              ax[i].plot(t, np.imag(amp), label='Imaginary', color='r')
+          else:
+            for t, amp in obj:
+              ax[i].plot(t, amp, color='b')
         ax[i].set_ylabel(titles[i])
-        ax[i].set_xlabel('Time (ms)')
         ax[i].set_xlim([self.time_extent[0].m, self.time_extent[1].m])
-        ax[i].hlines(0, xmin=self.time_extent[0].m, xmax=self.time_extent[1].m, color='k', linestyle='--')
+
+      # Add horizontal lines at zero
+      [ax[k].axhline(0, color=mcolors.CSS4_COLORS['gray'], linestyle='--') for k in range(4)]
+
+      ax[0].legend(['Real', 'Imaginary'], loc='upper right')
+      ax[-1].set_xlabel('Time (ms)')
+      if tight_layout: 
+        plt.tight_layout()
+      if export_to is not None:
+        plt.savefig(export_to, bbox_inches='tight')
       plt.show()
+
+    # Synchronize all processes
+    MPI_comm.Barrier()
 
 
 class Sequence:
@@ -153,6 +172,7 @@ class Sequence:
     self.blocks = blocks
     self.Nb_blocks = len(self.blocks)
     self.time_extent = self._get_extent()
+    self.dur = self.time_extent[1] - self.time_extent[0]
     self.non_empty = [~block.empty for block in self.blocks if block is not None]
 
   def add_block(self, block: SequenceBlock | Q_, dt: Q_ = Q_(10, 'ms')):
@@ -163,6 +183,7 @@ class Sequence:
       self.blocks = [b for b in self.blocks + [block]]
       self.Nb_blocks = len(self.blocks)
       self.time_extent = self._get_extent()
+      self.dur = self.time_extent[1] - self.time_extent[0]
       self.non_empty.append(not block.empty)
     elif isinstance(block, Q_):
       # If a duration is provided, create a new block with that duration
@@ -172,6 +193,7 @@ class Sequence:
         self.blocks = [b for b in self.blocks + [block]]
         self.Nb_blocks = len(self.blocks)
         self.time_extent = self._get_extent()
+        self.dur = self.time_extent[1] - self.time_extent[0]
         self.non_empty.append(not block.empty)
     else:
       warnings.warn("Only SequenceBlock or Quantity instances can be added to the sequence.")
@@ -198,37 +220,50 @@ class Sequence:
 
     return (Q_(t_min, 'ms'), Q_(t_max, 'ms'))
   
-  def plot(self):
+  def plot(self, blocks=None, tight_layout=True, figsize=None, export_to=None):
     if MPI_rank == 0:
       # Plot RF pulses and MR gradients
       titles = ['RF', 'M', 'P', 'S']
-      discrete_blocks = [block._discrete_objects() for block in self.blocks]
-      extents = [block.time_extent for block in self.blocks]
+      if blocks is None: # Plot all
+        discrete_blocks = [block._discrete_objects() for block in self.blocks]
+        extents = [block.time_extent for block in self.blocks]
+      else:            # Plot selected blocks
+        discrete_blocks = [block._discrete_objects() for block in self.blocks[blocks]]
+        extents = [block.time_extent for block in self.blocks[blocks]]
 
-      fig, ax = plt.subplots(4, 1)
+
+      fig, ax = plt.subplots(4, 1, figsize=figsize)
       for i, objects in enumerate(discrete_blocks):
         for j, obj in enumerate(objects):
           if titles[j] == 'RF':
             for t, amp in obj:
-              ax[j].plot(t, np.real(amp))
-              ax[j].plot(t, np.imag(amp))
+              ax[j].plot(t, np.real(amp), label='Real', color='b')
+              ax[j].plot(t, np.imag(amp), label='Imaginary', color='r')
           else:
             for t, amp in obj:
-              ax[j].plot(t, amp)
+              ax[j].plot(t, amp, color='b')
           ax[j].set_ylabel(titles[j])
-          ax[j].set_xlabel('Time (ms)')
 
         # Add vertical lines for block extents
-        [ax[k].axvline(extents[i][0].m, color='b', linestyle='-.') for k in range(4)]
-        [ax[k].axvline(extents[i][1].m, color='r', linestyle='--') for k in range(4)]
+        [ax[k].axvline(extents[i][0].m, color=mcolors.CSS4_COLORS['pink'], linestyle=':') for k in range(4)]
+        [ax[k].axvline(extents[i][1].m, color=mcolors.CSS4_COLORS['pink'], linestyle='--') for k in range(4)]
 
       # Add horizontal lines at zero
-      [ax[k].axhline(0, color='k', linestyle='--') for k in range(4)]
+      [ax[k].axhline(0, color=mcolors.CSS4_COLORS['gray'], linestyle='--') for k in range(4)]
 
       # Set x- and y-limits
-      [ax[k].set_xlim([self.time_extent[0].m, self.time_extent[1].m]) for k in range(4)]
+      [ax[k].set_xlim([extents[0][0].m, extents[-1][1].m]) for k in range(4)]
 
+      ax[0].legend(['Real', 'Imaginary'], loc='upper right')
+      ax[-1].set_xlabel('Time (ms)')
+      if tight_layout:
+        plt.tight_layout()
+      if export_to is not None:
+        plt.savefig(export_to, bbox_inches='tight')
       plt.show()
+
+    # Synchronize all processes
+    MPI_comm.Barrier()
 
 
 class BlochSolver:
@@ -253,10 +288,12 @@ class BlochSolver:
     self.initial_Mxy = initial_Mxy * ones.astype(np.complex64)
     self.initial_Mz = initial_Mz * ones if initial_Mz is not None else M0 * ones
     self.pod_trajectory = pod_trajectory
+    # print("dsa 1: ", self.initial_Mxy.dtype)
+    # print("dsa 2: ", self.initial_Mz.dtype)
 
   def solve(self, start: int = 0, end: int = None):
     # Current machine time
-    t0 = time.time()
+    t0 = time.perf_counter()
 
     # Phantom position
     x = self.phantom.local_nodes
@@ -267,7 +304,7 @@ class BlochSolver:
     if end is None:
       end = self.sequence.Nb_blocks
     blocks = self.sequence.blocks[start:end]
-    MPI_print(f"[BlochSolver] Solving sequence blocks {start} to {end-1} ({len(blocks)} blocks).")
+    # MPI_print(f"[BlochSolver] Solving sequence blocks {start} to {end-1} ({len(blocks)} blocks).")
 
     # Dimensions
     nb_nodes  = x.shape[0]
@@ -296,7 +333,7 @@ class BlochSolver:
 
       # Discrete time points and time intervals
       discrete_times = block._discretization().m_as('ms')
-      dt = np.diff(discrete_times, prepend=0)
+      dt = np.diff(discrete_times, prepend=0).astype(np.float32)
 
       # Precompute RF and gradients
       rf_all, G_all = [], []
@@ -305,14 +342,40 @@ class BlochSolver:
           rf_all.append(rf)
           G_all.append([m_gr, p_gr, s_gr])
 
-      rf_all = np.array(rf_all)  # shape (n_time,)
-      G_all = np.array(G_all)    # shape (n_time, 3)
+      rf_all = np.array(rf_all, dtype=np.complex64)  # shape (n_time,)
+      G_all = np.array(G_all, dtype=np.float32)      # shape (n_time, 3)
 
       # Indicator array
-      regime_idx = (np.abs(rf_all) != 0.0).astype(int)
+      regime_idx = (np.abs(rf_all) != 0.0).astype(np.int32)
 
       # Solve
+      # MPI_print(0, x.dtype)
+      # MPI_print(1, T1.dtype)
+      # MPI_print(2, T2.dtype)
+      # MPI_print(3, self.delta_B.dtype)
+      # MPI_print(4, rf_all.dtype)
+      # MPI_print(5, G_all.dtype)
+      # MPI_print(6, dt.dtype)
+      # MPI_print(7, regime_idx.dtype)
+      # MPI_print(8, self.initial_Mxy.dtype)
+      # MPI_print(9, self.initial_Mz.dtype)
+      # if self.pod_trajectory is not None:
+      #   MPI_print(10,self.pod_trajectory(0).dtype)
+
+      # MPI_print(0, type(x))
+      # MPI_print(1, type(T1))
+      # MPI_print(2, type(T2))
+      # MPI_print(3, type(self.delta_B))
+      # MPI_print(4, type(rf_all))
+      # MPI_print(5, type(G_all))
+      # MPI_print(6, type(dt))
+      # MPI_print(7, type(regime_idx))
+      # MPI_print(8, type(self.initial_Mxy))
+      # MPI_print(9, type(self.initial_Mz))
+      # MPI_print(10,type(self.pod_trajectory(0)))
       Mxy_, Mz_ = solve_mri(x, T1, T2, self.delta_B, self.M0, gamma, rf_all, G_all, dt, regime_idx, self.initial_Mxy, self.initial_Mz, self.pod_trajectory)
+      # print(11, Mxy_.dtype)
+      # print(12, Mz_.dtype)
 
       # Update magnetizations
       Mxy[:, i] = Mxy_[:, -1]
@@ -328,10 +391,13 @@ class BlochSolver:
       self.initial_Mz = Mz_[:, -1]
 
     # Print elapsed time
-    MPI_print('[BlochSolver] Elapsed time for solving the sequence: {:.2f} s'.format(time.time() - t0))
+    # MPI_print('[BlochSolver] Elapsed time for solving the sequence: {:.2f} s'.format(time.perf_counter() - t0))
 
-    # Reset POD trajectory time shift
-    if self.pod_trajectory is not None:
-      self.pod_trajectory.update_timeshift(0.0)
+    # # Reset POD trajectory time shift
+    # if self.pod_trajectory is not None:
+    #   self.pod_trajectory.update_timeshift(0.0)
+
+    # Synchronize all processes
+    MPI_comm.Barrier()
 
     return Mxy[:, store_indices], Mz[:, store_indices]
