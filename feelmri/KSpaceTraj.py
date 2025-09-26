@@ -2,7 +2,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from pint import Quantity
 
-from feelmri.MPIUtilities import MPI_rank, scatterKspace
+from feelmri.MPIUtilities import MPI_comm, MPI_rank, scatterKspace
 from feelmri.MRObjects import Gradient, Scanner
 from feelmri.Units import *
 
@@ -31,7 +31,7 @@ class Trajectory:
     self.kx_extent = (np.array([0, self.ro_samples - 1]) - self.ro_samples // 2) * self.k_spa[0] + float((self.res[0] % 2 != 0)) * self.k_spa[0]
     self.ky_extent = (np.array([0, self.ph_samples - 1]) - self.ph_samples // 2) * self.k_spa[1]
     self.kz_extent = (np.array([0, self.slices - 1]) - self.slices // 2) * self.k_spa[2]
-    self.t_start = t_start
+    self.t_start = t_start.astype(dtype)
     self.plot_seq = plot_seq
     self.receiver_bw = receiver_bw          # [Hz]
     self.MPS_ori = MPS_ori.astype(dtype)  # orientation
@@ -41,7 +41,36 @@ class Trajectory:
   def check_ph_enc_lines(self, ph_samples):
     ''' Verify if the number of lines in the phase encoding direction
     satisfies the multishot factor '''
-    return int(self.lines_per_shot * (ph_samples // self.lines_per_shot))
+    return np.int32(self.lines_per_shot * (ph_samples // self.lines_per_shot))
+  
+  def plot_trajectory(self, figsize=(12, 5), tight_layout=True, export_to=None):
+    ''' Show kspace points and time map'''
+    if MPI_rank == 0:
+      # plt.rcParams['text.usetex'] = True
+      # plt.rcParams.update({'font.size': 16})
+
+      # Plot kspace locations and times
+      fig, ax = plt.subplots(1, 2, figsize=figsize)
+      for shot in self.shots:
+        kxx = np.concatenate((np.array([0]), self.points[0][:,shot,0].flatten('F')))
+        kyy = np.concatenate((np.array([0]), self.points[1][:,shot,0].flatten('F')))
+        ax[0].plot(kxx,kyy)
+      ax[0].set_xlabel('$k_x ~(1/m)$')
+      ax[0].set_ylabel('$k_y ~(1/m)$')
+
+      im = ax[1].scatter(self.points[0][:,:,0], self.points[1][:,:,0], c=self.times[:,:,0].m_as('ms'), s=2.5, cmap='turbo')
+      ax[1].set_xlabel('$k_x ~(1/m)$')
+      ax[1].set_yticklabels([])
+      if tight_layout:
+        plt.tight_layout()
+      cbar = fig.colorbar(im, orientation='vertical', ax=ax)
+      cbar.ax.set_title('Time [ms]')
+      if export_to is not None:
+        plt.savefig(export_to, bbox_inches='tight')
+      plt.show()
+
+    # Synchronize all processes
+    MPI_comm.Barrier()
 
 # CartesianStack trajectory
 class CartesianStack(Trajectory):
@@ -130,6 +159,9 @@ class CartesianStack(Trajectory):
           plt.tight_layout()
           plt.show()
 
+        # Synchronize all processes
+        MPI_comm.Barrier()
+
       # Time needed to acquire one line
       # It depends on the kspcae bandwidth, the gyromagnetic constant, and
       # the maximun gradient amplitude
@@ -178,34 +210,13 @@ class CartesianStack(Trajectory):
 
       return (kspace, Quantity(t, 'ms'))
 
-    def plot_trajectory(self):
-      ''' Show kspace points and time map'''
-      if MPI_rank == 0:
-        # plt.rcParams['text.usetex'] = True
-        plt.rcParams.update({'font.size': 16})
-
-        # Plot kspace locations and times
-        fig, ax = plt.subplots(1, 2, figsize=(12, 5))
-        for shot in self.shots:
-          kxx = np.concatenate((np.array([0]), self.points[0][:,shot,0].flatten('F')))
-          kyy = np.concatenate((np.array([0]), self.points[1][:,shot,0].flatten('F')))
-          ax[0].plot(kxx,kyy)
-        ax[0].set_xlabel('$k_x ~(1/m)$')
-        ax[0].set_ylabel('$k_y ~(1/m)$')
-
-        im = ax[1].scatter(self.points[0][:,:,0], self.points[1][:,:,0], c=self.times.m_as('ms'), s=2.5, cmap='turbo')
-        ax[1].set_xlabel('$k_x ~(1/m)$')
-        ax[1].set_yticklabels([])
-        fig.tight_layout()
-        cbar = fig.colorbar(im, orientation='vertical', ax=ax)
-        cbar.ax.set_title('Time [ms]')
-        plt.show()
 
 
 # Radial trajectory
 class RadialStack(Trajectory):
-    def __init__(self, *args, spokes=20, **kwargs):
+    def __init__(self, golden_angle=False, *args, **kwargs):
       super().__init__(*args, **kwargs)
+      self.golden_angle = golden_angle
       self.ph_samples = self.check_ph_enc_lines(self.ph_samples)
       self.nb_shots = self.ph_samples // self.lines_per_shot
       (self.points, self.times) = self.kspace_points()
@@ -213,32 +224,40 @@ class RadialStack(Trajectory):
     def kspace_points(self):
       ''' Get kspace points '''
       # k-space positioning gradients
-      ro_grad0 = Gradient(ref=0.0, Gr_max=self.Gr_max, Gr_sr=self.Gr_sr)
-      ro_grad0.calculate(-0.5*self.k_bw[0] - 0.5*ro_grad0._gammabar*ro_grad0._G*ro_grad0.slope)
+      ph_grad = Gradient(time=Quantity(0.0, 'ms'), scanner=self.scanner)
+      ph_grad.calculate(0.5*self.k_bw[1].to('1/m'))
 
-      blip_grad = Gradient(ref=0.0, Gr_max=self.Gr_max, Gr_sr=self.Gr_sr)
-      blip_grad.calculate(-self.k_bw[1]/self.ph_samples)
+
+      ro_grad0 = Gradient(time=Quantity(0.0, 'ms'), scanner=self.scanner)
+      blip_grad = Gradient(time=Quantity(0.0, 'ms'), scanner=self.scanner)
+      if self.golden_angle:
+        blip_grad.calculate(-self.k_bw[0].to('1/m')/self.ro_samples)
+        ro_grad0 = blip_grad.__copy__()
+      else:
+        ro_grad0.calculate(-0.5*self.k_bw[0].to('1/m') - 0.5*ro_grad0.scanner.gammabar.to('1/mT/ms')*ro_grad0.strength.to('mT/m')*ro_grad0.slope.to('ms'))
+        blip_grad.calculate(-self.k_bw[1].to('1/m')/self.ph_samples)
 
       # Gradient duration is not used because can be shorter than second half of the slice selection gradient
-      enc_time = (self.G_enc.timings[-1] - ro_grad0.dur).to('ms') 
-
+      enc_time = Quantity(self.t_start.m_as('ms') - np.max([ph_grad.dur.m_as('ms'), ro_grad0.dur.m_as('ms')]), 'ms')
+      
       # Update timings
-      ro_grad0.change_ref(enc_time)
+      ph_grad.change_time(enc_time)
+      ro_grad0.change_time(enc_time)
 
-      enc_gradients = [self.G_enc, ]
+      enc_gradients = []
       ro_gradients = [ro_grad0, ]
-      ph_gradients = []
+      ph_gradients = [ph_grad, ]
       for i in range(self.lines_per_shot):
         # Calculate readout gradient
-        ro_grad = Gradient(time=ro_gradients[i].timings[-1], Gr_max=self.Gr_max, Gr_sr=self.Gr_sr)
-        ro_grad.calculate((-1)**i*self.k_bw[0], receiver_bw=self.receiver_bw, ro_samples=self.ro_samples, ofac=self.oversampling)
+        ro_grad = Gradient(time=ro_gradients[i].timings[-1], scanner=self.scanner)
+        ro_grad.calculate((-1)**i*self.k_bw[0].to('1/m'), receiver_bw=self.receiver_bw.to('Hz'), ro_samples=self.ro_samples, ofac=self.oversampling)
         ro_gradients.append(ro_grad)
 
         # Calculate blip gradient
         if self.lines_per_shot > 1 and i < self.lines_per_shot - 1:
-          start = ro_gradients[-1].time + ro_gradients[-1].dur - 0.5*blip_grad.dur
-          blip_grad = Gradient(time=start, Gr_max=self.Gr_max, Gr_sr=self.Gr_sr)
-          blip_grad.calculate(-self.k_bw[1]/self.ph_samples)
+          ref = ro_gradients[-1].time + ro_gradients[-1].dur - 0.5*blip_grad.dur
+          blip_grad = Gradient(time=ref, scanner=self.scanner)
+          blip_grad.calculate(-self.k_bw[1].to('1/m')/self.ph_samples)
           ph_gradients.append(blip_grad)
 
       if self.plot_seq:
@@ -250,29 +269,26 @@ class RadialStack(Trajectory):
 
           # Phase encoding gradients
           for gr in ph_gradients:
-            ax1 = ax[1].plot(gr.timings, gr.amplitudes, 'r-', linewidth=2)
+            ax1 = ax[1].plot(gr.timings.m_as('ms'), gr.amplitudes.m_as('mT/m'), 'r-', linewidth=2)
 
           # Readout gradients
           for gr in ro_gradients:
-            ax2 = ax[0].plot(gr.timings, gr.amplitudes, 'b-', linewidth=2)
+            ax2 = ax[0].plot(gr.timings.m_as('ms'), gr.amplitudes.m_as('mT/m'), 'b-', linewidth=2)
 
           # Encoding gradients
           for gr in enc_gradients:
-            ax3 = ax[0].plot(gr.timings, gr.amplitudes, 'k--', linewidth=3, zorder=100)
-            ax4 = ax[1].plot(gr.timings, gr.amplitudes, 'k--', linewidth=3, zorder=100)
+            ax3 = ax[0].plot(gr.timings.m_as('ms'), gr.amplitudes.m_as('mT/m'), 'k--', linewidth=3, zorder=100)
+            ax4 = ax[1].plot(gr.timings.m_as('ms'), gr.amplitudes.m_as('mT/m'), 'k--', linewidth=3, zorder=100)
 
           # Add ADC readout
           for i in range(1, self.lines_per_shot+1):
-            a = [ro_gradients[i].ref + ro_gradients[i].slope,
-                ro_gradients[i].ref + ro_gradients[i].slope + ro_gradients[i].lenc]
+            a = [(ro_gradients[i].time + ro_gradients[i].slope).m_as('ms'),
+                (ro_gradients[i].time + ro_gradients[i].slope + ro_gradients[i].lenc).m_as('ms')]
             ax5 = ax[0].plot(a, [0, 0], 'm-', linewidth=4, zorder=101)
 
           # Set legend labels
           ax1[0].set_label('PH')
           ax2[0].set_label('RO')
-          if self.G_enc.Gr_max != 0:
-            ax3[0].set_label('ENC')
-            ax4[0].set_label('ENC')
           ax5[0].set_label('ADC')
 
           # Format plots
@@ -282,22 +298,25 @@ class RadialStack(Trajectory):
             ax[i].tick_params('both', length=3, width=1, which='minor', labelsize=16)
             ax[i].minorticks_on()
             ax[i].set_ylabel('$G~\mathrm{(mT/m)}$', fontsize=16)
-            ax[i].axis([0, ro_gradients[-1].ref + ro_gradients[-1].dur, -1.4*self.Gr_max, 1.4*self.Gr_max])
+            ax[i].axis([0, ro_gradients[-1].time.m_as('ms') + ro_gradients[-1].dur.m_as('ms'), -1.4*self.Gr_max.m_as('mT/m'), 1.4*self.Gr_max.m_as('mT/m')])
             ax[i].legend(fontsize=14, loc='upper right', ncol=4)
           ax[1].set_xlabel('$t~\mathrm{(ms)}$', fontsize=16)
           plt.tight_layout()
           plt.show()
 
+        # Synchronize all processes
+        MPI_comm.Barrier()
 
       # Time needed to acquire one line
-      dt_line = (self.k_bw[0]*2*np.pi)/(self._gamma*self._Gr_max)
-      dt = np.linspace(0.0, dt_line, self.ro_samples)
+      # It depends on the kspcae bandwidth, the gyromagnetic constant, and
+      # the maximun gradient amplitude
+      dt = np.linspace(0.0, ro_grad.lenc.m_as('ms'), self.ro_samples)
 
       # kspace locations
       # kx = np.linspace(self.kx_extent[0], self.kx_extent[1], self.ro_samples)
-      kx = np.linspace(0, self.kx_extent[1], self.ro_samples)
+      kx = np.linspace(0, self.kx_extent[1].m_as('1/m'), self.ro_samples)
       ky = np.zeros(kx.shape)
-      kz = np.linspace(self.kz_extent[0], self.kz_extent[1], self.slices)
+      kz = np.linspace(self.kz_extent[0].m_as('1/m'), self.kz_extent[1].m_as('1/m'), self.slices)
 
       kspace = (np.zeros([self.ro_samples, self.ph_samples, self.slices],     
                 dtype=self.dtype),
@@ -333,9 +352,9 @@ class RadialStack(Trajectory):
 
           # Update timings
           if idx == 0:
-            t[::ro,ph,0] = enc_time + ro_grad0.dur + ro_grad.slope + dt
+            t[::ro,ph,0] = enc_time.m_as('ms') + ro_grad0.dur.m_as('ms') + ro_grad.slope.m_as('ms') + dt
           else:
-            t[::ro,ph,0] = t[:,shot[idx-1]].max() + ro_grad.slope + ro_grad.slope + dt[::ro]
+            t[::ro,ph,0] = t[:,shot[idx-1]].max() + ro_grad.slope.m_as('ms') + ro_grad.slope.m_as('ms') + dt[::ro]
 
       # Fill kz coordinates
       for s in range(self.slices):
@@ -345,30 +364,8 @@ class RadialStack(Trajectory):
       # Calculate echo time
       self.echo_time = (enc_time + ro_grad0.dur + 0.5*self.lines_per_shot*ro_grad.dur).to('ms')
 
-      return (kspace, t)
+      return (kspace, Quantity(t, 'ms'))
 
-    def plot_trajectory(self):
-      ''' Show kspace points and time map'''
-      if MPI_rank == 0:
-        # plt.rcParams['text.usetex'] = True
-        plt.rcParams.update({'font.size': 16})
-
-        # Plot kspace locations and times
-        fig, ax = plt.subplots(1, 2, figsize=(12, 5))
-        for shot in self.shots:
-          kxx = np.concatenate((np.array([0]), self.points[0][:,shot,0].flatten('F')))
-          kyy = np.concatenate((np.array([0]), self.points[1][:,shot,0].flatten('F')))
-          ax[0].plot(kxx,kyy)
-        ax[0].set_xlabel('$k_x ~(1/m)$')
-        ax[0].set_ylabel('$k_y ~(1/m)$')
-
-        im = ax[1].scatter(self.points[0][:,:,0],self.points[1][:,:,0],c=self.times,s=2.5,cmap='turbo')
-        ax[1].set_xlabel('$k_x ~(1/m)$')
-        ax[1].set_yticklabels([])
-        fig.tight_layout()
-        cbar = fig.colorbar(im, orientation='vertical', ax=ax)
-        cbar.ax.set_title('Time [ms]')
-        plt.show()
 
 
 # Spiral trajectory
@@ -435,17 +432,21 @@ class SpiralStack(Trajectory):
     def plot_trajectory(self):
       ''' Show kspace points '''
       # Plot kspace locations and times
-      fig, axs = plt.subplots(1, 2, figsize=(10, 5))
-      axs[0].plot(self.points[0].flatten('F'),self.points[1].flatten('F'))
-      im = axs[1].scatter(self.points[0],self.points[1],c=self.times,s=1.5)
-      axs[0].set_xlabel('k_x (1/m)')
-      axs[0].set_ylabel('k_y (1/m)')
-      axs[1].set_xlabel('k_x (1/m)')
-      axs[1].set_ylabel('k_y (1/m)')
-      cbar = fig.colorbar(im, ax=axs[1])
-      cbar.ax.tick_params(labelsize=8) 
-      cbar.ax.set_title('Time [ms]',fontsize=8)
-      plt.show()
+      if MPI_rank == 0:
+        fig, axs = plt.subplots(1, 2, figsize=(10, 5))
+        axs[0].plot(self.points[0].flatten('F'),self.points[1].flatten('F'))
+        im = axs[1].scatter(self.points[0],self.points[1],c=self.times,s=1.5)
+        axs[0].set_xlabel('k_x (1/m)')
+        axs[0].set_ylabel('k_y (1/m)')
+        axs[1].set_xlabel('k_x (1/m)')
+        axs[1].set_ylabel('k_y (1/m)')
+        cbar = fig.colorbar(im, ax=axs[1])
+        cbar.ax.tick_params(labelsize=8) 
+        cbar.ax.set_title('Time [ms]',fontsize=8)
+        plt.show()
+
+      # Synchronize all processes
+      MPI_comm.Barrier()
 
 
 def SpiralCalculator():
