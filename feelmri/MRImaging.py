@@ -30,8 +30,8 @@ class Bloch:
 
     # Bloch equations
     dMxdt = dw*M[1] - self.gamma*np.imag(self.B1e(t))*M[2]
-    dMydt = self.gamma*np.real(self.B1e(t))*M[2] - dw*M[0]
-    dMzdt = -self.gamma*np.real(self.B1e(t))*M[1]
+    dMydt = -dw*M[0] + self.gamma*np.real(self.B1e(t))*M[2] 
+    dMzdt = self.gamma*np.imag(self.B1e(t))*M[0] - self.gamma*np.real(self.B1e(t))*M[1]
 
     return np.array([dMxdt, dMydt, dMzdt]).reshape((3,))
 
@@ -89,7 +89,7 @@ class SliceProfile:
     calculate(y0=np.array([0,0,1]).reshape((3,))):
       Calculates the slice profile by solving the Bloch equations.
   """
-  def __init__(self, z0=Q_(0.0,'m'), delta_z=Q_(0.008,'m'), bandwidth='maximum', rf=RF(), dt=Q_(1e-4,'ms'), profile_samples=150, plot=False, small_angle=False, refocusing_area_frac=1, scanner=Scanner(), dtype=np.float32):
+  def __init__(self, z0=Q_(0.0,'m'), delta_z=Q_(0.008,'m'), bandwidth='maximum', rf=RF(), dt=Q_(1e-4,'ms'), profile_samples=150, plot=False, small_angle=False, refocusing_area_frac=1, scanner=Scanner(), solve_profile=False, dtype=np.float32):
     self.z0 = z0
     self.delta_z = delta_z
     self.rf = rf
@@ -99,6 +99,7 @@ class SliceProfile:
     self.small_angle = small_angle
     self.refocusing_area_frac = refocusing_area_frac
     self.scanner = scanner
+    self.solve_profile = solve_profile
     self.bandwidth = self._check_bandwidth(bandwidth)
     self.dtype = dtype
     self.interp_profile = self.calculate()
@@ -191,6 +192,7 @@ class SliceProfile:
                dur=half1+half2, 
                ref=half1,
                time=self.rf.time,
+               nb_samples=self.rf.nb_samples,
                phase_offset=self.rf.phase_offset,
                frequency_offset=self.rf.frequency_offset)
 
@@ -222,7 +224,7 @@ class SliceProfile:
                          time=rf_ss.time.to('ms'), 
                          axis=2)
     rephasing = Gradient(scanner=self.scanner, 
-                         time=dephasing.timings[-2].to('ms'),
+                         time=dephasing.timings[-1].to('ms'),
                          axis=2)
 
     # Change rf start time to match the gradients
@@ -247,29 +249,35 @@ class SliceProfile:
     z_max = self.z0 + 2*self.delta_z
     z_arr = np.linspace(z_min.m_as('m'), z_max.m_as('m'), self.profile_samples)
 
-    # Bloch equation
-    bloch = Bloch(gamma=self.scanner.gamma.m_as('rad/mT/ms'), z0=self.z0.m_as('m'), eval_gradient=ss_gradient, B1e=rf_ss, small_angle=self.small_angle)
+    if self.solve_profile:
+      # Bloch equation
+      bloch = Bloch(gamma=self.scanner.gamma.m_as('rad/mT/ms'), z0=self.z0.m_as('m'), eval_gradient=ss_gradient, B1e=rf_ss, small_angle=self.small_angle)
 
-    # Solve loop
-    M = np.zeros([3, len(z_arr)])
-    for (i, z) in enumerate(z_arr):
+      # Solve loop
+      M = np.zeros([3, len(z_arr)])
+      for (i, z) in enumerate(z_arr):
 
-      # Solve
-      bloch.z = z
-      solver = RK45(bloch, t0.m, y0, t_bound.m, vectorized=False, first_step=self.dt.m_as('ms'), max_step=100*self.dt.m_as('ms'))
+        # Solve
+        bloch.z = z
+        solver = RK45(bloch, t0.m, y0, t_bound.m, vectorized=False, first_step=self.dt.m_as('ms'), max_step=100*self.dt.m_as('ms'))
 
-      # collect data
-      t  = [t0.m,]
-      B1 = [rf_ss(t0.m),]
-      while solver.status not in ['finished','failed']:
-        # get solution step state
-        solver.step()
-        t.append(solver.t)
-        B1.append(rf_ss(t[-1]))
+        # collect data
+        t  = [t0.m,]
+        B1 = [rf_ss(t0.m),]
+        while solver.status not in ['finished','failed']:
+          # get solution step state
+          solver.step()
+          t.append(solver.t)
+          B1.append(rf_ss(t[-1]))
 
-      M[:,i] = solver.y
-    t  = np.array(t)
-    B1 = np.array(B1)
+        M[:,i] = solver.y
+      t  = np.array(t)
+      B1 = np.array(B1)
+    else:
+      # Use time bounds to define RF object
+      nb_steps = int((t_bound - t0).m_as('ms') / self.dt.m_as('ms')) + 1
+      t = np.linspace(t0.m_as('ms'), t_bound.m_as('ms'), nb_steps, endpoint=True)
+      B1 = rf_ss(t)
 
     if self.plot and MPI_rank==0:
       # plt.rcParams['text.usetex'] = True
@@ -292,32 +300,36 @@ class SliceProfile:
       ax[1].legend(['Dephasing','Rephasing'])
       fig.tight_layout()
 
-      # Plot slice profiles
-      fig, ax = plt.subplots(1, 2, figsize=(12, 4))
-      ax[0].plot(z_arr, M[0,:])
-      ax[0].plot(z_arr, M[1,:])
-      ax[0].plot(z_arr, np.abs(M[0,:] + 1j*M[1,:]))
-      ax[0].legend(['$M_x$','$M_y$','$M_{xy}$'])
-      ax[0].vlines(x=[self.z0.m - 0.5*self.delta_z.m, self.z0.m + 0.5*self.delta_z.m], ymin=0, ymax=M[1,:].max(), colors='r', linestyles='dashed')
-      ax[0].set_xlabel('z coordinate [m]')
-      ax[0].set_ylabel('Magnetization')
+      if self.solve_profile:
+        # Plot slice profiles
+        fig, ax = plt.subplots(1, 2, figsize=(12, 4))
+        ax[0].plot(z_arr, M[0,:])
+        ax[0].plot(z_arr, M[1,:])
+        ax[0].plot(z_arr, np.abs(M[0,:] + 1j*M[1,:]))
+        ax[0].legend(['$M_x$','$M_y$','$M_{xy}$'])
+        ax[0].vlines(x=[self.z0.m - 0.5*self.delta_z.m, self.z0.m + 0.5*self.delta_z.m], ymin=0, ymax=M[1,:].max(), colors='r', linestyles='dashed')
+        ax[0].set_xlabel('z coordinate [m]')
+        ax[0].set_ylabel('Magnetization')
 
-      ax[1].plot(z_arr, M[2,:])
-      ax[1].legend(['$M_z$'])
-      ax[1].set_xlabel('z coordinate [m]')
-      ax[1].set_ylabel('Magnetization')
-      fig.tight_layout()
-      plt.show()
+        ax[1].plot(z_arr, M[2,:])
+        ax[1].legend(['$M_z$'])
+        ax[1].set_xlabel('z coordinate [m]')
+        ax[1].set_ylabel('Magnetization')
+        fig.tight_layout()
+        plt.show()
 
     # Interpolator
-    p = M[0,:].astype(self.dtype) + 1j*M[1,:].astype(self.dtype)
-    interp_profile = interp1d(z_arr.astype(self.dtype), p, kind='linear', bounds_error=False, fill_value=0.0)
+    if self.solve_profile:
+      p = M[0,:].astype(self.dtype) + 1j*M[1,:].astype(self.dtype)
+      interp_profile = interp1d(z_arr.astype(self.dtype), p, kind='linear', bounds_error=False, fill_value=0.0)
+    else:
+      interp_profile = None
 
     return interp_profile
 
 
 class VelocityEncoding:
-  def __init__(self, VENC: Q_, directions: list, dtype=np.float32):
+  def __init__(self, VENC: Q_, directions: list, dtype=np.float32, normalize_dirs: bool = False):
     """
     Initializes the MRImaging object with VENC and directions.
 
@@ -336,7 +348,9 @@ class VelocityEncoding:
       raise ValueError('VENC and directions must have the same length')
     self.directions = directions.astype(dtype)
     self.nb_directions = directions.shape[0]
-    self.normalize_directions()
+    self.normalize_dirs = normalize_dirs
+    if self.normalize_dirs:
+      self.normalize_directions()
     self.dtype = dtype
 
   def normalize_directions(self):
