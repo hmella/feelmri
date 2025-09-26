@@ -80,8 +80,8 @@ ext_modules = [
         language='c++',
     ),
     Pybind11Extension(
-        'feelmri.MRIEncoding',
-        ['feelmri/cpp/MRIEncoding.cpp', 'feelmri/cpp/Signal.cpp'],
+        'feelmri.MRI',
+        sources=['feelmri/cpp/MRI.cpp'],
         include_dirs=[
             # Path to pybind11 headers
             get_pybind_include(),
@@ -90,18 +90,8 @@ ext_modules = [
         language='c++',
     ),
     Pybind11Extension(
-        'feelmri.Tagging',
-        ['feelmri/cpp/Tagging.cpp', 'feelmri/cpp/Signal.cpp'],
-        include_dirs=[
-            # Path to pybind11 headers
-            get_pybind_include(),
-            '/usr/include/eigen3/','feelmri/cpp/'
-        ],
-        language='c++',
-    ),
-    Pybind11Extension(
-        'feelmri.PhaseContrast',
-        sources=['feelmri/cpp/PhaseContrast.cpp', 'feelmri/cpp/Signal.cpp'],
+        'feelmri.POD',
+        sources=['feelmri/cpp/POD.cpp'],
         include_dirs=[
             # Path to pybind11 headers
             get_pybind_include(),
@@ -134,7 +124,7 @@ def cpp_flag(compiler):
     """
     if has_flag(compiler, '-std=c++20'):
         return '-std=c++20'
-    if has_flag(compiler, '-std=c++17'):
+    elif has_flag(compiler, '-std=c++17'):
         return '-std=c++17'
     elif has_flag(compiler, '-std=c++14'):
         return '-std=c++14'
@@ -161,20 +151,61 @@ class BuildExt(build_ext):
         if ct == 'unix':
             opts.append('-DVERSION_INFO="%s"' % self.distribution.get_version())
             opts.append(cpp_flag(self.compiler))
-            if has_flag(self.compiler, '-fvisibility=hidden'):
-                opts.append('-fvisibility=hidden')
+
+            # # OPTION # 1 (FAST AND BROADLY COMPATIBLE) - Good Scaling!
+            # if has_flag(self.compiler, '-O3'):
+            #     opts.append('-O3')
+            # if has_flag(self.compiler, '-DNDEBUG'):
+            #     opts.append('-DNDEBUG')
+            # if has_flag(self.compiler, '-DEIGEN_FAST_MATH'):
+            #     opts.append('-DEIGEN_FAST_MATH')
+            # if has_flag(self.compiler, '-fPIC'):
+            #     opts.append('-fPIC')
+            # if has_flag(self.compiler, '-fvisibility=hidden'):
+            #     opts.append('-fvisibility=hidden')
+            # if has_flag(self.compiler, '-fno-math-errno'):
+            #     opts.append('-fno-math-errno')
+            # if has_flag(self.compiler, '-ffast-math'):
+            #     opts.append('-ffast-math')
+            # if has_flag(self.compiler, '-march=raptorlake'):
+            #     opts.append('-march=raptorlake')
+            # if has_flag(self.compiler, '-mtune=raptorlake'):
+            #     opts.append('-mtune=raptorlake')
+
             if has_flag(self.compiler, '-Ofast'):
                 opts.append('-Ofast')
-            if has_flag(self.compiler, '-march=native'):
-                opts.append('-march=native')
-            if has_flag(self.compiler, '-mavx2'):
-                opts.append('-mavx2')
-            if has_flag(self.compiler, '-fno-math-errno'):
-                opts.append('-fno-math-errno')
             if has_flag(self.compiler, '-DNDEBUG'):
                 opts.append('-DNDEBUG')
-            if has_flag(self.compiler, '-mfpmath=sse'):
-                opts.append('-mfpmath=sse')
+            if has_flag(self.compiler, '-DEIGEN_NO_DEBUG'):
+                opts.append('-DEIGEN_NO_DEBUG')
+
+            # math fast-paths
+            if has_flag(self.compiler, '-ffast-math'):
+                opts.append('-ffast-math')
+            if has_flag(self.compiler, '-fno-math-errno'):
+                opts.append('-fno-math-errno')
+            if has_flag(self.compiler, '-fno-trapping-math'):
+                opts.append('-fno-trapping-math')
+            if has_flag(self.compiler, '-ffp-contract=fast'):
+                opts.append('-ffp-contract=fast')
+
+            # CPU tuning (prefer raptorlake if available; else native)
+            tuning = ['-march=raptorlake', '-mtune=raptorlake', '-march=native']
+            for m in tuning:
+                if has_flag(self.compiler, m): opts.append(m)
+
+            # threading & DSO hygiene
+            if has_flag(self.compiler, '-DEIGEN_DONT_PARALLELIZE'):
+                opts.append('-DEIGEN_DONT_PARALLELIZE')
+            if has_flag(self.compiler, '-fPIC'):
+                opts.append('-fPIC')
+            if has_flag(self.compiler, '-fvisibility=hidden'):
+                opts.append('-fvisibility=hidden')
+
+            # optional
+            if has_flag(self.compiler, '-flto'):
+                opts.append('-flto')
+
         elif ct == 'msvc':
             opts.append('/DVERSION_INFO=\\"%s\\"' % self.distribution.get_version())
         for ext in self.extensions:
