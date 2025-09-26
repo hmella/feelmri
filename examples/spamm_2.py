@@ -38,7 +38,7 @@ if __name__ == '__main__':
                           length_units=parameters.Formatting.units)
 
   # Create FEM phantom object
-  phantom = FEMPhantom(path=script_path/'phantoms/beating_heart.xdmf', scale_factor=1.0)
+  phantom = FEMPhantom(path=script_path/'phantoms/beating_heart_P2.xdmf', scale_factor=1.0)
 
   # Translate phantom to obtain the desired slice location
   phantom.orient(planning.MPS, planning.LOC)
@@ -57,17 +57,16 @@ if __name__ == '__main__':
   for fr in range(phantom.Nfr):
     # Read displacement data in frame fr and interpolate to the submesh
     phantom.read_data(fr)
-    u[..., fr] = phantom.to_submesh(phantom.point_data['displacement'] @ planning.MPS, global_mesh=True)
+    u[..., fr] = phantom.to_submesh(phantom.point_data['displacement'] @ planning.MPS, local=False)
 
   # Create POD for tissue displacements
   dt = parameters.Imaging.TimeSpacing.to('ms')
   u_times = np.linspace(0, (phantom.Nfr-1)*dt, phantom.Nfr, dtype=np.float32)
-  pod_trajectory = POD(times=u_times.m_as('ms'),
+  pod_trajectory = POD(time_array=u_times.m_as('ms'),
                       data=u,
-                      global_to_local=phantom.local_to_global_nodes,
+                      global_to_local=phantom.global_to_local_nodes,
                       n_modes=10,
-                      is_periodic=True,
-                      interpolation_method='Pchip')
+                      is_periodic=True)
   
   # Create scanner object defining the gradient strength, slew rate and giromagnetic ratio
   scanner = Scanner(gradient_strength=parameters.Hardware.G_max,
@@ -100,72 +99,40 @@ if __name__ == '__main__':
   # SPAMM magnetization
   Mxy_spamm = np.zeros((phantom.local_nodes.shape[0], phantom.Nfr, enc.nb_directions), dtype=np.complex64)
 
-  # Simulate the SPAMM preparation block for each encoding direction
+  # Create sequence object
+  seq = Sequence()
+
+  # Imaging block
+  imaging = SequenceBlock(gradients=[sp.dephasing, sp.rephasing], rf_pulses=[sp.rf], dt_rf=Q_(1e-2, 'ms'), dt_gr=Q_(1e-2, 'ms'), dt=Q_(1, 'ms'), store_magnetization=True)
+
+  # Create dummy block to reach steady state
+  dummy = imaging.copy()
+  dummy.store_magnetization = False
+
+  # Add dummy blocks to the sequence to reach steady state
+  time_spacing = parameters.Imaging.TimeSpacing.to('ms') - (imaging.time_extent[1] - sp.rf.ref)
+  for i in range(80):
+    seq.add_block(dummy)
+    seq.add_block(time_spacing, dt=Q_(1, 'ms'))
+
+  # Bloch solver
+  solver = BlochSolver(seq, phantom, 
+                        scanner=scanner, 
+                        M0=1e+9, 
+                        T1=parameters.Phantom.T1, 
+                        T2=parameters.Phantom.T2, 
+                        delta_B=delta_B0.reshape((-1, 1)),
+                        pod_trajectory=pod_trajectory)
+
+  # Solve for x and y directions
   t0_bloch = time.perf_counter()
-  for d in range(len(enc.directions)):
-
-    # Create sequence object
-    seq = Sequence()
-
-    # SPAMM preparation block
-    rf1 = RF(scanner=scanner, shape='hard', dur=Q_(0.2, 'ms'), flip_angle=Q_(np.deg2rad(90),'rad'), time=Q_(0.0, 'ms'))
-
-    G_tag = Gradient(scanner=scanner, time=rf1.time + rf1.dur)
-    G_tag.match_area((parameters.PositionEncoding.ke/scanner.gamma).to('mT*ms/m'))
-    G_tag_list = G_tag.rotate(enc.directions[d])
-
-    rf2 = RF(scanner=scanner, shape='hard', dur=Q_(0.2, 'ms'), flip_angle=Q_(np.deg2rad(90),'rad'), phase_offset=Q_(np.deg2rad(180)*d,'rad'), time=G_tag.time + G_tag.dur)
-
-    prep = SequenceBlock(gradients=G_tag_list, rf_pulses=[rf1, rf2], dt_rf=Q_(1e-2, 'ms'), dt_gr=Q_(1e-2, 'ms'), dt=Q_(1, 'ms'), store_magnetization=False)
-
-    # Imaging block
-    imaging = SequenceBlock(gradients=[sp.dephasing, sp.rephasing], rf_pulses=[sp.rf], dt_rf=Q_(1e-2, 'ms'), dt_gr=Q_(1e-2, 'ms'), dt=Q_(1, 'ms'), store_magnetization=True)
-
-    # Create dummy block to reach steady state
-    dummy = imaging.copy()
-    dummy.store_magnetization = False
-
-    # Add dummy blocks to the sequence to reach steady state
-    time_spacing = parameters.Imaging.TimeSpacing.to('ms') - (imaging.time_extent[1] - sp.rf.ref)
-    for i in range(80):
-      seq.add_block(dummy)
-      seq.add_block(time_spacing, dt=Q_(1, 'ms'))
-
-    # Add and additional block to synchronize the sequence with the cardiac cycle
-    seq.add_block(u_times[-1] - seq.blocks[-1].time_extent[1] % u_times[-1], dt=Q_(1, 'ms'))
-
-    # Add blocks to the sequence
-    seq.add_block(prep)
-    seq.add_block(Q_(0.25, 'ms'))
-    for fr in range(phantom.Nfr):
-      seq.add_block(imaging)
-      # seq.plot(blocks=slice(-3, None), figsize=(4, 6), tight_layout=True, export_to='ocspamm_sequence_{:d}.png'.format(d))
-      seq.add_block(time_spacing, dt=Q_(1, 'ms'))  # Time spacing between frames
-
-    # Bloch solver
-    solver = BlochSolver(seq, phantom, 
-                         scanner=scanner, 
-                         M0=1e+9, 
-                         T1=parameters.Phantom.T1, 
-                         T2=parameters.Phantom.T2, 
-                         delta_B=delta_B0.reshape((-1, 1)),
-                         pod_trajectory=pod_trajectory)
-
-    # Solve for x and y directions
-    Mxy, Mz = solver.solve() 
-    # # Export magnetization and displacement for debugging
-    # file = XDMFFile('magnetization_{:d}.xdmf'.format(MPI_rank), nodes=phantom.local_nodes, elements={phantom.cell_type: phantom.local_elements})
-    # for fr in range(Mxy.shape[1]):
-    #   # Write magnetization and displacement at each frame
-    #   t = fr*parameters.Imaging.TimeSpacing.m_as('ms') + imaging.rf_pulses[0].time.m_as('ms')
-    #   file.write(pointData={'M': np.stack((np.real(Mxy[:,fr]), np.imag(Mxy[:,fr]), Mz[:,fr]), axis=1), 'displacement': pod_trajectory(t)}, time=t)
-    # file.close()
-
-    # Assign the magnetization to the corresponding direction
-    Mxy_spamm[..., d] = Mxy
+  solver.solve() 
 
   # Measure elapsed time for the dummy sequence
   bloch_time = time.perf_counter() - t0_bloch
+
+  # Add and additional block to synchronize the sequence with the cardiac cycle
+  seq.add_block(u_times[-1] - seq.blocks[-1].time_extent[1] % u_times[-1], dt=Q_(1, 'ms'))
 
   # Generate kspace trajectory
   traj = CartesianStack(FOV=planning.FOV.to('m'),
@@ -196,16 +163,56 @@ if __name__ == '__main__':
   kspace_times = traj.times.m_as('ms') - traj.t_start.m_as('ms')
   kspace_time = 0.0
   t0_loop = time.perf_counter()
-  for fr in range(phantom.Nfr):
+  for d in range(enc.nb_directions):
 
-    # Update reference time of POD trajectory
-    pod_trajectory.update_timeshift(fr * parameters.Imaging.TimeSpacing.m_as('ms'))
+    # SPAMM preparation block
+    rf1 = RF(scanner=scanner, shape='hard', dur=Q_(0.2, 'ms'), flip_angle=Q_(np.deg2rad(90),'rad'), time=Q_(0.0, 'ms'))
 
-    # Generate 4D flow image
-    # MPI_print('Generating frame {:d}'.format(fr))
-    t0_kspace = time.perf_counter()
-    K[:,:,:,:,fr] = Signal(MPI_rank, M, kspace_points, kspace_times, phantom.local_nodes, delta_omega0, T2.m_as('ms'), Mxy_spamm[:, fr, :], pod_trajectory)
-    kspace_time += time.perf_counter() - t0_kspace
+    G_tag = Gradient(scanner=scanner, time=rf1.time + rf1.dur)
+    G_tag.match_area((parameters.PositionEncoding.ke/scanner.gamma).to('mT*ms/m'))
+    G_tag_list = G_tag.rotate(enc.directions[d])
+
+    rf2 = RF(scanner=scanner, shape='hard', dur=Q_(0.2, 'ms'), flip_angle=Q_(np.deg2rad(90),'rad'), phase_offset=Q_(np.deg2rad(180)*d,'rad'), time=G_tag.time + G_tag.dur)
+
+    prep = SequenceBlock(gradients=G_tag_list, rf_pulses=[rf1, rf2], dt_rf=Q_(1e-2, 'ms'), dt_gr=Q_(1e-2, 'ms'), dt=Q_(1, 'ms'), store_magnetization=False)
+
+    for i, sh in enumerate(traj.shots):
+
+      # Add and solve tagging preparation to the sequence
+      seq.add_block(prep)
+      seq.add_block(Q_(0.25, 'ms'))
+      t0_bloch = time.perf_counter()
+      solver.solve(start=-3)
+      bloch_time += time.perf_counter() - t0_bloch
+
+      # k-space points per shot
+      kspace_points = (traj.points[0][:,sh,0,np.newaxis], 
+                      traj.points[1][:,sh,0,np.newaxis], 
+                      traj.points[2][:,sh,0,np.newaxis])
+      kspace_times = traj.times.m_as('ms')[:,sh,0,np.newaxis] - traj.t_start.m_as('ms')
+
+      for fr in range(phantom.Nfr):
+
+        # MPI_print("Generating shot {:d}/{:d} for slice {:d}/{:d}".format(i+1, traj.nb_shots, s+1, K.shape[2]))
+
+        # Add imaging and delay blocks to the sequence
+        seq.add_block(imaging)
+        seq.add_block(time_spacing)  # Delay between imaging blocks
+        t0_bloch = time.perf_counter()
+        Mxy, Mz = solver.solve(start=-3)
+        bloch_time += time.perf_counter() - t0_bloch
+
+        # Generate 4D flow image
+        t0_kspace = time.perf_counter()
+        tmp = Signal(MPI_rank, M, kspace_points, kspace_times, phantom.local_nodes, delta_omega0, T2.m_as('ms'), Mxy, pod_trajectory)
+        K[:,sh,0,d,fr] = np.squeeze(tmp)
+        kspace_time += time.perf_counter() - t0_kspace
+
+        # Update reference time of POD trajectory
+        pod_trajectory.update_timeshift(seq.blocks[-2].time_extent[1].m_as('ms'))
+
+      # Add and additional block to synchronize the sequence with the cardiac cycle
+      seq.add_block(u_times[-1] - seq.blocks[-1].time_extent[1] % u_times[-1], dt=Q_(1, 'ms'))
 
   # Store elapsed time
   script_time = time.perf_counter() - t0_start
@@ -217,7 +224,7 @@ if __name__ == '__main__':
 
   # Check if exp1_times.txt exists and load and append times (dummy_time, imaging_time, kspace_time) if it does or create it if it does not
   if MPI_rank == 0:
-    times_file = script_path/'results/o-cspamm/exp2_times.txt'
+    times_file = script_path/'results/o-cspamm/exp2_times_full_bloch.txt'
     try:
       times = np.loadtxt(times_file)
       times = np.vstack((times, (bloch_time, kspace_time, sim_time, script_time)))
@@ -226,24 +233,24 @@ if __name__ == '__main__':
       times = np.array([(bloch_time, kspace_time, sim_time, script_time)])
       np.savetxt(times_file, times)
 
-  # # Gather results
-  # K = gather_data(K)
+  # Gather results
+  K = gather_data(K)
 
-  # # # Export generated data
-  # # if MPI_rank==0:
-  # #   with open(str(export_path), 'wb') as f:
-  # #     pickle.dump({'kspace': K, 'MPS_ori': MPS_ori, 'LOC': LOC, 'traj': traj}, f)
+  # # Export generated data
+  # if MPI_rank==0:
+  #   with open(str(export_path), 'wb') as f:
+  #     pickle.dump({'kspace': K, 'MPS_ori': MPS_ori, 'LOC': LOC, 'traj': traj}, f)
 
-  # # Image reconstruction
-  # I = CartesianRecon(K, traj)
+  # Image reconstruction
+  I = CartesianRecon(K, traj)
 
-  # # Show reconstruction
-  # if MPI_rank == 0:
-  #   mx = np.abs(I[...,0,:])
-  #   my = np.abs(I[...,1,:])
-  #   mxy = np.abs(I[...,0,:] - I[...,1,:])
-  #   plotter = MRIPlotter(images=[mx, my, mxy], 
-  #                       title=['SPAMM X', 'SPAMM Y', 'O-CSPAMM'], 
-  #                       FOV=planning.FOV.m_as('m'), caxis=[0, 13])
-  #   # plotter.export_images('spamm_images_semi_bloch/')
-  #   plotter.show()
+  # Show reconstruction
+  if MPI_rank == 0:
+    mx = np.abs(I[...,0,:])
+    my = np.abs(I[...,1,:])
+    mxy = np.abs(I[...,0,:] - I[...,1,:])
+    plotter = MRIPlotter(images=[mx, my, mxy], 
+                        title=['SPAMM X', 'SPAMM Y', 'O-CSPAMM'], 
+                        FOV=planning.FOV.m_as('m'), caxis=[0, 13])
+    plotter.export_images('spamm_images_full_bloch/')
+    plotter.show()

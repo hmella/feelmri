@@ -71,7 +71,6 @@ if __name__ == '__main__':
                       data=u,
                       global_to_local=phantom.global_to_local_nodes,
                       n_modes=5,
-                      taylor_order=10,
                       is_periodic=True)
   
   # Define respiratory motion object
@@ -149,7 +148,7 @@ if __name__ == '__main__':
   grid = np.stack([np.sin(enc.ke[i]*phantom.local_nodes[:, i]) for i in range(2)], axis=1)
 
   # Iterate over cardiac phases
-  t0 = time.time()  
+  t0 = time.perf_counter()  
   for fr in range(phantom.Nfr):
 
     # Current time
@@ -174,7 +173,7 @@ if __name__ == '__main__':
     K[:,:,:,:,fr] = SPAMM(MPI_rank, M, traj.points, traj.times.m_as('ms'), current_pos, Mxy, delta_omega0, T2star.m_as('ms'))
 
   # Store elapsed time
-  spamm_time = time.time() - t0
+  spamm_time = time.perf_counter() - t0
 
   # Print elapsed times
   MPI_print('Elapsed time-per-frame for SPAMM: {:.2f} s'.format(spamm_time/phantom.Nfr))

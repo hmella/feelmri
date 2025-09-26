@@ -1,0 +1,32 @@
+# Imaging parameters
+Imaging:
+  RES: [150, 150, 1]
+  TR: {value: 10, unit: "ms"}
+  Oversampling: 1
+  Sequence: "FFE"
+  LinesPerShot: 1
+  FlipAngle: {value: 12, unit: "deg"}
+
+PositionEncoding:
+  ke: {value: 400.0, unit: "1/m"}
+  Directions:
+    dir1: [1.0, 0.0, 0.0]
+    dir2: [0.0, 1.0, 0.0]
+
+# Hardware parameters
+Hardware:
+  G_sr: {value: 180.0, unit: "mT/m/ms"}
+  G_max: {value: 33.0, unit: "mT/m"}
+  r_BW: {value: 120.0e+3, unit: "Hz"}
+
+# Imaging orientation
+Formatting:
+  planning: "planning/water_and_fat.pvsm"
+  units: "cm"
+
+Phantom:
+  dfat: {value: 215, unit: "Hz"}
+  T1_water: {value: 670, unit: "ms"}
+  T2_water: {value: 40, unit: "ms"}
+  T1_fat:   {value: 260, unit: "ms"}
+  T2_fat:   {value: 30, unit: "ms"}
