@@ -6,7 +6,7 @@ import numpy as np
 from pint import Quantity as Q_
 from scipy.interpolate import interp1d
 
-from feelmri.MPIUtilities import MPI_rank
+from feelmri.MPIUtilities import MPI_print, MPI_rank
 
 
 # Scanner class
@@ -118,19 +118,19 @@ class Gradient:
     if self.lenc <= 0.0:
       timings = Q_(np.array([0.0, 
                           self.slope.m,
-                          self.slope.m+self.slope.m]), self.slope.u)
+                          self.slope.m+self.slope.m], dtype=np.float32), self.slope.u)
       amplitudes = Q_(np.array([0.0, 
                             self.strength.m,
-                            0.0]), self.strength.u)
+                            0.0], dtype=np.float32), self.strength.u)
     else:
       timings = Q_(np.array([0.0, 
                           self.slope.m, 
                           self.slope.m+self.lenc.m, 
-                          self.slope.m+self.lenc.m+self.slope.m]), self.slope.u)
+                          self.slope.m+self.lenc.m+self.slope.m], dtype=np.float32), self.slope.u)
       amplitudes = Q_(np.array([0.0, 
                             self.strength.m, 
                             self.strength.m, 
-                            0.0]), self.strength.u)
+                            0.0], dtype=np.float32), self.strength.u)
 
     # Add time reference wrt the sequence object
     timings += self.time - self.ref
@@ -392,7 +392,7 @@ class Gradient:
     self.dur2 = (self.dur - self.ref).to('ms')
     self.timings, self.amplitudes, self.interpolator = self.group_timings()
 
-  def rotate(self, directions: np.ndarray):
+  def rotate(self, directions: np.ndarray, normalize_dirs: bool = False):
     """
     Rotate the gradient direction.
 
@@ -419,7 +419,7 @@ class Gradient:
 
       # Normalize the direction vector
       norm = np.linalg.norm(direction)
-      if norm != 0:
+      if norm != 0 and normalize_dirs:
         direction = direction / norm
 
       # Gradient area
@@ -460,7 +460,7 @@ class Gradient:
 
 
 class RF:
-  def __init__(self, scanner=Scanner(), NbLobes=[2,2], alpha=0.46, shape='apodized_sinc', flip_angle=Q_(np.pi/2,'rad'), dur=Q_(2.0,'ms'), ref=Q_(0.0,'ms'), time=Q_(0.0,'ms'), nb_samples=1000, phase_offset=Q_(0.0,'rad'), frequency_offset=Q_(0.0,'Hz')):
+  def __init__(self, scanner=Scanner(), NbLobes=[2,2], alpha=0.46, shape='apodized_sinc', flip_angle=Q_(np.pi/2,'rad'), dur=Q_(2.0,'ms'), ref=Q_(0.0,'ms'), time=Q_(0.0,'ms'), nb_samples=200, phase_offset=Q_(0.0,'rad'), frequency_offset=Q_(0.0,'Hz')):
     self.scanner = scanner
     self.NbLobes = NbLobes
     self.alpha = alpha
@@ -593,9 +593,14 @@ class RF:
     return self.flip_angle.m_as('rad')/unit_flip_angle
 
   def _interpolator(self):
+    # Start and end times of the pulse
     start = (self.time - self.ref).m_as('ms')
     end   = (self.time - self.ref + self.dur).m_as('ms')
+
+    # Time array for interpolation
     t = np.linspace(start, end, self.nb_samples)
+
+    # Interpolators for real and imaginary parts of the pulse
     scaling = self._flip_angle_factor(t)
     interp_real = interp1d(t, np.abs(scaling) * np.real(self._pulse(t)), kind='linear', fill_value=0.0, bounds_error=False)
     interp_imag = interp1d(t, np.abs(scaling) * np.imag(self._pulse(t)), kind='linear', fill_value=0.0, bounds_error=False)
