@@ -37,19 +37,19 @@ PYBIND11_MODULE(MathCpp, m) {
         py::overload_cast<const Eigen::ArrayXf&, const Eigen::ArrayXf&>(&faster_polyval<float>),
         "Evaluate polynomial at array x (float)"
     );
+    // m.def(
+    //     "faster_polyval",
+    //     py::overload_cast<const Eigen::ArrayXd&, const Eigen::ArrayXd&>(&faster_polyval<double>),
+    //     "Evaluate polynomial at array x (double)"
+    // );
     m.def(
         "faster_polyval",
         py::overload_cast<const float, const Eigen::ArrayXf&>(&faster_polyval<float>),
         "Evaluate polynomial at scalar x (float)"
     );
-    m.def(
-        "faster_polyval",
-        py::overload_cast<const Eigen::ArrayXd&, const Eigen::ArrayXd&>(&faster_polyval<double>),
-        "Evaluate polynomial at array x (double)"
-    );
-    m.def(
-        "faster_polyval",
-        py::overload_cast<const double, const Eigen::ArrayXd&>(&faster_polyval<double>),
-        "Evaluate polynomial at scalar x (double)"
-    );
+    // m.def(
+    //     "faster_polyval",
+    //     py::overload_cast<const double, const Eigen::ArrayXd&>(&faster_polyval<double>),
+    //     "Evaluate polynomial at scalar x (double)"
+    // );
 }
