@@ -124,7 +124,7 @@ class FEMPhantom:
     submesh_elems = self.global_elements[markers, :]
 
     # Get nodes contained in profile elements 
-    submesh_nodes_map = np.sort(np.unique(submesh_elems))
+    submesh_nodes_map = np.unique(submesh_elems)
     submesh_nodes = self.global_nodes[submesh_nodes_map, :]
 
     # Create a mapping from old node indices to new indices
@@ -137,7 +137,7 @@ class FEMPhantom:
     # Mesh refinement
     if refine:
       # Machine time
-      t0 = time.time()
+      t0 = time.perf_counter()
 
       # Debugging info
       MPI_print("[MeshRefinement] Number of elements before refining: {:d}".format(len(submesh_elems)))
@@ -147,12 +147,12 @@ class FEMPhantom:
 
       # Debugging info
       MPI_print("[MeshRefinement] Number of elements after refining: {:d}".format(len(submesh_elems)))
-      MPI_print("[MeshRefinement] Elapsed time for refinement: {:.2f} s".format(time.time()-t0))
+      MPI_print("[MeshRefinement] Elapsed time for refinement: {:.2f} s".format(time.perf_counter()-t0))
 
     # Backup original mesh
-    self.global_nodes_ = self.global_nodes
-    self.global_elements_ = self.global_elements
-    self.global_shape_ = self.global_shape
+    self._global_nodes = self.global_nodes
+    self._global_elements = self.global_elements
+    self._global_shape = self.global_shape
 
     # Update mesh parameters and backup original mesh
     self.global_nodes = submesh_nodes
@@ -165,36 +165,29 @@ class FEMPhantom:
 
 
   def distribute_mesh(self):
+    ''' Distribute mesh across MPI processes '''
     # Mesh partitioning
-    if MPI_size > 1:
+    connectivity = self.global_elements.tolist()
+    num_parts = MPI_size
+    _, membership, _ = pymetis.part_mesh(num_parts, connectivity, None, None, pymetis.GType.DUAL)
 
-      # Mesh partitioning
-      connectivity = self.global_elements.tolist()
-      num_parts    = MPI_size
-      tpwgts = [1.0/MPI_size] * MPI_size  # Equal weights for each partition
-      n_cuts, membership, vert_part = pymetis.part_mesh(num_parts, connectivity, None, tpwgts, pymetis.GType.DUAL)
+    # Map between local and global indices for cells. Given the a local index, it provides the corresponding global index
+    l2g_cells_idx = np.argwhere(np.array(membership) == MPI_rank).ravel()
 
-      # Local elements
-      local_elements_idx = np.argwhere(np.array(membership) == MPI_rank).ravel()
-      local_elems = self.global_elements[local_elements_idx, :]
+    # Local cells
+    local_elems = self.global_elements[l2g_cells_idx, :]
 
-      # Local nodes
-      local_nodes_idx = np.unique(local_elems)
-      local_nodes = self.global_nodes[local_nodes_idx, :]
+    # Local nodes
+    l2g_nodes_idx = np.unique(local_elems.flatten())
+    local_nodes = self.global_nodes[l2g_nodes_idx, :]
+    nb_local_nodes = local_nodes.shape[0]
 
-      # Create a mapping from old node indices to new indices
-      mapped_nodes = -np.ones(self.global_nodes.shape[0], dtype=int)
-      mapped_nodes[local_nodes_idx] = np.arange(len(local_nodes_idx))
+    # Build global to local mapping for cells and nodes
+    g2l_nodes_idx = -np.ones(self.global_nodes.shape[0], dtype=np.int32)
+    g2l_nodes_idx[l2g_nodes_idx] = np.arange(nb_local_nodes)
 
-      # Remap the element node indices to the new submesh node indices
-      local_elems = mapped_nodes[local_elems]
-
-    else:
-      local_nodes = self.global_nodes
-      local_elems = self.global_elements
-      local_nodes_idx = np.arange(self.global_nodes.shape[0], dtype=int)
-      local_elements_idx = np.arange(self.global_elements.shape[0], dtype=int)
-      membership = [0,] * self.global_elements.shape[0]
+    # Remap the element node indices to the new submesh node indices
+    local_elems = g2l_nodes_idx[local_elems.flatten()].reshape((-1, local_elems.shape[1]))
 
     # Debugging info
     print("[FEMPhantom] Process {:d} has {:d} elements and {:d} nodes after mesh distribution".format(MPI_rank, len(local_elems), local_nodes.shape[0]))
@@ -205,11 +198,11 @@ class FEMPhantom:
     self.local_shape = local_nodes.shape
 
     # Add global to local mapping
-    self.global_to_local_nodes = local_nodes_idx
-    self.global_to_local_elems = local_elements_idx
+    self.local_to_global_nodes = l2g_nodes_idx
+    self.local_to_global_elems = l2g_cells_idx
 
     # Add mesh partition 
-    self.partitioning = {'partitioning': np.array(membership).reshape(-1, 1)}
+    self.partitioning = np.array(membership).reshape(-1, 1)
 
 
   def bounding_box(self):
@@ -244,7 +237,7 @@ class FEMPhantom:
     if self.pressure_label in self.point_data:
       self.point_data[self.pressure_label] *= 1.0
 
-  def to_submesh(self, data, local=True):
+  def to_submesh(self, data, global_mesh=False):
     """
     Convert data defined on the global mesh to the submesh nodes.
 
@@ -266,18 +259,17 @@ class FEMPhantom:
     # Verify data shape
     point_data = True
     cell_data = False
-    if data.shape[0] != self.global_nodes_.shape[0]:
+    if data.shape[0] != self._global_nodes.shape[0]:
       point_data = False
       cell_data = True
       if data.shape[0] != self.global_cells_.shape[0]:
         raise ValueError("Data shape does not match the mesh nodes or cells.")
 
     # Main mesh nodes and submesh nodes
-    if point_data:
-      if local:
-        idx = self.global_to_local_nodes
-      else:
-        idx = self.mesh_to_submesh_nodes
+    if point_data and global_mesh:
+      idx = self.mesh_to_submesh_nodes
+    elif point_data and not global_mesh:
+      idx = self.mesh_to_submesh_nodes[self.local_to_global_nodes]
     elif cell_data:
       raise NotImplementedError("Cell data to submesh conversion is not implemented yet.")
 
@@ -306,11 +298,11 @@ class FEMPhantom:
 
       # Main mesh nodes and submesh nodes
       idx = self.mesh_to_submesh_nodes
-      mesh_nodes = self.global_nodes_[idx, :]
+      mesh_nodes = self._global_nodes[idx, :]
 
       # Stacked data
       if data.shape[1] > 0:
-        data = np.column_stack(tuple([data[...,i].flatten()[idx] for i in range(data.shape[1])]))
+        data = np.column_stack(tuple([data[..., i].flatten()[idx] for i in range(data.shape[1])]))
 
       # Define dummy interpolator to save time
       if hasattr(self, 'submesh_interp'):
