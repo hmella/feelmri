@@ -2,12 +2,14 @@
 # TODO: add additional information about the original authors and license
 import time
 from collections.abc import Callable
+from typing import Literal
 
 import numpy as np
-from scipy.interpolate import interp1d
+from scipy.interpolate import (Akima1DInterpolator, CubicSpline,
+                               PchipInterpolator, PPoly)
 
-from feelmri.MathCpp import faster_polyval
 from feelmri.MPIUtilities import MPI_print, MPI_rank
+from feelmri.POD import tensordot_modes_weights
 
 
 class RespiratoryMotion:
@@ -18,22 +20,32 @@ class RespiratoryMotion:
   The motion can be defined in a specific direction, and the mean can be removed
   from the data if desired.
   """
-  def __init__(self, time_array: np.ndarray,
+  def __init__(self, times: np.ndarray,
                data: np.ndarray,
-               timeshift: float = 0.0,
+               timeshift: np.float32 = 0.0,
                is_periodic: bool = False,
                remove_mean: bool = False,
-               direction: np.ndarray = np.array([1, 0, 0]),
-               interpolation_method: str = 'cubic'
+               direction: np.ndarray = np.array([1, 0, 0], dtype=np.float32),
+               interpolation_method: Literal['AkimaSpline', 'CubicSpline', 'Pchip'] = 'Pchip'
                ):
-    self.time_array = time_array
-    self.data = data
+    self.times = times.astype(np.float32)
+    self.data = data.astype(np.float32)
     self.timeshift = timeshift
     self.is_periodic = is_periodic
     self.remove_mean = remove_mean
-    self.direction = direction.reshape((1, 3))/np.linalg.norm(direction)
+    self.direction = (direction.reshape((1, 3))/np.linalg.norm(direction)).astype(np.float32)
     self.interpolation_method = interpolation_method
     self.interpolator = self.calculate_interpolator()
+    self._period = self.times[-1] if self.is_periodic else None
+
+    if self._period is None:
+        self._fold_time = lambda x: x
+    else:
+        T = self._period
+        def _fold(x, T=T):
+            # stable float "mod" without using % (avoids some edge cases)
+            return (x - T*np.floor(x / T))
+        self._fold_time = _fold
 
   def __add__(self, other):
       """ Overloads the addition operator to allow for the addition of another
@@ -60,16 +72,23 @@ class RespiratoryMotion:
     :return: scipy.interpolate.interp1d object for the motion data
     """
     # Data for interpolation
-    times = self.time_array
+    times = self.times
     data  = self.data
 
     # Remove mean if requested
     if self.remove_mean:
-      data_mean = np.mean(self.data, axis=0)
+      data_mean = np.mean(self.data, axis=0, dtype=np.float32)
       data -= data_mean
 
     # Obtain the interpolator using the specified method
-    interpolator = interp1d(times, data, kind=self.interpolation_method, bounds_error=False)
+    if self.interpolation_method == 'AkimaSpline':
+      interpolator = Akima1DInterpolator(times, data)
+    elif self.interpolation_method == 'CubicSpline':
+      interpolator = CubicSpline(times, data, bc_type='natural')
+    elif self.interpolation_method == 'Pchip':
+      interpolator = PchipInterpolator(times, data)
+    else:
+      raise ValueError(f"Interpolation method '{self.interpolation_method}' not recognized. Choose from 'AkimaSpline', 'CubicSpline', or 'Pchip'.")
 
     return interpolator
 
@@ -79,11 +98,9 @@ class RespiratoryMotion:
     :return: evaluated motion at time t
     """
     # Apply time shift if necessary
-    t = t + self.timeshift  # Apply time shift if necessary
-    if self.is_periodic:
-      t = t % self.time_array[-1]
+    t = self._fold_time(t + self.timeshift)
 
-    return self.interpolator(t)
+    return self.interpolator(t).astype(np.float32)
 
   def update_timeshift(self, timeshift: float):
     """ Updates the timeshift of the POD.
@@ -93,31 +110,49 @@ class RespiratoryMotion:
 
 
 class POD:
-  def __init__(self, time_array: np.ndarray, 
+  def __init__(self, times: np.ndarray, 
                data: np.ndarray,
                global_to_local: np.ndarray = None,
                n_modes: int = 5,
-               fit_type: str = 'polynomial', 
-               taylor_order: int = 10, 
                is_periodic: bool = False,
-               timeshift: float = 0.0):
-      self.time_array = time_array  # (t,)
+               interpolation_method: Literal['AkimaSpline', 'CubicSpline', 'Pchip'] = 'Pchip',
+               timeshift: np.float32 = 0.0):
+      self.times = times  # (t,)
       self.data = data              # (P, C, t)
-      self.global_to_local = global_to_local
+      self.local_to_global_map = global_to_local
       self.n_modes = n_modes
-      self.fit_type = fit_type
-      self.taylor_order = taylor_order
       self.modes, self.weights = self.calculate_pod(remove_mean=False)
-      self.taylor_coefficients = self.fit()
       self.timeshift = timeshift
       self.is_periodic = is_periodic
-      self.fit_type = fit_type
+      self.interpolation_method = interpolation_method
+      self.spline_coeffs = self.spline_fit()
+      pps = []
+      for s in self.spline_coeffs:
+          if not isinstance(s, PPoly):
+              raise TypeError("Use CubicSpline/Pchip/Akima (PPoly subclasses)")
+          pps.append(s)
+      x0 = pps[0].x
+      assert all(np.array_equal(pp.x, x0) for pp in pps), "knots differ"
+      C = np.stack([pp.c for pp in pps], axis=-1)
+      self._pp_batch = PPoly(C, x0, extrapolate=False)      
+      self._modes = np.asarray(self.modes, dtype=np.float32, order='C')
+      self._period = self.times[-1] if self.is_periodic else None
+      self._weights = np.zeros([self.n_modes, ], dtype=np.float32, order='C')
+
+      if self._period is None:
+          self._fold_time = lambda x: x
+      else:
+          T = self._period
+          def _fold(x, T=T):
+              # stable float "mod" without using % (avoids some edge cases)
+              return x - T*np.floor(x / T)
+          self._fold_time = _fold
 
   def __repr__(self):
       """ Returns a string representation of the POD object.
       :return: string representation of the POD object
       """
-      return f"POD(n_modes={self.n_modes}, taylor_order={self.taylor_order}, is_periodic={self.is_periodic})"
+      return f"POD(n_modes={self.n_modes}, interpolation_method='{self.interpolation_method}', is_periodic={self.is_periodic})"
 
   def __add__(self, other):
       """ Overloads the addition operator to allow for the addition of another
@@ -128,11 +163,10 @@ class POD:
       return PODSum(self, other)
 
   def __call__(self, t: float):
-      """ Evaluates the trajectory at time t using the POD modes and the Taylor coefficients.
+      """ Evaluates the trajectory at time t using the POD modes and weights.
       :param t: time at which to evaluate the trajectory
       :return: evaluated trajectory at time t
       """
-      # Evaluate the trajectory at time t
       trajectory = self._evaluate_trajectory(t)
 
       return trajectory
@@ -142,10 +176,10 @@ class POD:
     :param remove_mean: if True, removes the temporal mean from the data before calculating POD
     :return: tuple of (modes, weights) where modes are the POD modes and weights are the corresponding weights
     """
-    start = time.time()
-    MPI_print(f"[POD] Calculating POD with {self.n_modes} modes and {self.taylor_order} order")
+    # start = time.perf_counter()
+    # MPI_print(f"[POD] Calculating POD with {self.n_modes} modes and {self.taylor_order} order")
 
-    n_tsteps = self.time_array.shape[0]
+    n_tsteps = self.times.shape[0]
     flat_sv = self.data.reshape(-1, n_tsteps)
 
     # Remove mean if requested
@@ -175,55 +209,33 @@ class POD:
 
     # Reshape and distribute modes
     phi = phi.reshape((self.data.shape[0], -1, self.n_modes))
-    if self.global_to_local is not None:
-      phi = phi[self.global_to_local, :, :]
+    if self.local_to_global_map is not None:
+      phi = phi[self.local_to_global_map, :, :]
 
-    MPI_print(f"[POD] Finished POD calculation in {time.time() - start:.2f} seconds")
+    # MPI_print(f"[POD] Finished POD calculation in {time.perf_counter() - start:.2f} seconds")
 
     return phi, weights
 
-  def fit(self):
-    """ Fits a Taylor polynomial of order self.order to the weights of the POD modes
+  def spline_fit(self):
+    """ Fits a spline to the weights of the POD modes
     """
-    if self.fit_type == 'polynomial':
-      # Fit a polynomial of order self.taylor_order to the weights of the i-th mode
-      flat_coefficients = np.zeros((self.taylor_order + 1, self.n_modes), dtype=np.float32)
-      for i in range(self.n_modes):
-        # Fit a polynomial of order self.taylor_order to the weights of the i-th mode
-        flat_coefficients[:, i] = np.polynomial.Polynomial.fit(self.time_array, self.weights[:, i], deg=self.taylor_order, domain=[self.time_array[0], self.time_array[-1]]).convert().coef
+    # Choose interpolation method
+    if self.interpolation_method == 'AkimaSpline':
+      interpolator = Akima1DInterpolator
+    elif self.interpolation_method == 'CubicSpline':
+      interpolator = CubicSpline
+    elif self.interpolation_method == 'Pchip':
+      interpolator = PchipInterpolator
+    else:
+      raise ValueError(f"Interpolation method '{self.interpolation_method}' not recognized. Choose from 'AkimaSpline', 'CubicSpline', or 'Pchip'.")
 
-    elif self.fit_type == 'legendre':
-      # Fit a polynomial of order self.taylor_order to the weights of the i-th mode
-      flat_coefficients = np.polynomial.legendre.legfit(self.time_array, self.weights, deg=self.taylor_order)
+    # Fit spline to each mode's weights
+    spline_coefficients = [interpolator(self.times, self.weights[:, i]) for i in range(self.n_modes)]
 
-    elif self.fit_type == 'hermite':
-      # Evaluate Legendre polynomial at time t
-      flat_coefficients = np.polynomial.hermite.hermfit(self.time_array, self.weights, deg=self.taylor_order)
+    return spline_coefficients
 
-    return flat_coefficients
-
-  def _evaluate_weights(self, t: float) -> np.ndarray:
-    """
-    Evaluate all mode‐weights at time t using Horner's method.
-    self.taylor_coefficients has shape (order+1, n_modes).
-    Returns array of length n_modes.
-    """
-    coeffs = self.taylor_coefficients
-    weights = np.zeros([self.n_modes,], dtype=np.float32)
-    if self.fit_type == 'polynomial':
-      # Evaluate polynomial at time t using Horner's method
-      for m in range(self.n_modes):
-        weights[m] = faster_polyval(t, coeffs[::-1, m])
-    elif self.fit_type == 'legendre':
-      # Evaluate Legendre polynomial at time t
-      for m in range(self.n_modes):
-        weights[m] = np.polynomial.legendre.legval(t, coeffs[::-1, m])
-    elif self.fit_type == 'hermite':
-      # Evaluate Legendre polynomial at time t
-      for m in range(self.n_modes):
-        weights[m] = np.polynomial.hermite.hermval(t, coeffs[::-1, m])
-
-    return weights
+  def _evaluate_weights(self, t):
+      self._weights[:] = self._pp_batch(t).astype(self._weights.dtype, copy=False)
 
   def _evaluate_trajectory(self, t: float) -> np.ndarray:
     """
@@ -233,17 +245,15 @@ class POD:
       3) one tensordot over modes
     """
     # Apply shift and verify periodicity
-    t_eff = t + self.timeshift
-    if self.is_periodic:
-        t_eff %= self.time_array[-1]
+    t_eff = self._fold_time(t + self.timeshift)
 
     # Evaluate weights at time t
-    w = self._evaluate_weights(t_eff)  # shape (n_modes,)
+    self._evaluate_weights(t_eff)
 
-    # Combine modes (shape (..., n_modes)) with weights result will have shape of self.modes[...,0] (space dims)
-    return np.tensordot(self.modes, w, axes=([2], [0]))
+    # return np.tensordot(self.modes, self._weights, axes=([2], [0]))
+    return tensordot_modes_weights(self._modes, self._weights)
 
-  def update_timeshift(self, timeshift: float):
+  def update_timeshift(self, timeshift: np.float32):
     """ Updates the timeshift of the POD.
     :param timeshift: new timeshift value
     """
@@ -259,40 +269,37 @@ class PODVelocity(POD):
     super().__init__(*args, **kwargs)
 
   def _evaluate_trajectory(self, t: float):
-    """ Evaluates the trajectory at time t using the POD modes and weights. It uses a first-order Taylor expansion to approximate the trajectory at time t.
-    :param t: time at which to evaluate the trajectory
-    :return: evaluated trajectory at time t
+    """ Evaluate the full trajectory at time t:
+        1) apply shift + periodic
+        2) eval weights using interpolation method
+        3) one tensordot over modes
     """
     # Apply shift
-    t_eff = t + self.timeshift  # Apply time shift if necessary
+    t_eff = self._fold_time(t + self.timeshift)  # Apply time shift if necessary
 
     # Check if t is within the bounds of the time array
     # TODO: verify if this is necessary (t_ro = t?)
-    if (t_eff - self.timeshift) <= 0:
-      t_ro = t_eff
-    else:
-      t_ro = (t_eff - self.timeshift)
+    t_ro = t
 
-    # Apply periodicity if necessary
-    if self.is_periodic:
-      t_eff = self.timeshift % self.time_array[-1]
+    # Evaluate weights at time t
+    self._evaluate_weights(t_eff)
+    self._weights *= t_ro
 
-    # Evaluate the weights at time t
-    weights = t_ro * self._evaluate_weights(t_eff)
+    # return np.tensordot(self.modes, self._weights, axes=([2], [0]))
+    return tensordot_modes_weights(self._modes, self._weights)
 
-    return np.tensordot(self.modes, weights, axes=([2], [0]))
 
 class PODSum:
   """ Class to handle the sum of a POD and a callable object.
   This class allows for the evaluation of the sum of a POD and a callable
   object that returns a trajectory at any given time point.
   """
-  def __init__(self, pod1: POD, pod2: Callable[[float], np.ndarray]):
+  def __init__(self, pod1: POD, pod2: Callable[[np.float32], np.ndarray]):
     self.pod1 = pod1
     self.pod2 = pod2
-    self.timeshif = 0.0
+    self.timeshift = 0.0
 
-  def __call__(self, t: float):
+  def __call__(self, t: np.float32):
     """ Evaluates the sum of the POD and the callable object at time t.
     :param t: time at which to evaluate the sum
     :return: evaluated sum at time t
@@ -300,10 +307,10 @@ class PODSum:
     # Evaluate the trajectory at time t
     return self.pod1(t) + self.pod2(t)
   
-  def update_timeshift(self, timeshift: float):
+  def update_timeshift(self, timeshift: np.float32):
     """ Updates the timeshift of the POD.
     :param timeshift: new timeshift value
     """
-    self.pod1.timeshift = timeshift
-    self.pod2.timeshift = timeshift
+    self.pod1.update_timeshift(timeshift)
+    self.pod2.update_timeshift(timeshift)
     self.timeshift = timeshift
