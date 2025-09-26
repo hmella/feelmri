@@ -2,16 +2,16 @@
 Imaging:
   RES: [70, 55, 1]
   TimeSpacing: {value: 40, unit: "ms"}
-  Oversampling: 1
-  Sequence: "FFE"
-  LinesPerShot: 1
+  Oversampling: 2
+  Sequence: "EPI"
+  LinesPerShot: 11
   FlipAngle: {value: 15, unit: "deg"}
 
 PositionEncoding:
   ke: {value: 448.8, unit: "1/m"}
   Directions:
-    dir1: [1.0, 1.0, 0.0]
-    dir2: [-1.0, 1.0, 0.0]
+    dir1: [1.0, 0.0, 0.0]
+    dir2: [0.0, 1.0, 0.0]
 
 # Hardware parameters
 Hardware:
@@ -25,5 +25,5 @@ Formatting:
   units: "m"
 
 Phantom:
-  T2star: {value: 50, unit: "ms"}
+  T2: {value: 50, unit: "ms"}
   T1: {value: 800, unit: "ms"} 

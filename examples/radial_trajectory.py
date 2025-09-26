@@ -110,9 +110,9 @@ if __name__ == '__main__':
 
     # Generate 4D flow image
     MPI_print('Generating frame {:d}'.format(fr))
-    t0 = time.time()
+    t0 = time.perf_counter()
     K[traj.local_idx,:,:,:,fr] = PC(MPI_rank, M, traj.local_points, traj.local_times, nodes, velocity, enc.encode(velocity), delta_B0, T2star, profile)
-    times.append(time.time()-t0)
+    times.append(time.perf_counter()-t0)
 
     # Show elapsed time from terminal
     MPI_print('Elapsed time: {:.2f} s'.format(times[-1]))

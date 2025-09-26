@@ -132,10 +132,10 @@ if __name__ == '__main__':
   K = cp.zeros([ro_samples, ph_samples, slices, enc.nb_directions, phantom.Nfr], dtype=cp.complex64)
 
   # Iterate over cardiac phases
-  t0 = time.time()
+  t0 = time.perf_counter()
   for fr in range(phantom.Nfr):
 
-      t0_fr = time.time()
+      t0_fr = time.perf_counter()
 
       # Read velocity data in frame fr
       phantom.read_data(fr)
@@ -147,7 +147,7 @@ if __name__ == '__main__':
       # Generate 4D flow image
       K[traj.local_idx,:,:,:,fr] = PC(M, cp_traj_points, cp_traj_times, cp_nodes, cp_velocity, cp_enc_velocity, delta_B0, parameters.T2star, profile)
 
-      print('Elapsed time frame {:d}: {:.2f} s'.format(fr, time.time()-t0_fr))
+      print('Elapsed time frame {:d}: {:.2f} s'.format(fr, time.perf_counter()-t0_fr))
       
       # Save kspace for debugging purposes
       if preview:
@@ -155,7 +155,7 @@ if __name__ == '__main__':
           pickle.dump({'kspace': cp.asnumpy(K), 'MPS_ori': cp.asnumpy(MPS_ori), 'LOC': cp.asnumpy(LOC), 'traj': traj}, f)
 
   # Store elapsed time
-  pc_time = time.time() - t0
+  pc_time = time.perf_counter() - t0
 
   # Print elapsed times
   print('Elapsed time-per-frame for 4D Flow generation: {:.2f} s'.format(pc_time/phantom.Nfr))

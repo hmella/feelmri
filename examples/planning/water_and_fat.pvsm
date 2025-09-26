@@ -41,7 +41,7 @@
       </Property>
       <Property name="Play" id="263.Play"/>
       <Property name="PlayMode" id="263.PlayMode" number_of_elements="1">
-        <Element index="0" value="2"/>
+        <Element index="0" value="0"/>
         <Domain name="enum" id="263.PlayMode.enum">
           <Entry value="0" text="Sequence"/>
           <Entry value="2" text="Snap To TimeSteps"/>
@@ -320,6 +320,11 @@
       <Property name="UseLogScale" id="16055.UseLogScale" number_of_elements="1">
         <Element index="0" value="0"/>
         <Domain name="bool" id="16055.UseLogScale.bool"/>
+      </Property>
+    </Proxy>
+    <Proxy group="misc" type="RepresentationAnimationHelper" id="16636" servers="16">
+      <Property name="Source" id="16636.Source" number_of_elements="1">
+        <Proxy value="15919"/>
       </Property>
     </Proxy>
     <Proxy group="representations" type="GridAxesRepresentation" id="15908" servers="21">
@@ -1085,7 +1090,7 @@
         <Domain name="bool" id="15956.EnableViewAngleLOD.bool"/>
       </Property>
       <Property name="Input" id="15956.Input" number_of_elements="1">
-        <Proxy value="16741" output_port="0"/>
+        <Proxy value="15919" output_port="0"/>
         <Domain name="input_type" id="15956.Input.input_type"/>
       </Property>
       <Property name="LastRadialAxisColor" id="15956.LastRadialAxisColor" number_of_elements="3">
@@ -4482,11 +4487,6 @@
         <Domain name="bool" id="15899.LegendLabelShadow.bool"/>
       </Property>
     </Proxy>
-    <Proxy group="misc" type="RepresentationAnimationHelper" id="16753" servers="16">
-      <Property name="Source" id="16753.Source" number_of_elements="1">
-        <Proxy value="16741"/>
-      </Property>
-    </Proxy>
     <Proxy group="representations" type="GeometryRepresentation" id="16384" servers="21">
       <Property name="DataAxesGrid" id="16384.DataAxesGrid" number_of_elements="1">
         <Proxy value="16168"/>
@@ -4550,7 +4550,7 @@
         <Domain name="bool" id="16384.SelectionVisibility.bool"/>
       </Property>
       <Property name="Visibility" id="16384.Visibility" number_of_elements="1">
-        <Element index="0" value="0"/>
+        <Element index="0" value="1"/>
         <Domain name="bool" id="16384.Visibility.bool"/>
       </Property>
       <Property name="Ambient" id="16384.Ambient" number_of_elements="1">
@@ -5492,17 +5492,14 @@
       </Property>
       <Property name="SelectionPointFieldDataArrayName" id="16621.SelectionPointFieldDataArrayName" number_of_elements="1">
         <Element index="0" value="Normals"/>
-        <Domain name="array_list" id="16621.SelectionPointFieldDataArrayName.array_list">
-          <String text="Normals"/>
-          <String text="TCoords"/>
-        </Domain>
+        <Domain name="array_list" id="16621.SelectionPointFieldDataArrayName.array_list"/>
       </Property>
       <Property name="SelectionVisibility" id="16621.SelectionVisibility" number_of_elements="1">
         <Element index="0" value="1"/>
         <Domain name="bool" id="16621.SelectionVisibility.bool"/>
       </Property>
       <Property name="Visibility" id="16621.Visibility" number_of_elements="1">
-        <Element index="0" value="1"/>
+        <Element index="0" value="0"/>
         <Domain name="bool" id="16621.Visibility.bool"/>
       </Property>
       <Property name="Ambient" id="16621.Ambient" number_of_elements="1">
@@ -5614,10 +5611,7 @@
         <Element index="2" value=""/>
         <Element index="3" value=""/>
         <Element index="4" value=""/>
-        <Domain name="array_list" id="16621.ColorArrayName.array_list">
-          <String text="Normals"/>
-          <String text="TCoords"/>
-        </Domain>
+        <Domain name="array_list" id="16621.ColorArrayName.array_list"/>
       </Property>
       <Property name="ColorByLODIndex" id="16621.ColorByLODIndex" number_of_elements="1">
         <Element index="0" value="0"/>
@@ -5724,8 +5718,6 @@
         <Element index="0" value="None"/>
         <Domain name="array_list" id="16621.GlyphTableIndexArray.array_list">
           <String text="None"/>
-          <String text="Normals"/>
-          <String text="TCoords"/>
         </Domain>
       </Property>
       <Property name="GlyphType" id="16621.GlyphType" number_of_elements="1">
@@ -5914,10 +5906,7 @@
       </Property>
       <Property name="OSPRayScaleArray" id="16621.OSPRayScaleArray" number_of_elements="1">
         <Element index="0" value="Normals"/>
-        <Domain name="array_list" id="16621.OSPRayScaleArray.array_list">
-          <String text="Normals"/>
-          <String text="TCoords"/>
-        </Domain>
+        <Domain name="array_list" id="16621.OSPRayScaleArray.array_list"/>
       </Property>
       <Property name="OSPRayScaleFunction" id="16621.OSPRayScaleFunction" number_of_elements="1">
         <Proxy value="16552"/>
@@ -5949,19 +5938,11 @@
         <Element index="2" value=""/>
         <Element index="3" value="0"/>
         <Element index="4" value="Normals"/>
-        <Domain name="array_list" id="16621.OpacityArray.array_list">
-          <String text="Normals"/>
-          <String text="TCoords"/>
-        </Domain>
+        <Domain name="array_list" id="16621.OpacityArray.array_list"/>
       </Property>
       <Property name="OpacityArrayComponent" id="16621.OpacityArrayComponent" number_of_elements="1">
         <Element index="0" value="0"/>
-        <Domain name="comps" id="16621.OpacityArrayComponent.comps">
-          <Entry value="0" text="X"/>
-          <Entry value="1" text="Y"/>
-          <Entry value="2" text="Z"/>
-          <Entry value="3" text="Magnitude"/>
-        </Domain>
+        <Domain name="comps" id="16621.OpacityArrayComponent.comps"/>
       </Property>
       <Property name="OpacityByArray" id="16621.OpacityByArray" number_of_elements="1">
         <Element index="0" value="0"/>
@@ -6035,12 +6016,7 @@
       </Property>
       <Property name="ScaleArrayComponent" id="16621.ScaleArrayComponent" number_of_elements="1">
         <Element index="0" value="0"/>
-        <Domain name="comps" id="16621.ScaleArrayComponent.comps">
-          <Entry value="0" text="X"/>
-          <Entry value="1" text="Y"/>
-          <Entry value="2" text="Z"/>
-          <Entry value="3" text="Magnitude"/>
-        </Domain>
+        <Domain name="comps" id="16621.ScaleArrayComponent.comps"/>
       </Property>
       <Property name="ScaleByArray" id="16621.ScaleByArray" number_of_elements="1">
         <Element index="0" value="0"/>
@@ -6084,9 +6060,7 @@
         <Element index="2" value=""/>
         <Element index="3" value="0"/>
         <Element index="4" value="Normals"/>
-        <Domain name="array_list" id="16621.SelectInputVectors.array_list">
-          <String text="Normals"/>
-        </Domain>
+        <Domain name="array_list" id="16621.SelectInputVectors.array_list"/>
       </Property>
       <Property name="SelectMaskArray" id="16621.SelectMaskArray" number_of_elements="1">
         <Element index="0" value=""/>
@@ -6095,35 +6069,30 @@
         <Element index="0" value="Normals"/>
         <Domain name="array_list" id="16621.SelectNormalArray.array_list">
           <String text="None"/>
-          <String text="Normals"/>
         </Domain>
       </Property>
       <Property name="SelectOrientationVectors" id="16621.SelectOrientationVectors" number_of_elements="1">
         <Element index="0" value="None"/>
         <Domain name="array_list" id="16621.SelectOrientationVectors.array_list">
           <String text="None"/>
-          <String text="Normals"/>
         </Domain>
       </Property>
       <Property name="SelectScaleArray" id="16621.SelectScaleArray" number_of_elements="1">
         <Element index="0" value="None"/>
         <Domain name="array_list" id="16621.SelectScaleArray.array_list">
           <String text="None"/>
-          <String text="Normals"/>
         </Domain>
       </Property>
       <Property name="SelectTCoordArray" id="16621.SelectTCoordArray" number_of_elements="1">
         <Element index="0" value="TCoords"/>
         <Domain name="array_list" id="16621.SelectTCoordArray.array_list">
           <String text="None"/>
-          <String text="TCoords"/>
         </Domain>
       </Property>
       <Property name="SelectTangentArray" id="16621.SelectTangentArray" number_of_elements="1">
         <Element index="0" value="None"/>
         <Domain name="array_list" id="16621.SelectTangentArray.array_list">
           <String text="None"/>
-          <String text="Normals"/>
         </Domain>
       </Property>
       <Property name="SelectionCellLabelBold" id="16621.SelectionCellLabelBold" number_of_elements="1">
@@ -6272,10 +6241,7 @@
         <Element index="2" value=""/>
         <Element index="3" value="0"/>
         <Element index="4" value="Normals"/>
-        <Domain name="array_list" id="16621.SetScaleArray.array_list">
-          <String text="Normals"/>
-          <String text="TCoords"/>
-        </Domain>
+        <Domain name="array_list" id="16621.SetScaleArray.array_list"/>
       </Property>
       <Property name="ShaderPreset" id="16621.ShaderPreset" number_of_elements="1">
         <Element index="0" value="1"/>
@@ -6399,7 +6365,7 @@
         </Domain>
       </Property>
       <Property name="Input" id="16143.Input" number_of_elements="1">
-        <Proxy value="16741" output_port="0"/>
+        <Proxy value="15919" output_port="0"/>
         <Domain name="input_array_cell" id="16143.Input.input_array_cell"/>
         <Domain name="input_array_point" id="16143.Input.input_array_point"/>
         <Domain name="input_type" id="16143.Input.input_type"/>
@@ -6442,11 +6408,15 @@
       </Property>
       <Property name="SelectionCellFieldDataArrayName" id="16143.SelectionCellFieldDataArrayName" number_of_elements="1">
         <Element index="0" value="cell_markers"/>
-        <Domain name="array_list" id="16143.SelectionCellFieldDataArrayName.array_list"/>
+        <Domain name="array_list" id="16143.SelectionCellFieldDataArrayName.array_list">
+          <String text="cell_markers"/>
+        </Domain>
       </Property>
       <Property name="SelectionPointFieldDataArrayName" id="16143.SelectionPointFieldDataArrayName" number_of_elements="1">
         <Element index="0" value="point_markers"/>
-        <Domain name="array_list" id="16143.SelectionPointFieldDataArrayName.array_list"/>
+        <Domain name="array_list" id="16143.SelectionPointFieldDataArrayName.array_list">
+          <String text="point_markers"/>
+        </Domain>
       </Property>
       <Property name="SelectionVisibility" id="16143.SelectionVisibility" number_of_elements="1">
         <Element index="0" value="1"/>
@@ -6675,6 +6645,8 @@
         <Element index="0" value="point_markers"/>
         <Domain name="array_list" id="16143.GlyphTableIndexArray.array_list">
           <String text="None"/>
+          <String text="point_markers"/>
+          <String text="cell_markers"/>
         </Domain>
       </Property>
       <Property name="GlyphType" id="16143.GlyphType" number_of_elements="1">
@@ -6864,7 +6836,9 @@
       </Property>
       <Property name="OSPRayScaleArray" id="16143.OSPRayScaleArray" number_of_elements="1">
         <Element index="0" value="point_markers"/>
-        <Domain name="array_list" id="16143.OSPRayScaleArray.array_list"/>
+        <Domain name="array_list" id="16143.OSPRayScaleArray.array_list">
+          <String text="point_markers"/>
+        </Domain>
       </Property>
       <Property name="OSPRayScaleFunction" id="16143.OSPRayScaleFunction" number_of_elements="1">
         <Proxy value="16058"/>
@@ -6896,11 +6870,15 @@
         <Element index="2" value=""/>
         <Element index="3" value="0"/>
         <Element index="4" value="point_markers"/>
-        <Domain name="array_list" id="16143.OpacityArray.array_list"/>
+        <Domain name="array_list" id="16143.OpacityArray.array_list">
+          <String text="point_markers"/>
+        </Domain>
       </Property>
       <Property name="OpacityArrayComponent" id="16143.OpacityArrayComponent" number_of_elements="1">
         <Element index="0" value="0"/>
-        <Domain name="comps" id="16143.OpacityArrayComponent.comps"/>
+        <Domain name="comps" id="16143.OpacityArrayComponent.comps">
+          <Entry value="0" text=""/>
+        </Domain>
       </Property>
       <Property name="OpacityArrayName" id="16143.OpacityArrayName" number_of_elements="5">
         <Element index="0" value=""/>
@@ -6908,7 +6886,10 @@
         <Element index="2" value=""/>
         <Element index="3" value="0"/>
         <Element index="4" value="point_markers"/>
-        <Domain name="array_list" id="16143.OpacityArrayName.array_list"/>
+        <Domain name="array_list" id="16143.OpacityArrayName.array_list">
+          <String text="point_markers"/>
+          <String text="cell_markers"/>
+        </Domain>
       </Property>
       <Property name="OpacityByArray" id="16143.OpacityByArray" number_of_elements="1">
         <Element index="0" value="0"/>
@@ -6916,7 +6897,9 @@
       </Property>
       <Property name="OpacityComponent" id="16143.OpacityComponent" number_of_elements="1">
         <Element index="0" value="0"/>
-        <Domain name="comps" id="16143.OpacityComponent.comps"/>
+        <Domain name="comps" id="16143.OpacityComponent.comps">
+          <Entry value="0" text=""/>
+        </Domain>
       </Property>
       <Property name="OpacityTransferFunction" id="16143.OpacityTransferFunction" number_of_elements="1">
         <Proxy value="16059"/>
@@ -7000,7 +6983,9 @@
       </Property>
       <Property name="ScaleArrayComponent" id="16143.ScaleArrayComponent" number_of_elements="1">
         <Element index="0" value="0"/>
-        <Domain name="comps" id="16143.ScaleArrayComponent.comps"/>
+        <Domain name="comps" id="16143.ScaleArrayComponent.comps">
+          <Entry value="0" text=""/>
+        </Domain>
       </Property>
       <Property name="ScaleByArray" id="16143.ScaleByArray" number_of_elements="1">
         <Element index="0" value="0"/>
@@ -7074,6 +7059,8 @@
         <Element index="0" value="point_markers"/>
         <Domain name="array_list" id="16143.SelectScaleArray.array_list">
           <String text="None"/>
+          <String text="point_markers"/>
+          <String text="cell_markers"/>
         </Domain>
       </Property>
       <Property name="SelectTCoordArray" id="16143.SelectTCoordArray" number_of_elements="1">
@@ -7234,7 +7221,9 @@
         <Element index="2" value=""/>
         <Element index="3" value="0"/>
         <Element index="4" value="point_markers"/>
-        <Domain name="array_list" id="16143.SetScaleArray.array_list"/>
+        <Domain name="array_list" id="16143.SetScaleArray.array_list">
+          <String text="point_markers"/>
+        </Domain>
       </Property>
       <Property name="ShaderPreset" id="16143.ShaderPreset" number_of_elements="1">
         <Element index="0" value="1"/>
@@ -7415,10 +7404,10 @@
         <Element index="0" value="%-#6.1e"/>
       </Property>
       <Property name="DataRangeMax" id="16159.DataRangeMax" number_of_elements="1">
-        <Element index="0" value="NaN"/>
+        <Element index="0" value="10"/>
       </Property>
       <Property name="DataRangeMin" id="16159.DataRangeMin" number_of_elements="1">
-        <Element index="0" value="NaN"/>
+        <Element index="0" value="1"/>
       </Property>
       <Property name="DrawAnnotations" id="16159.DrawAnnotations" number_of_elements="1">
         <Element index="0" value="1"/>
@@ -7747,42 +7736,42 @@
         <Domain name="bool" id="16416.TransformAllInputVectors.bool"/>
       </Property>
     </Proxy>
-    <Proxy group="sources" type="Xdmf3ReaderS" id="16741" servers="1">
-      <Property name="AsTime" id="16741.AsTime" number_of_elements="1">
+    <Proxy group="sources" type="Xdmf3ReaderS" id="15919" servers="1">
+      <Property name="AsTime" id="15919.AsTime" number_of_elements="1">
         <Element index="0" value="0"/>
-        <Domain name="bool" id="16741.AsTime.bool"/>
+        <Domain name="bool" id="15919.AsTime.bool"/>
       </Property>
-      <Property name="CellArrayInfo" id="16741.CellArrayInfo" number_of_elements="2">
+      <Property name="CellArrayInfo" id="15919.CellArrayInfo" number_of_elements="2">
         <Element index="0" value="cell_markers"/>
         <Element index="1" value="1"/>
       </Property>
-      <Property name="CellArrayStatus" id="16741.CellArrayStatus" number_of_elements="2">
+      <Property name="CellArrayStatus" id="15919.CellArrayStatus" number_of_elements="2">
         <Element index="0" value="cell_markers"/>
         <Element index="1" value="1"/>
-        <Domain name="array_list" id="16741.CellArrayStatus.array_list">
+        <Domain name="array_list" id="15919.CellArrayStatus.array_list">
           <String text="cell_markers"/>
         </Domain>
       </Property>
-      <Property name="FileName" id="16741.FileName" number_of_elements="1">
+      <Property name="FileName" id="15919.FileName" number_of_elements="1">
         <Element index="0" value="/home/hmella-eie/git/feelmri/examples/phantoms/water_and_fat.xdmf"/>
-        <Domain name="files" id="16741.FileName.files"/>
+        <Domain name="files" id="15919.FileName.files"/>
       </Property>
-      <Property name="PointArrayInfo" id="16741.PointArrayInfo" number_of_elements="2">
+      <Property name="PointArrayInfo" id="15919.PointArrayInfo" number_of_elements="2">
         <Element index="0" value="point_markers"/>
         <Element index="1" value="1"/>
       </Property>
-      <Property name="PointArrayStatus" id="16741.PointArrayStatus" number_of_elements="2">
+      <Property name="PointArrayStatus" id="15919.PointArrayStatus" number_of_elements="2">
         <Element index="0" value="point_markers"/>
         <Element index="1" value="1"/>
-        <Domain name="array_list" id="16741.PointArrayStatus.array_list">
+        <Domain name="array_list" id="15919.PointArrayStatus.array_list">
           <String text="point_markers"/>
         </Domain>
       </Property>
-      <Property name="SetInfo" id="16741.SetInfo"/>
-      <Property name="SetStatus" id="16741.SetStatus">
-        <Domain name="array_list" id="16741.SetStatus.array_list"/>
+      <Property name="SetInfo" id="15919.SetInfo"/>
+      <Property name="SetStatus" id="15919.SetStatus">
+        <Domain name="array_list" id="15919.SetStatus.array_list"/>
       </Property>
-      <Property name="TimestepValues" id="16741.TimestepValues" number_of_elements="1">
+      <Property name="TimestepValues" id="15919.TimestepValues" number_of_elements="1">
         <Element index="0" value="0"/>
       </Property>
     </Proxy>
@@ -7800,10 +7789,10 @@
         <Element index="1" value="0"/>
       </Property>
       <Property name="TimeSources" id="256.TimeSources" number_of_elements="4">
-        <Proxy value="16741"/>
+        <Proxy value="15919"/>
         <Proxy value="16179"/>
         <Proxy value="16416"/>
-        <Proxy value="16741"/>
+        <Proxy value="15919"/>
       </Property>
       <Property name="TimestepValues" id="256.TimestepValues" number_of_elements="1">
         <Element index="0" value="0"/>
@@ -8418,7 +8407,7 @@
         <Domain name="bool" id="16634.UseToneMapping.bool"/>
       </Property>
       <Property name="ViewSize" id="16634.ViewSize" number_of_elements="2">
-        <Element index="0" value="1883"/>
+        <Element index="0" value="1874"/>
         <Element index="1" value="1814"/>
       </Property>
       <Property name="ViewTime" id="16634.ViewTime" number_of_elements="1">
@@ -8460,14 +8449,14 @@
         <Element index="0" value="14.361406616345072"/>
       </Property>
       <Property name="CameraPosition" id="16634.CameraPosition" number_of_elements="3">
-        <Element index="0" value="-16.117782141921058"/>
-        <Element index="1" value="-48.67298989812819"/>
-        <Element index="2" value="21.215538396341454"/>
+        <Element index="0" value="-16.922158060517372"/>
+        <Element index="1" value="-79.35423281697538"/>
+        <Element index="2" value="4.065924114535281"/>
       </Property>
       <Property name="CameraPositionInfo" id="16634.CameraPositionInfo" number_of_elements="3">
-        <Element index="0" value="-16.117782141921058"/>
-        <Element index="1" value="-48.67298989812819"/>
-        <Element index="2" value="21.215538396341454"/>
+        <Element index="0" value="-16.922158060517372"/>
+        <Element index="1" value="-79.35423281697538"/>
+        <Element index="2" value="4.065924114535281"/>
       </Property>
       <Property name="CameraViewAngle" id="16634.CameraViewAngle" number_of_elements="1">
         <Element index="0" value="30"/>
@@ -8476,14 +8465,14 @@
         <Element index="0" value="30"/>
       </Property>
       <Property name="CameraViewUp" id="16634.CameraViewUp" number_of_elements="3">
-        <Element index="0" value="0.0345889298719466"/>
-        <Element index="1" value="0.3896849279766054"/>
-        <Element index="2" value="0.9202984639985995"/>
+        <Element index="0" value="-0.0720937001922162"/>
+        <Element index="1" value="0.06636492759529947"/>
+        <Element index="2" value="0.9951875173945188"/>
       </Property>
       <Property name="CameraViewUpInfo" id="16634.CameraViewUpInfo" number_of_elements="3">
-        <Element index="0" value="0.0345889298719466"/>
-        <Element index="1" value="0.3896849279766054"/>
-        <Element index="2" value="0.9202984639985995"/>
+        <Element index="0" value="-0.0720937001922162"/>
+        <Element index="1" value="0.06636492759529947"/>
+        <Element index="2" value="0.9951875173945188"/>
       </Property>
       <Property name="EyeAngle" id="16634.EyeAngle" number_of_elements="1">
         <Element index="0" value="2"/>
@@ -8505,6 +8494,9 @@
     </ProxyCollection>
     <ProxyCollection name="piecewise_functions">
       <Item id="16055" name="point_markers.PiecewiseFunction"/>
+    </ProxyCollection>
+    <ProxyCollection name="pq_helper_proxies.15919">
+      <Item id="16636" name="RepresentationAnimationHelper"/>
     </ProxyCollection>
     <ProxyCollection name="pq_helper_proxies.16143">
       <Item id="15908" name="DataAxesGrid" logname="UnstructuredGridRepresentation1/DataAxesGrid/GridAxesRepresentation"/>
@@ -8566,9 +8558,6 @@
       <Item id="15897" name="AxesGrid" logname="RenderView1/AxesGrid/GridAxes3DActor"/>
       <Item id="15899" name="LegendGrid" logname="RenderView1/LegendGrid/LegendGridActor"/>
     </ProxyCollection>
-    <ProxyCollection name="pq_helper_proxies.16741">
-      <Item id="16753" name="RepresentationAnimationHelper"/>
-    </ProxyCollection>
     <ProxyCollection name="representations">
       <Item id="16384" name="GeometryRepresentation1" logname="GeometryRepresentation1"/>
       <Item id="16621" name="GeometryRepresentation2" logname="GeometryRepresentation2"/>
@@ -8583,7 +8572,7 @@
     <ProxyCollection name="sources">
       <Item id="16179" name="Box1" logname="Box1"/>
       <Item id="16416" name="Transform1" logname="Transform1"/>
-      <Item id="16741" name="water_and_fat.xdmf" logname="water_and_fat.xdmf"/>
+      <Item id="15919" name="water_and_fat.xdmf" logname="water_and_fat.xdmf"/>
     </ProxyCollection>
     <ProxyCollection name="timekeeper">
       <Item id="256" name="TimeKeeper1"/>

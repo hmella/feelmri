@@ -1,17 +1,17 @@
 # Imaging parameters
 Imaging:
   RES: [150, 150, 1]
-  TR: {value: 18, unit: "ms"}
-  Oversampling: 2
+  TR: {value: 10, unit: "ms"}
+  Oversampling: 1
   Sequence: "FFE"
-  LinesPerShot: 1
-  FlipAngle: {value: 20, unit: "deg"}
+  LinesPerShot: 150
+  FlipAngle: {value: 90, unit: "deg"}
 
 # Hardware parameters
 Hardware:
   G_sr: {value: 180.0, unit: "mT/m/ms"}
   G_max: {value: 33.0, unit: "mT/m"}
-  r_BW: {value: 50.0e+3, unit: "Hz"}
+  r_BW: {value: 125.0e+3, unit: "Hz"}
 
 # Imaging orientation
 Formatting:
@@ -19,8 +19,12 @@ Formatting:
   units: "cm"
 
 Phantom:
-  dfat: {value: 220, unit: "Hz"}
-  T2_water: {value: 2000, unit: "ms"}
-  T2_fat:   {value: 30, unit: "ms"}
-  T1_water: {value: 4000, unit: "ms"}
-  T1_fat:   {value: 260, unit: "ms"}
+  dfat: {value: 31.8309141839, unit: "Hz"}
+
+  T1_water: {value: 100, unit: "ms"}
+  T2_water: {value: 100 , unit: "ms"}
+
+  T1_fat:   {value: 50, unit: "ms"}
+  T2_fat:   {value: 50, unit: "ms"}
+  # T1_fat: {value: 900, unit: "ms"}
+  # T2_fat: {value: 90 , unit: "ms"}

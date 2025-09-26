@@ -47,7 +47,6 @@ if __name__ == '__main__':
                     data=v.m_as('m/s'),
                     global_to_local=phantom.global_to_local_nodes,
                     n_modes=30,
-                    taylor_order=30,
                     is_periodic=True)
 
   # Export pod and phantom velocities to XDMF file

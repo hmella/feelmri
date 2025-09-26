@@ -1,12 +1,11 @@
 # Imaging parameters
 Imaging:
-  RES: [70, 55, 1]
+  RES: [70, 25, 1]
   TimeSpacing: {value: 40, unit: "ms"}
-  TR: {value: 18, unit: "ms"}
   Oversampling: 2
-  Sequence: "FFE"
-  LinesPerShot: 1
-  FlipAngle: {value: 20, unit: "deg"}
+  Sequence: "EPI"
+  LinesPerShot: 5
+  FlipAngle: {value: 15, unit: "deg"}
 
 # Hardware parameters
 Hardware:
