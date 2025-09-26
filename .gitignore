@@ -10,3 +10,7 @@ meshes/*.msh
 *.png
 *.mp4
 .*
+*.txt
+*.log
+*.eps
+*.pdf
