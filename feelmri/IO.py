@@ -202,19 +202,18 @@ class VTIFile:
 
     else:
       # Make sure data is ordered as contiguous arrays
-      if cellData != None:
+      if cellData is not None:
         cell_data = [self.make_contiguous(cellData[key]) for key in cellData.keys()]
-        cdfr = dict(zip(cellData.keys(), data))
-      if pointData != None:
-        point_data = [self.make_contiguous(cellData[key]) for key in pointData.keys()]
-        ptfr = dict(zip(pointData.keys(), data))
+        cdfr = dict(zip(cellData.keys(), cell_data))
+      if pointData is not None:
+        point_data = [self.make_contiguous(pointData[key]) for key in pointData.keys()]
+        ptfr = dict(zip(pointData.keys(), point_data))
 
       # Write data
-      pvd = VtkGroup(self.filename.as_posix())
       frame_path = str(self.filename.parent/self.filename.stem)
-      if cellData != None and pointData == None:
+      if cellData is not None and pointData is None:
         imageToVTK(frame_path, cellData=cdfr, origin=self.origin, spacing=self.spacing, direction=self.direction)
-      elif cellData == None and pointData != None:
+      elif cellData is None and pointData is not None:
         imageToVTK(frame_path, pointData=ptfr, origin=self.origin, spacing=self.spacing, direction=self.direction)
       else:
         imageToVTK(frame_path, cellData=cdfr, pointData=ptfr, origin=self.origin, spacing=self.spacing, direction=self.direction)
