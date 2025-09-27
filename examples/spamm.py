@@ -23,8 +23,6 @@ from feelmri.Recon import CartesianRecon
 
 if __name__ == '__main__':
 
-  t0_start = time.perf_counter()
-
   # Get path of this script to allow running from any directory
   script_path = Path(__file__).parent
 
@@ -101,7 +99,6 @@ if __name__ == '__main__':
   Mxy_spamm = np.zeros((phantom.local_nodes.shape[0], phantom.Nfr, enc.nb_directions), dtype=np.complex64)
 
   # Simulate the SPAMM preparation block for each encoding direction
-  t0_bloch = time.perf_counter()
   for d in range(len(enc.directions)):
 
     # Create sequence object
@@ -164,9 +161,6 @@ if __name__ == '__main__':
     # Assign the magnetization to the corresponding direction
     Mxy_spamm[..., d] = Mxy
 
-  # Measure elapsed time for the dummy sequence
-  bloch_time = time.perf_counter() - t0_bloch
-
   # Generate kspace trajectory
   traj = CartesianStack(FOV=planning.FOV.to('m'),
                       t_start=imaging.time_extent[1] - sp.rf.time,
@@ -177,7 +171,9 @@ if __name__ == '__main__':
                       LOC=planning.LOC.to('m'),
                       receiver_bw=parameters.Hardware.r_BW.to('Hz'), 
                       plot_seq=False)
-  # MPI_print('Echo time: {:.2f} ms'.format(traj.echo_time.m_as('ms')))
+
+  # Print echo time
+  MPI_print('Echo time: {:.2f} ms'.format(traj.echo_time.m_as('ms')))
 
   # kspace array
   ro_samples = traj.ro_samples
@@ -194,56 +190,30 @@ if __name__ == '__main__':
   # Iterate over cardiac phases
   kspace_points = traj.points
   kspace_times = traj.times.m_as('ms') - traj.t_start.m_as('ms')
-  kspace_time = 0.0
-  t0_loop = time.perf_counter()
   for fr in range(phantom.Nfr):
+
+    # Print progress
+    MPI_print("Generating frame {:d}/{:d}".format(fr+1, phantom.Nfr))
 
     # Update reference time of POD trajectory
     pod_trajectory.update_timeshift(fr * parameters.Imaging.TimeSpacing.m_as('ms'))
 
     # Generate 4D flow image
-    # MPI_print('Generating frame {:d}'.format(fr))
-    t0_kspace = time.perf_counter()
     K[:,:,:,:,fr] = Signal(MPI_rank, M, kspace_points, kspace_times, phantom.local_nodes, delta_omega0, T2.m_as('ms'), Mxy_spamm[:, fr, :], pod_trajectory)
-    kspace_time += time.perf_counter() - t0_kspace
 
-  # Store elapsed time
-  script_time = time.perf_counter() - t0_start
-  sim_time = bloch_time + kspace_time
+  # Gather results
+  K = gather_data(K)
 
-  # Print elapsed times
-  MPI_print('Elapsed time for bloch simulation: {:.2f} s'.format(bloch_time))
-  MPI_print('Elapsed time for k-space generation: {:.2f} s'.format(kspace_time))
+  # Image reconstruction
+  I = CartesianRecon(K, traj)
 
-  # Check if exp1_times.txt exists and load and append times (dummy_time, imaging_time, kspace_time) if it does or create it if it does not
+  # Show reconstruction
   if MPI_rank == 0:
-    times_file = script_path/'results/o-cspamm/exp2_times.txt'
-    try:
-      times = np.loadtxt(times_file)
-      times = np.vstack((times, (bloch_time, kspace_time, sim_time, script_time)))
-      np.savetxt(times_file, times)
-    except FileNotFoundError:
-      times = np.array([(bloch_time, kspace_time, sim_time, script_time)])
-      np.savetxt(times_file, times)
-
-  # # Gather results
-  # K = gather_data(K)
-
-  # # # Export generated data
-  # # if MPI_rank==0:
-  # #   with open(str(export_path), 'wb') as f:
-  # #     pickle.dump({'kspace': K, 'MPS_ori': MPS_ori, 'LOC': LOC, 'traj': traj}, f)
-
-  # # Image reconstruction
-  # I = CartesianRecon(K, traj)
-
-  # # Show reconstruction
-  # if MPI_rank == 0:
-  #   mx = np.abs(I[...,0,:])
-  #   my = np.abs(I[...,1,:])
-  #   mxy = np.abs(I[...,0,:] - I[...,1,:])
-  #   plotter = MRIPlotter(images=[mx, my, mxy], 
-  #                       title=['SPAMM X', 'SPAMM Y', 'O-CSPAMM'], 
-  #                       FOV=planning.FOV.m_as('m'), caxis=[0, 13])
-  #   # plotter.export_images('spamm_images_semi_bloch/')
-  #   plotter.show()
+    mx = np.abs(I[...,0,:])
+    my = np.abs(I[...,1,:])
+    mxy = np.abs(I[...,0,:] - I[...,1,:])
+    plotter = MRIPlotter(images=[mx, my, mxy], 
+                        title=['SPAMM X', 'SPAMM Y', 'O-CSPAMM'], 
+                        FOV=planning.FOV.m_as('m'), caxis=[0, 13])
+    # plotter.export_images('spamm_images_semi_bloch/')
+    plotter.show()

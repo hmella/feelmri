@@ -1,15 +1,12 @@
 import os
 
 os.environ["OPENBLAS_NUM_THREADS"] = "1" # export OPENBLAS_NUM_THREADS=1
-import pickle
-import time
 from pathlib import Path
 
 import numpy as np
 from pint import Quantity as Q_
 
 from feelmri.Bloch import BlochSolver, Sequence, SequenceBlock
-from feelmri.IO import XDMFFile
 from feelmri.KSpaceTraj import CartesianStack
 from feelmri.MPIUtilities import MPI_print, MPI_rank, gather_data
 from feelmri.MRI import Signal
@@ -25,6 +22,7 @@ from feelmri.Recon import CartesianRecon
 # Field inhomogeneity
 def spatial(x):
     return x[:,0] + x[:,1] + x[:,2]
+
 
 if __name__ == '__main__':
 
@@ -110,10 +108,6 @@ if __name__ == '__main__':
     else:
       df.append(Q_(0.0, 'Hz') * np.ones(rho[cs].shape, dtype=np.float32))
 
-    # file = XDMFFile('test_wf_{:d}_{:d}.xdmf'.format(cs, MPI_rank), nodes=phantoms[cs].local_nodes, elements={phantoms[cs].cell_type: phantoms[cs].local_elements})
-    # file.write(pointData={'rho': rho[cs], 'df': df[cs]}, time=0.0)
-    # file.close()
-
     # T1 and T2 relaxation times
     if cs == 0:
       T1.append(parameters.Phantom.T1_fat * np.ones(rho[cs].shape, dtype=np.float32))
@@ -138,14 +132,6 @@ if __name__ == '__main__':
                           dt=Q_(1, 'ms'), 
                           store_magnetization=True)
 
-  # Add dummy blocks to achieve the steady state
-  dummy = imaging.copy()
-  dummy.store_magnetization = False
-  time_spacing = parameters.Imaging.TR - (imaging.time_extent[1] - sp.rf.ref)
-  # for _ in range(80):
-  #   seq.add_block(dummy)
-  #   seq.add_block(time_spacing, dt=Q_(1, 'ms'))  # Time spacing between TRs
-
   # Create a different solver for each chemical specie
   solvers  = []
   delta_B0 = []
@@ -163,10 +149,7 @@ if __name__ == '__main__':
     solvers[cs].solve()
 
   # Generate kspace trajectory
-  print(type(imaging.time_extent[1].m_as('ms')), type(sp.rf.time.m_as('ms')))
   start = imaging.time_extent[1] - sp.rf.time
-  print(start)
-  # imaging.plot()
   traj = CartesianStack(FOV=planning.FOV.to('m'),
                       t_start=start,
                       res=parameters.Imaging.RES, 
@@ -176,7 +159,8 @@ if __name__ == '__main__':
                       LOC=planning.LOC.to('m'),
                       receiver_bw=parameters.Hardware.r_BW.to('Hz'), 
                       plot_seq=False)
-  # traj.plot_trajectory()
+  
+  # Echo time
   MPI_print('Echo time: {:.2f} ms'.format(traj.echo_time.m_as('ms')))
 
   # kspace array
@@ -185,14 +169,13 @@ if __name__ == '__main__':
   slices = traj.slices
   K = np.zeros([ro_samples, ph_samples, slices, 1, 1], dtype=np.complex64)
 
-  # # Create XDMF file for debugging
-  # file = XDMFFile(script_path/'magnetization_{:d}.xdmf'.format(MPI_rank), nodes=phantoms[0].local_nodes, elements={phantoms[0].cell_type: phantoms[0].local_elements})
-
   # Assemble mass matrices for integrals (just once)
   M = [phantoms[cs].mass_matrix(lumped=True, quadrature_order=2) for cs in range(Nb_species)]
 
+  # Time spacing needed to achieve the desired TR
+  time_spacing = parameters.Imaging.TR - (imaging.time_extent[1] - sp.rf.ref)
+
   # Generate k-space data for chemical specie, shot and slice
-  t0 = time.perf_counter()  
   for s in range(slices):
     for i, sh in enumerate(traj.shots):     
 
@@ -201,7 +184,6 @@ if __name__ == '__main__':
                       traj.points[1][:,sh,s,np.newaxis], 
                       traj.points[2][:,sh,s,np.newaxis])
       kspace_times = (traj.times.m_as('ms')[:,sh,s,np.newaxis] - traj.t_start.m_as('ms'))
-      print(kspace_times.dtype, start.dtype)
 
       # Add imaging and delay blocks to the sequence
       seq.add_block(imaging)
@@ -213,12 +195,6 @@ if __name__ == '__main__':
 
         # Solve new blocks
         Mxy, Mz = solvers[cs].solve(start=-2)
-        # if cs == 0:
-        #   # Export magnetization and displacement for debugging
-        #   file.write(pointData={'Mx': np.real(Mxy), 
-        #                         'My': np.imag(Mxy),
-        #                         'Mz': Mz},
-        #                         time=i*parameters.Imaging.TR)
 
         # Define field inhomogeneity for this frame
         delta_phi = scanner.gammabar.to('1/mT/ms') * delta_B0[cs].to('mT')
@@ -227,17 +203,6 @@ if __name__ == '__main__':
         # Generate 4D flow image
         tmp = Signal(MPI_rank, M[cs], kspace_points, kspace_times, phantoms[cs].local_nodes, delta_omega, T2[cs].m_as('ms'), Mxy, None)
         K[:,sh,s,:,0] += tmp.swapaxes(0, 1)[:,:,0]
-
-  # Store elapsed time
-  wf_time = time.perf_counter() - t0
-
-  # # Print elapsed times
-  # MPI_print('Elapsed time for Bloch solver: {:.2f} s'.format(bloch_time))
-  # MPI_print('Elapsed for k-space generation: {:.2f} s'.format(wf_time))
-  # MPI_print('Elapsed time for k-space + Bloch solver: {:.2f} s'.format(bloch_time + wf_time))
-
-  # # Close the file
-  # file.close()
 
   # Gather results
   K = gather_data(K)
@@ -252,6 +217,3 @@ if __name__ == '__main__':
     phi = np.angle(I[...,0,:])
     plotter = MRIPlotter(images=[mag, phi], title=['Magnitude', 'Phase'], FOV=planning.FOV.m_as('m'))
     plotter.show()
-
-    # plotter = MRIPlotter(images=[np.abs(K[...,0,:])], title=['k-space'], FOV=planning.FOV.m_as('m'))
-    # plotter.show()

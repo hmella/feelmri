@@ -1,31 +1,25 @@
 import os
-import sys
 
 os.environ["OPENBLAS_NUM_THREADS"] = "1" # export OPENBLAS_NUM_THREADS=1
-import pickle
-import time
 from pathlib import Path
 
 import numpy as np
 from pint import Quantity as Q_
 
 from feelmri.Bloch import BlochSolver, Sequence, SequenceBlock
-from feelmri.IO import XDMFFile
-from feelmri.KSpaceTraj import CartesianStack, RadialStack
+from feelmri.KSpaceTraj import RadialStack
 from feelmri.Motion import PODVelocity
 from feelmri.MPIUtilities import MPI_print, MPI_rank, gather_data
+from feelmri.MRI import Signal
 from feelmri.MRImaging import SliceProfile, VelocityEncoding
 from feelmri.MRObjects import RF, Gradient, Scanner
 from feelmri.Noise import add_cpx_noise
 from feelmri.Parameters import ParameterHandler, PVSMParser
 from feelmri.Phantom import FEMPhantom
-from feelmri.MRI import Signal
 from feelmri.Plotter import MRIPlotter
-from feelmri.Recon import CartesianRecon, reconstruct_nufft
+from feelmri.Recon import reconstruct_nufft
 
 if __name__ == '__main__':
-
-  t0_start = time.perf_counter()
 
   # Get path of this script to allow running from any directory
   script_path = Path(__file__).parent
@@ -101,7 +95,6 @@ if __name__ == '__main__':
     dt=Q_(1e-2, 'ms'), 
     plot=False, 
     bandwidth=Q_(12, 'kHz')) # 'maximum'
-  # sp.optimize(frac_start=0.96, frac_end=0.98, N=100)
 
   # Create bipolar gradients
   start = sp.rephasing.time + sp.rephasing.dur
@@ -119,7 +112,6 @@ if __name__ == '__main__':
   Mxy_PC = np.zeros([phantom.local_nodes.shape[0], Nb_frames, enc.nb_directions], dtype=np.complex64)
 
   # Create sequence object and solve magnetization
-  t0_bloch = time.perf_counter()
   seq = Sequence()
   solver = BlochSolver(seq, phantom, 
                         scanner=scanner, 
@@ -179,8 +171,6 @@ if __name__ == '__main__':
     CP_spacing = pars.Imaging.TimeSpacing - 4*pars.Imaging.TR
     seq.add_block(CP_spacing, dt=Q_(1, 'ms'))
 
-  # seq.plot(blocks=slice(-9, None), figsize=(10, 6), tight_layout=True, export_to='4dflow_sequence.png')
-
   # Solve for x and y directions
   Mxy, Mz = solver.solve()
   Mxy_PC[..., 0] = Mxy[..., 0::4]
@@ -188,35 +178,7 @@ if __name__ == '__main__':
   Mxy_PC[..., 2] = Mxy[..., 2::4]
   Mxy_PC[..., 3] = Mxy[..., 3::4]
 
-  # # Export magnetization and displacement for debugging
-  # if d == 0:
-  #   file = XDMFFile('magnetization_{:d}.xdmf'.format(MPI_rank), nodes=phantom.local_nodes, elements={phantom.cell_type: phantom.local_elements})
-  #   for fr in range(Mxy.shape[1]):
-  #     # Write magnetization and displacement at each frame
-  #     t = fr*pars.Imaging.TimeSpacing.m_as('ms')
-  #     pod_velocity.update_timeshift(t)
-  #     file.write(pointData={'M': np.stack((np.real(Mxy[:,fr]), np.imag(Mxy[:,fr]), Mz[:,fr]), axis=1), 'displacement': pod_velocity(1.715)}, time=t)
-  #   file.close()
-
-  # Measure elapsed time for the dummy sequence
-  bloch_time = time.perf_counter() - t0_bloch
-
-  # # Path to export the generated data
-  # export_path = Path(script_path/'MRImages/4dflow_{:s}_V{:.0f}.pkl'.format(pars.Imaging.Sequence, pars.VelocityEncoding.VENC.m_as('cm/s')))
-
-  # # Make sure the directory exist
-  # os.makedirs(str(export_path.parent), exist_ok=True)
-
-  # Generate kspace trajectory
-  # traj = CartesianStack(FOV = planning.FOV.to('m'),
-  #   t_start = imaging.time_extent[1] - sp.rf.time,
-  #   res = pars.Imaging.RECON_RES, 
-  #   oversampling = pars.Imaging.Oversampling, 
-  #   lines_per_shot = pars.Imaging.LinesPerShot, 
-  #   MPS_ori = planning.MPS, 
-  #   LOC = planning.LOC, 
-  #   receiver_bw=pars.Hardware.r_BW, 
-  #   plot_seq=False)
+  # k-space trajectory
   traj = RadialStack(FOV = planning.FOV.to('m'),
     t_start = imaging.time_extent[1] - sp.rf.time,
     res = pars.Imaging.ACQ_RES, 
@@ -227,7 +189,6 @@ if __name__ == '__main__':
     receiver_bw=pars.Hardware.r_BW, 
     plot_seq=False,
     golden_angle=True)
-  # traj.plot_trajectory(tight_layout=True, export_to='4dflow_trajectory.png')
 
   # Print echo time
   MPI_print('Echo time = {:.2f} ms'.format(traj.echo_time.m_as('ms')))
@@ -250,38 +211,16 @@ if __name__ == '__main__':
   T2 = T2star.m_as('ms')
 
   # Iterate over cardiac phases
-  kspace_time = 0.0
   for fr in range(Nb_frames):
 
-      # Start time for the frame      
-      t0_fr = time.perf_counter()
+      # Show progress
+      MPI_print("Generating frame {:d}/{:d}".format(fr+1, Nb_frames))
 
       # Update timeshift in the POD velocity
       pod_velocity.update_timeshift(fr * pars.Imaging.TimeSpacing.m_as('ms'))
 
       # Generate 4D flow image
-      t0_kspace = time.perf_counter()
       K[:,:,:,:,fr] = Signal(MPI_rank, M, traj_points, traj_times, phantom.local_nodes, delta_omega, T2, Mxy_PC[:, fr, :], pod_velocity)
-      kspace_time += time.perf_counter() - t0_kspace
-
-  # Store elapsed time
-  script_time = time.perf_counter() - t0_start
-  sim_time = bloch_time + kspace_time
-
-  # Print elapsed times
-  MPI_print('Elapsed time for bloch simulation: {:.2f} s'.format(bloch_time))
-  MPI_print('Elapsed time for k-space generation: {:.2f} s'.format(kspace_time))
-
-  # Check if exp1_times.txt exists and load and append times (dummy_time, imaging_time, kspace_time) if it does or create it if it does not
-  if MPI_rank == 0:
-    times_file = script_path/f'results/4dflow/exp3_times_{pars.Imaging.Sequence}.txt'
-    try:
-      times = np.loadtxt(times_file)
-      times = np.vstack((times, (bloch_time, kspace_time, sim_time, script_time)))
-      np.savetxt(times_file, times)
-    except FileNotFoundError:
-      times = np.array([(bloch_time, kspace_time, sim_time, script_time)])
-      np.savetxt(times_file, times)
 
   # Gather results
   K = gather_data(K)
@@ -289,36 +228,26 @@ if __name__ == '__main__':
   # Add noise to kspace
   K = add_cpx_noise(K, relative_std=0.00001)
 
-  # # Export generated data
-  # if MPI_rank==0:
-  #   with open(str(export_path), 'wb') as f:
-  #     pickle.dump({'kspace': K, 'MPS_ori': planning.MPS, 'LOC': planning.LOC, 'traj': traj}, f)
-
-  # # Image reconstruction
-  # I = CartesianRecon(K, traj)
-
-  # kx, ky, kz: (R, L, S) in cycles/FOV
-  # kdata: (R, L, S, C)
+  # Reconstruct images
   RES = pars.Imaging.RECON_RES
-  I = reconstruct_nufft(
+  Im = reconstruct_nufft(
       kdata=K.reshape((K.shape[0], K.shape[1], K.shape[2], -1)),  # (R, L, S, C)
       ktraj=tuple([k/(2*k.max()) for i, k in enumerate(traj_points)]),
       img_shape=RES,
       auto_dcw="radial-2d",   # fast, good default for radials
       mode="adjoint",
-      combine=None
-  )
-  I = I.transpose((1,2,3,0)).reshape((RES[0], RES[1], RES[2], enc.nb_directions, -1))  # (Nx, Ny, Nz, enc, C)
+      combine=None)
+  Im = Im.transpose((1,2,3,0)).reshape((RES[0], RES[1], RES[2], enc.nb_directions, -1))  # (Nx, Ny, Nz, enc, C)
 
   # Show reconstruction
-  m = np.abs(I[...,0,:])
+  m = np.abs(Im[...,0,:])
   mask = m > 0.5*m.max()
-  phi = np.angle(I)
+  phi = np.angle(Im)
   f = enc.VENC[0].m_as('m/s')/np.pi
-  phi_ref = f * np.angle(I[...,3,:]) * mask
-  phi_vx = f * np.angle(I[...,0,:] * np.conj(I[...,3,:])) * mask
-  phi_vy = f * np.angle(I[...,1,:] * np.conj(I[...,3,:])) * mask
-  phi_vz = f * np.angle(I[...,2,:] * np.conj(I[...,3,:])) * mask
+  phi_ref = f * np.angle(Im[...,3,:]) * mask
+  phi_vx = f * np.angle(Im[...,0,:] * np.conj(Im[...,3,:])) * mask
+  phi_vy = f * np.angle(Im[...,1,:] * np.conj(Im[...,3,:])) * mask
+  phi_vz = f * np.angle(Im[...,2,:] * np.conj(Im[...,3,:])) * mask
   if MPI_rank == 0:
     plotter = MRIPlotter(images=[m, phi_vx, phi_vy, phi_vz, phi_ref], title=['Magnitude', '$\\phi_{vx}$ ', '$\\phi_{vy}$', '$\\phi_{vz}$', '$\\phi_{ref}$'], FOV=planning.FOV.m_as('m'), swap_axes=[0, 2])
     plotter.show()

@@ -1,8 +1,6 @@
 import os
 
 os.environ["OPENBLAS_NUM_THREADS"] = "1" # export OPENBLAS_NUM_THREADS=1
-import pickle
-import time
 from pathlib import Path
 
 import numpy as np
@@ -13,17 +11,15 @@ from feelmri.IO import XDMFFile
 from feelmri.KSpaceTraj import CartesianStack
 from feelmri.Motion import POD, RespiratoryMotion
 from feelmri.MPIUtilities import MPI_print, MPI_rank, gather_data
+from feelmri.MRI import Signal
 from feelmri.MRImaging import SliceProfile
 from feelmri.MRObjects import RF, Scanner
 from feelmri.Parameters import ParameterHandler, PVSMParser
 from feelmri.Phantom import FEMPhantom
 from feelmri.Plotter import MRIPlotter
 from feelmri.Recon import CartesianRecon
-from feelmri.MRI import Signal
 
 if __name__ == '__main__':
-
-  t0_start = time.perf_counter()
 
   # Get path of this script to allow running from any directory
   script_path = Path(__file__).parent
@@ -41,7 +37,7 @@ if __name__ == '__main__':
   MPI_print('Voxel size: ({:.2f}, {:.2f}, {:.2f}) mm'.format(vxsz[0], vxsz[1], vxsz[2]))
 
   # Create FEM phantom object
-  phantom = FEMPhantom(script_path/'phantoms/beating_heart_P2.xdmf', scale_factor=1.0)
+  phantom = FEMPhantom(script_path/'phantoms/beating_heart.xdmf', scale_factor=1.0)
 
   # Translate phantom to obtain the desired slice location
   phantom.orient(planning.MPS, planning.LOC.to('m'))
@@ -113,7 +109,6 @@ if __name__ == '__main__':
     bandwidth='maximum')
 
   # Imaging and dummy blocks
-  t0_dummy = time.perf_counter()
   imaging = SequenceBlock(gradients=[sp.dephasing, sp.rephasing], 
                           rf_pulses=[sp.rf], 
                           dt_rf=Q_(1e-2, 'ms'), 
@@ -133,8 +128,9 @@ if __name__ == '__main__':
                       LOC=planning.LOC,
                       receiver_bw=parameters.Hardware.r_BW.to('Hz'), 
                       plot_seq=False)
-  # traj.plot_trajectory()
-  # MPI_print('Echo time: {:.1f} ms'.format(traj.echo_time.m_as('ms')))
+  
+  # Echo time
+  MPI_print('Echo time: {:.1f} ms'.format(traj.echo_time.m_as('ms')))
 
   # kspace array
   ro_samples = traj.ro_samples
@@ -163,7 +159,6 @@ if __name__ == '__main__':
 
   # Solve dummy blocks to reach the steady state
   solver.solve()
-  dummy_time = time.perf_counter() - t0_dummy
 
   # # Create XDMF file for debugging
   # file = XDMFFile(script_path/'magnetization_{:d}.xdmf'.format(MPI_rank), nodes=phantom.local_nodes, elements={phantom.cell_type: phantom.local_elements})
@@ -177,20 +172,18 @@ if __name__ == '__main__':
   # Generate k-space data for each shot and slice
   imaging_time = 0.0
   kspace_time = 0.0
-  t0_loop = time.perf_counter()
   for s in range(slices):
 
     # Iterate over shots
     for i, sh in enumerate(traj.shots):
 
-      # MPI_print("Generating shot {:d}/{:d} for slice {:d}/{:d}".format(i+1, traj.nb_shots, s+1, K.shape[2]))
+      # Print progress
+      MPI_print("Generating shot {:d}/{:d} for slice {:d}/{:d}".format(i+1, traj.nb_shots, s+1, K.shape[2]))
 
       # Add imaging and delay blocks to the sequence
       seq.add_block(imaging)
       seq.add_block(time_spacing)  # Delay between imaging blocks
-      t0_imaging = time.perf_counter()
       Mxy, Mz = solver.solve(start=-2)
-      imaging_time += time.perf_counter() - t0_imaging
 
       # k-space points per shot
       kspace_points = (traj.points[0][:,sh,s,np.newaxis], 
@@ -199,10 +192,8 @@ if __name__ == '__main__':
       kspace_times = traj.times.m_as('ms')[:,sh,s,np.newaxis] - traj.t_start.m_as('ms')
 
       # Generate 4D flow image
-      t0_kspace = time.perf_counter()
       tmp = Signal(MPI_rank, M, kspace_points, kspace_times, phantom.local_nodes, delta_omega0, T2, Mxy, pod_sum)
       K[:,sh,s,:,0] = tmp.swapaxes(0, 1)[:,:,0]
-      kspace_time += time.perf_counter() - t0_kspace
 
       # Update reference time of POD trajectory
       pod_sum.update_timeshift(seq.blocks[-2].time_extent[1].m_as('ms'))
@@ -216,28 +207,6 @@ if __name__ == '__main__':
       #                       time=i*parameters.Imaging.TR)
 
   # file.close()
-
-  # Store elapsed time
-  script_time = time.perf_counter() - t0_start
-  sim_time = dummy_time + imaging_time + kspace_time
-
-  # Print elapsed times
-  MPI_print('Elapsed time for dummy blocks: {:.2f} s'.format(dummy_time))
-  MPI_print('Elapsed time for imaging blocks: {:.2f} s'.format(imaging_time))
-  MPI_print('Elapsed time for k-space generation: {:.2f} s'.format(kspace_time))
-  MPI_print('Elapsed time for simulation: {:.2f} s'.format(sim_time))
-  MPI_print('Elapsed time for script: {:.2f} s'.format(script_time))
-
-  # Check if exp1_times.txt exists and load and append times (dummy_time, imaging_time, kspace_time) if it does or create it if it does not
-  if MPI_rank == 0:
-    times_file = script_path/'results/free-running/exp1_times.txt'
-    try:
-      times = np.loadtxt(times_file)
-      times = np.vstack((times, (dummy_time, imaging_time, kspace_time, sim_time, script_time)))
-      np.savetxt(times_file, times)
-    except FileNotFoundError:
-      times = np.array([(dummy_time, imaging_time, kspace_time, sim_time, script_time)])
-      np.savetxt(times_file, times)
 
   # Gather results
   K = gather_data(K)
