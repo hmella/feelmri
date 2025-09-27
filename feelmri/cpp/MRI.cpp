@@ -82,7 +82,7 @@ Tensor<std::complex<T>, 4, RowMajor> Signal(
 
     // The ‘template’ disambiguator is REQUIRED here:
     auto arr = pod_trajectory(t(0,0,0)).template cast<py::array_t<T, py::array::c_style>>();
-    Map<const Matrix<T, Dynamic, 3>> traj(nullptr, nb_nodes, 3);
+    Map<const Matrix<T, Dynamic, 3, RowMajor>> traj(nullptr, nb_nodes, 3);
 
     // T2* decay
     Array<T, Dynamic, 1> T2_decay(nb_nodes, 1);
@@ -109,9 +109,9 @@ Tensor<std::complex<T>, 4, RowMajor> Signal(
           // Iterate over slices
           for (uint k = 0; k < nb_kz; k++, row++){
 
-            if (t_old != t(i,j,k)){
+            if (t_old == t(i,j,k)){
               
-            // } else {
+            } else {
 
               // Update position
               {
