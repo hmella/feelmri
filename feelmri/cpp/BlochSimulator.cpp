@@ -38,9 +38,6 @@ Magnetization<T> solve_mri(
     const int n_pos = r0.rows();
     const int n_time = rf_all.size();
 
-    // Position at current time
-    Matrix<T, Dynamic, Dynamic> r(n_pos, 3);
-
     // Initialize matrices for Mxy and Mz and set initial conditions
     Matrix<C, Dynamic, Dynamic> Mxy(n_pos, n_time);
     Matrix<T, Dynamic, Dynamic> Mz(n_pos, n_time);
@@ -93,10 +90,6 @@ Magnetization<T> solve_mri(
           new (&traj) Eigen::Map<const Matrix<T, Dynamic, 3, RowMajor>>(arr.data(), n_pos, 3);
         }
 
-        // // Map without copy (NumPy is row-major/C-contiguous)
-        // r.noalias() = r0;
-        // r.noalias() += traj;
-
         // rf parts (scalars)
         const T rf_r = rf_all[i+1].real();
         const T rf_i = rf_all[i+1].imag();
@@ -118,7 +111,7 @@ Magnetization<T> solve_mri(
         conj_a = alpha.conjugate();
 
         // Rotation regime
-        // if (regime_idx[i+1]){
+        if (regime_idx[i+1]){
           nxy = (rf_r + i1 * rf_i) / Bnorm;
           beta = - i1 * nxy * sin_phi2;
           Mxy.col(i + 1) = (T(2.0) * conj_a * beta * Mz.col(i).array()
@@ -127,13 +120,13 @@ Magnetization<T> solve_mri(
 
           Mz.col(i + 1) = ((alpha.abs2() - beta.abs2()) * Mz.col(i).array()
                           - T(2.0) * (alpha * beta * Mxy.col(i).array().conjugate()).real()).matrix();
-        // }
-        // // Precession regime
-        // else {
-        //   Mxy.col(i + 1) = (conj_a.square() * Mxy.col(i).array()).matrix();
+        }
+        // Precession regime
+        else {
+          Mxy.col(i + 1) = (conj_a.square() * Mxy.col(i).array()).matrix();
 
-        //   Mz.col(i + 1) = (alpha.abs2() * Mz.col(i).array()).matrix();
-        // }
+          Mz.col(i + 1) = (alpha.abs2() * Mz.col(i).array()).matrix();
+        }
 
         // Apply T2 and T1 relaxation
         Mxy.col(i + 1) = (Mxy.col(i + 1).array() * e2).matrix();
