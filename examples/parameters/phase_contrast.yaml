@@ -5,7 +5,7 @@ Imaging:
   Oversampling: 2
   Sequence: "FFE"
   LinesPerShot: 1
-  FlipAngle: {value: 20, unit: "deg"}
+  FlipAngle: {value: 10, unit: "deg"}
 
 VelocityEncoding:
   VENC: {value: 2.2, unit: "m/s"}

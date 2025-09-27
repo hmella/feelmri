@@ -11,7 +11,7 @@ from pint import Quantity as Q_
 
 from feelmri.Bloch import BlochSolver, Sequence, SequenceBlock
 from feelmri.IO import XDMFFile
-from feelmri.KSpaceTraj import CartesianStack, RadialStack
+from feelmri.KSpaceTraj import CartesianStack
 from feelmri.Motion import PODVelocity
 from feelmri.MPIUtilities import MPI_print, MPI_rank, gather_data
 from feelmri.MRI import Signal
@@ -21,7 +21,7 @@ from feelmri.Noise import add_cpx_noise
 from feelmri.Parameters import ParameterHandler, PVSMParser
 from feelmri.Phantom import FEMPhantom
 from feelmri.Plotter import MRIPlotter
-from feelmri.Recon import CartesianRecon, NUFFTRecon
+from feelmri.Recon import CartesianRecon
 
 if __name__ == '__main__':
 
@@ -57,17 +57,16 @@ if __name__ == '__main__':
   # Create array to store displacements
   v = Q_(np.zeros([phantom.global_shape[0], 3, phantom.Nfr], dtype=np.float32), 'm/s')
   for fr in range(phantom.Nfr):
-    # Read displacement data in frame fr and interpolate to the submesh
+    # Read velocity data in frame fr and interpolate to the submesh
     phantom.read_data(fr)
-    # v[..., fr] = Q_(phantom.point_data['velocity'] @ planning.MPS, 'm/s')
-    v[..., fr] = Q_(phantom.to_submesh(phantom.point_data['velocity'] @ planning.MPS, local=False), 'm/s')
+    v[..., fr] = Q_(phantom.to_submesh(phantom.point_data['velocity'] @ planning.MPS, global_mesh=True), 'm/s')
 
   # Define POD object
   dt = parameters.Imaging.TimeSpacing
   times = np.linspace(0, (phantom.Nfr-1)*dt, phantom.Nfr, dtype=np.float32)
-  pod_velocity = PODVelocity(time_array=times.m_as('ms'),
+  pod_velocity = PODVelocity(times=times.m_as('ms'),
                               data=v.m_as('m/ms'),
-                              global_to_local=phantom.global_to_local_nodes,
+                              global_to_local=phantom.local_to_global_nodes,
                               n_modes=25,
                               is_periodic=True)
 
@@ -100,15 +99,6 @@ if __name__ == '__main__':
     dt=Q_(1e-2, 'ms'), 
     plot=False, 
     bandwidth=Q_(10, 'kHz'))
-  # sp.optimize(frac_start=0.79, frac_end=0.81, N=100)
-
-  # # Export CPU distribution
-  # if MPI_rank == 0:
-  #   file = XDMFFile(script_path/'phantoms/aorta_CFD_paper.xdmf', nodes=phantom.global_nodes, elements={phantom.cell_type: phantom.global_elements})
-  #   file.write(cellData={'partitioning': phantom.partitioning, 
-  #                        'submesh_markers': markers.reshape((-1, 1))},
-  #             pointData={'slice_profile': np.abs(sp.interp_profile(phantom.global_nodes[:, 2]))})
-  #   file.close()
 
   # Create bipolar gradients
   start = sp.rephasing.time + sp.rephasing.dur
@@ -174,23 +164,8 @@ if __name__ == '__main__':
     #     file.write(pointData={'M': np.stack((np.real(Mxy[:,fr]), np.imag(Mxy[:,fr]), Mz[:,fr]), axis=1), 'displacement': pod_velocity(2.55)}, time=t)
     #   file.close()
 
-  # Path to export the generated data
-  export_path = Path(script_path/'MRImages/phase_contrast_{:s}_V{:.0f}.pkl'.format(parameters.Imaging.Sequence, parameters.VelocityEncoding.VENC.m_as('cm/s')))
-
-  # Make sure the directory exist
-  os.makedirs(str(export_path.parent), exist_ok=True)
-
-  # # Generate kspace trajectory
-  # traj = CartesianStack(FOV = planning.FOV.to('m'),
-  #   t_start = imaging.time_extent[1] - sp.rf.time,
-  #   res = parameters.Imaging.RES, 
-  #   oversampling = parameters.Imaging.Oversampling, 
-  #   lines_per_shot = parameters.Imaging.LinesPerShot, 
-  #   MPS_ori = planning.MPS, 
-  #   LOC = planning.LOC, 
-  #   receiver_bw=parameters.Hardware.r_BW, 
-  #   plot_seq=False)
-  traj = RadialStack(FOV = planning.FOV.to('m'),
+  # Generate kspace trajectory
+  traj = CartesianStack(FOV = planning.FOV.to('m'),
     t_start = imaging.time_extent[1] - sp.rf.time,
     res = parameters.Imaging.RES, 
     oversampling = parameters.Imaging.Oversampling, 
@@ -198,10 +173,9 @@ if __name__ == '__main__':
     MPS_ori = planning.MPS, 
     LOC = planning.LOC, 
     receiver_bw=parameters.Hardware.r_BW, 
-    plot_seq=True)
-  traj.plot_trajectory()
+    plot_seq=False)
 
-  # Print echo time
+  # Echo time
   MPI_print('Echo time = {:.2f} ms'.format(traj.echo_time.m_as('ms')))
 
   # kspace array
@@ -216,11 +190,10 @@ if __name__ == '__main__':
   M = phantom.mass_matrix(lumped=True)
 
   # Iterate over cardiac phases
-  t0 = time.perf_counter()
   for fr in range(phantom.Nfr):
 
-      # Start time for the frame      
-      t0_fr = time.perf_counter()
+      # Print progress
+      MPI_print('Frame {:d}/{:d}'.format(fr+1, phantom.Nfr))
 
       # Update timeshift in the POD velocity
       pod_velocity.update_timeshift(fr * parameters.Imaging.TimeSpacing.m_as('ms'))
@@ -228,31 +201,14 @@ if __name__ == '__main__':
       # Generate 4D flow image
       K[:,:,:,:,fr] = Signal(MPI_rank, M, traj.points, traj.times.m_as('ms'), phantom.local_nodes, delta_omega0.m_as('rad/ms'), T2star.m_as('ms'), Mxy_PC[:, fr, :], pod_velocity)
 
-      if MPI_rank == 0:
-        sys.stdout.flush()
-        sys.stdout.write("\r" + 'Elapsed time frame {:d}: {:.2f} s'.format(fr, time.perf_counter()-t0_fr))
-
-  # Store elapsed time
-  pc_time = time.perf_counter() - t0
-
-  # Print elapsed times
-  MPI_print('Elapsed time-per-frame for 4D Flow generation: {:.2f} s'.format(pc_time/phantom.Nfr))
-  MPI_print('Elapsed time for 4D Flow generation: {:.2f} s'.format(pc_time))
-
   # Gather results
   K = gather_data(K)
 
   # Add noise to kspace
   K = add_cpx_noise(K, relative_std=0.01)
 
-  # Export generated data
-  if MPI_rank==0:
-    with open(str(export_path), 'wb') as f:
-      pickle.dump({'kspace': K, 'MPS_ori': planning.MPS, 'LOC': planning.LOC, 'traj': traj}, f)
-
   # Image reconstruction
-  # Im = CartesianRecon(K, traj)
-  Im = NUFFTRecon(K, traj, Jd=(6, 6, 1), iterative=True)
+  Im = CartesianRecon(K, traj)
 
   # Show reconstruction
   if MPI_rank == 0:
