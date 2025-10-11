@@ -60,6 +60,5 @@ PYBIND11_MODULE(MRI, m) {
       const Array<float, Dynamic, 1> &,
       const Array<float, Dynamic, 1> &,
       const Matrix<std::complex<float>, Dynamic, Dynamic> &,
-      const py::none &>(&Signal<float>));  
-
+      const py::none &>(&Signal<float>));
 }

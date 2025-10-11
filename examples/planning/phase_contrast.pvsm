@@ -8048,7 +8048,7 @@
         <Domain name="array_list" id="16743.CellArrayStatus.array_list"/>
       </Property>
       <Property name="FileName" id="16743.FileName" number_of_elements="1">
-        <Element index="0" value="/home/hmella-eie/git/feelmri/examples/phantoms/aorta_CFD.xdmf"/>
+        <Element index="0" value="/home/hmella-eie/git/feelmri/examples/phantoms/aorta_P1_tetra.xdmf"/>
         <Domain name="files" id="16743.FileName.files"/>
       </Property>
       <Property name="PointArrayInfo" id="16743.PointArrayInfo" number_of_elements="4">
@@ -8882,19 +8882,19 @@
       <Item id="16051" name="pressure.PiecewiseFunction"/>
     </ProxyCollection>
     <ProxyCollection name="pq_helper_proxies.16139">
-      <Item id="15904" name="DataAxesGrid" logname="aorta_CFD.xdmf(UnstructuredGridRepresentation)/DataAxesGrid/GridAxesRepresentation"/>
-      <Item id="15963" name="GlyphType" logname="aorta_CFD.xdmf(UnstructuredGridRepresentation)/Glyph3DRepresentation/GlyphType/ArrowSource"/>
-      <Item id="15974" name="GlyphType" logname="aorta_CFD.xdmf(UnstructuredGridRepresentation)/Glyph3DRepresentation/GlyphType/ConeSource"/>
-      <Item id="15985" name="GlyphType" logname="aorta_CFD.xdmf(UnstructuredGridRepresentation)/Glyph3DRepresentation/GlyphType/CubeSource"/>
-      <Item id="15996" name="GlyphType" logname="aorta_CFD.xdmf(UnstructuredGridRepresentation)/Glyph3DRepresentation/GlyphType/CylinderSource"/>
-      <Item id="16007" name="GlyphType" logname="aorta_CFD.xdmf(UnstructuredGridRepresentation)/Glyph3DRepresentation/GlyphType/LineSource"/>
-      <Item id="16018" name="GlyphType" logname="aorta_CFD.xdmf(UnstructuredGridRepresentation)/Glyph3DRepresentation/GlyphType/SphereSource"/>
-      <Item id="16029" name="GlyphType" logname="aorta_CFD.xdmf(UnstructuredGridRepresentation)/Glyph3DRepresentation/GlyphType/GlyphSource2D"/>
-      <Item id="16040" name="GlyphType" logname="aorta_CFD.xdmf(UnstructuredGridRepresentation)/Glyph3DRepresentation/GlyphType/PipelineConnection"/>
-      <Item id="16054" name="OSPRayScaleFunction" logname="aorta_CFD.xdmf(UnstructuredGridRepresentation)/SurfaceRepresentation/OSPRayScaleFunction/PiecewiseFunction"/>
-      <Item id="16055" name="OpacityTransferFunction" logname="aorta_CFD.xdmf(UnstructuredGridRepresentation)/PointGaussianRepresentation/OpacityTransferFunction/PiecewiseFunction"/>
-      <Item id="15952" name="PolarAxes" logname="aorta_CFD.xdmf(UnstructuredGridRepresentation)/PolarAxes/PolarAxesRepresentation"/>
-      <Item id="16056" name="ScaleTransferFunction" logname="aorta_CFD.xdmf(UnstructuredGridRepresentation)/PointGaussianRepresentation/ScaleTransferFunction/PiecewiseFunction"/>
+      <Item id="15904" name="DataAxesGrid" logname="aorta_P1_tetra.xdmf(UnstructuredGridRepresentation)/DataAxesGrid/GridAxesRepresentation"/>
+      <Item id="15963" name="GlyphType" logname="aorta_P1_tetra.xdmf(UnstructuredGridRepresentation)/Glyph3DRepresentation/GlyphType/ArrowSource"/>
+      <Item id="15974" name="GlyphType" logname="aorta_P1_tetra.xdmf(UnstructuredGridRepresentation)/Glyph3DRepresentation/GlyphType/ConeSource"/>
+      <Item id="15985" name="GlyphType" logname="aorta_P1_tetra.xdmf(UnstructuredGridRepresentation)/Glyph3DRepresentation/GlyphType/CubeSource"/>
+      <Item id="15996" name="GlyphType" logname="aorta_P1_tetra.xdmf(UnstructuredGridRepresentation)/Glyph3DRepresentation/GlyphType/CylinderSource"/>
+      <Item id="16007" name="GlyphType" logname="aorta_P1_tetra.xdmf(UnstructuredGridRepresentation)/Glyph3DRepresentation/GlyphType/LineSource"/>
+      <Item id="16018" name="GlyphType" logname="aorta_P1_tetra.xdmf(UnstructuredGridRepresentation)/Glyph3DRepresentation/GlyphType/SphereSource"/>
+      <Item id="16029" name="GlyphType" logname="aorta_P1_tetra.xdmf(UnstructuredGridRepresentation)/Glyph3DRepresentation/GlyphType/GlyphSource2D"/>
+      <Item id="16040" name="GlyphType" logname="aorta_P1_tetra.xdmf(UnstructuredGridRepresentation)/Glyph3DRepresentation/GlyphType/PipelineConnection"/>
+      <Item id="16054" name="OSPRayScaleFunction" logname="aorta_P1_tetra.xdmf(UnstructuredGridRepresentation)/SurfaceRepresentation/OSPRayScaleFunction/PiecewiseFunction"/>
+      <Item id="16055" name="OpacityTransferFunction" logname="aorta_P1_tetra.xdmf(UnstructuredGridRepresentation)/PointGaussianRepresentation/OpacityTransferFunction/PiecewiseFunction"/>
+      <Item id="15952" name="PolarAxes" logname="aorta_P1_tetra.xdmf(UnstructuredGridRepresentation)/PolarAxes/PolarAxesRepresentation"/>
+      <Item id="16056" name="ScaleTransferFunction" logname="aorta_P1_tetra.xdmf(UnstructuredGridRepresentation)/PointGaussianRepresentation/ScaleTransferFunction/PiecewiseFunction"/>
     </ProxyCollection>
     <ProxyCollection name="pq_helper_proxies.16175">
       <Item id="16642" name="RepresentationAnimationHelper"/>
@@ -8943,7 +8943,7 @@
     <ProxyCollection name="representations">
       <Item id="16380" name="GeometryRepresentation1" logname="Box1(GeometryRepresentation)"/>
       <Item id="16617" name="GeometryRepresentation2" logname="Transform1(GeometryRepresentation)"/>
-      <Item id="16139" name="UnstructuredGridRepresentation1" logname="aorta_CFD.xdmf(UnstructuredGridRepresentation)"/>
+      <Item id="16139" name="UnstructuredGridRepresentation1" logname="aorta_P1_tetra.xdmf(UnstructuredGridRepresentation)"/>
     </ProxyCollection>
     <ProxyCollection name="scalar_bars">
       <Item id="16155" name="ScalarBarWidgetRepresentation1"/>
@@ -8955,7 +8955,7 @@
     <ProxyCollection name="sources">
       <Item id="16175" name="Box1" logname="Box1"/>
       <Item id="16412" name="Transform1" logname="Transform1"/>
-      <Item id="16743" name="aorta_CFD.xdmf" logname="aorta_CFD.xdmf"/>
+      <Item id="16743" name="aorta_P1_tetra.xdmf" logname="aorta_P1_tetra.xdmf"/>
     </ProxyCollection>
     <ProxyCollection name="timekeeper">
       <Item id="256" name="TimeKeeper1"/>

@@ -35,11 +35,11 @@ class SequenceBlock:
     return copy.deepcopy(self)
 
   def __call__(self, t):
-    rf = np.sum([rf(t) for rf in self.rf_pulses])
-    m_gr = np.sum([g(t) for g in self.M_gradients])
-    p_gr = np.sum([g(t) for g in self.P_gradients])
-    s_gr = np.sum([g(t) for g in self.S_gradients])
-    return rf, m_gr, p_gr, s_gr
+    rf = np.sum([rf(t) for rf in self.rf_pulses], axis=0)
+    m_gr = np.sum([g(t) for g in self.M_gradients], axis=0)
+    p_gr = np.sum([g(t) for g in self.P_gradients], axis=0)
+    s_gr = np.sum([g(t) for g in self.S_gradients], axis=0)
+    return rf, (m_gr, p_gr, s_gr)
 
   def __repr__(self):
     return f"Sequence(gradients={self.gradients}, rf_pulses={self.rf_pulses}, dt_rf={self.dt_rf}, dt_gr={self.dt_gr})"
@@ -288,8 +288,6 @@ class BlochSolver:
     self.initial_Mxy = initial_Mxy * ones.astype(np.complex64)
     self.initial_Mz = initial_Mz * ones if initial_Mz is not None else M0 * ones
     self.pod_trajectory = pod_trajectory
-    # print("dsa 1: ", self.initial_Mxy.dtype)
-    # print("dsa 2: ", self.initial_Mz.dtype)
 
   def solve(self, start: int = 0, end: int = None):
     # Current machine time
@@ -304,7 +302,7 @@ class BlochSolver:
     if end is None:
       end = self.sequence.Nb_blocks
     blocks = self.sequence.blocks[start:end]
-    # MPI_print(f"[BlochSolver] Solving sequence blocks {start} to {end-1} ({len(blocks)} blocks).")
+    MPI_print(f"[BlochSolver] Solving sequence blocks {start} to {end-1} ({len(blocks)} blocks).")
 
     # Dimensions
     nb_nodes  = x.shape[0]
@@ -333,49 +331,22 @@ class BlochSolver:
 
       # Discrete time points and time intervals
       discrete_times = block._discretization().m_as('ms')
-      dt = np.diff(discrete_times, prepend=0).astype(np.float32)
+      dt = np.diff(discrete_times, prepend=0)
 
       # Precompute RF and gradients
-      rf_all, G_all = [], []
-      for t in discrete_times:
-          rf, m_gr, p_gr, s_gr = block(t)
-          rf_all.append(rf)
-          G_all.append([m_gr, p_gr, s_gr])
-
-      rf_all = np.array(rf_all, dtype=np.complex64)  # shape (n_time,)
-      G_all = np.array(G_all, dtype=np.float32)      # shape (n_time, 3)
+      rf_pulses = np.zeros((discrete_times.shape[0], 1), dtype=np.complex64)
+      gradients = np.zeros((discrete_times.shape[0], 3), dtype=np.float32)
+      rf, G = block(discrete_times)
+      rf_pulses[:, 0] = rf
+      gradients[:, 0] = G[0]
+      gradients[:, 1] = G[1]
+      gradients[:, 2] = G[2]
 
       # Indicator array
-      regime_idx = (np.abs(rf_all) != 0.0).astype(np.int32)
+      regime_idx = np.abs(rf_pulses) != 0.0
 
       # Solve
-      # MPI_print(0, x.dtype)
-      # MPI_print(1, T1.dtype)
-      # MPI_print(2, T2.dtype)
-      # MPI_print(3, self.delta_B.dtype)
-      # MPI_print(4, rf_all.dtype)
-      # MPI_print(5, G_all.dtype)
-      # MPI_print(6, dt.dtype)
-      # MPI_print(7, regime_idx.dtype)
-      # MPI_print(8, self.initial_Mxy.dtype)
-      # MPI_print(9, self.initial_Mz.dtype)
-      # if self.pod_trajectory is not None:
-      #   MPI_print(10,self.pod_trajectory(0).dtype)
-
-      # MPI_print(0, type(x))
-      # MPI_print(1, type(T1))
-      # MPI_print(2, type(T2))
-      # MPI_print(3, type(self.delta_B))
-      # MPI_print(4, type(rf_all))
-      # MPI_print(5, type(G_all))
-      # MPI_print(6, type(dt))
-      # MPI_print(7, type(regime_idx))
-      # MPI_print(8, type(self.initial_Mxy))
-      # MPI_print(9, type(self.initial_Mz))
-      # MPI_print(10,type(self.pod_trajectory(0)))
-      Mxy_, Mz_ = solve_mri(x, T1, T2, self.delta_B, self.M0, gamma, rf_all, G_all, dt, regime_idx, self.initial_Mxy, self.initial_Mz, self.pod_trajectory)
-      # print(11, Mxy_.dtype)
-      # print(12, Mz_.dtype)
+      Mxy_, Mz_ = solve_mri(x, T1, T2, self.delta_B, self.M0, gamma, rf_pulses, gradients, dt, regime_idx, self.initial_Mxy, self.initial_Mz, self.pod_trajectory)
 
       # Update magnetizations
       Mxy[:, i] = Mxy_[:, -1]
@@ -384,14 +355,14 @@ class BlochSolver:
       # Update the initial magnetization for the next block
       # TODO: I'm not sure if this is correct, it should be checked.
       if block.empty is True:
-        self.initial_Mxy = Mxy_[:, -1]
+        self.initial_Mxy[:,0] = Mxy_[:, -1]
       else:
         # This is done because gradient or RF spoiling cannot be applied on coarse meshes. Therefore, we need to artificially spoil the magnetization.
-        self.initial_Mxy = 0*Mxy_[:, -1]
-      self.initial_Mz = Mz_[:, -1]
+        self.initial_Mxy[:,0] = 0*Mxy_[:, -1]
+      self.initial_Mz[:,0] = Mz_[:, -1]
 
     # Print elapsed time
-    # MPI_print('[BlochSolver] Elapsed time for solving the sequence: {:.2f} s'.format(time.perf_counter() - t0))
+    MPI_print('[BlochSolver] Elapsed time for solving the sequence: {:.2f} s'.format(time.perf_counter() - t0))
 
     # # Reset POD trajectory time shift
     # if self.pod_trajectory is not None:

@@ -18,18 +18,21 @@ element_dict = {
     'tetra': 'tetrahedron',
     'tetra10': 'tetrahedron',
     'wedge': 'prism',
+    'hexahedron': 'hexahedron'
 }
 degree_dict = {
     'triangle': 1,
     'tetra': 1,
     'tetra10': 2,
     'wedge': 1,
+    'hexahedron': 1
 }
 family_dict = {
     'triangle': 'P',
     'tetra': 'P',
     'tetra10': 'P',
     'wedge': 'P',
+    'hexahedron': 'P'
 }
 
 
@@ -160,7 +163,10 @@ class FEMPhantom:
     self.mesh_to_submesh_nodes = submesh_nodes_map
     self.global_shape = submesh_nodes.shape
 
-    # Distribute the submesh
+    # Debugging info
+    MPI_print("[FEMPhantom] Submesh created with {:d} elements and {:d} nodes".format(len(self.global_elements), len(self.global_nodes)))
+
+    # Submesh distribution
     self.distribute_mesh()
 
 

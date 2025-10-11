@@ -96,9 +96,6 @@ Tensor<std::complex<T>, 4, RowMajor> Signal(
     const uint S = nb_meas * nb_lines * nb_kz;
     Matrix<C, Dynamic, Dynamic, RowMajor> kspace_mat(S, nb_vencs);
 
-    // // Release GIL for the whole numeric loop
-    // py::gil_scoped_release nogil;
-
     // Iterate over kspace readout points
     T t_old = -1.0;
     for (uint i = 0, row = 0; i < nb_meas; i++){
@@ -114,13 +111,10 @@ Tensor<std::complex<T>, 4, RowMajor> Signal(
             } else {
 
               // Update position
-              {
-                // py::gil_scoped_acquire gil;
-                arr = pod_trajectory(t(i,j,k)).template cast<py::array_t<T, py::array::c_style>>();
+              arr = pod_trajectory(t(i,j,k)).template cast<py::array_t<T, py::array::c_style>>();
 
-                // Rebind Map to the new buffer (no allocations)
-                new (&traj) Eigen::Map<const Matrix<T, Dynamic, 3, RowMajor>>(arr.data(), nb_nodes, 3);
-              }
+              // Rebind Map to the new buffer (no allocations)
+              new (&traj) Eigen::Map<const Matrix<T, Dynamic, 3, RowMajor>>(arr.data(), nb_nodes, 3);
 
               // Map without copy (NumPy is row-major/C-contiguous)
               r.noalias() = r0;
@@ -141,7 +135,9 @@ Tensor<std::complex<T>, 4, RowMajor> Signal(
             }           
 
             // Scalars for this (i,j,k)
-            kx_ = two_pi * kloc[0](i,j,k), ky_ = two_pi * kloc[1](i,j,k), kz_ = two_pi * kloc[2](i,j,k);
+            kx_ = two_pi * kloc[0](i,j,k);
+            ky_ = two_pi * kloc[1](i,j,k);
+            kz_ = two_pi * kloc[2](i,j,k);
 
             // r: nb_nodes x 3  (column 0:x, 1:y, 2:z)
             phase = -kx_ * r.col(0).array()

@@ -7,37 +7,37 @@ namespace py = pybind11;
 
 template<typename T>
 py::array_t<T> tensordot_modes_weights(
-    const py::array_t<T, py::array::c_style> modes,  // (P,C,M)
-    const py::array_t<T, py::array::c_style> weights // (M,)
-){
-    namespace py = pybind11;
+    const py::array_t<T, py::array::c_style> modes,   // (P,C,M), C-contiguous, dtype T
+    const py::array_t<T, py::array::c_style> weights) // (M,),   C-contiguous, dtype T
+{
     using RowMat = Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
     using Vec    = Eigen::Matrix<T, Eigen::Dynamic, 1>;
 
+    // ---- shapes (no copies) ----
     const Eigen::Index P = static_cast<Eigen::Index>(modes.shape(0));
     const Eigen::Index C = static_cast<Eigen::Index>(modes.shape(1));
     const Eigen::Index M = static_cast<Eigen::Index>(modes.shape(2));
 
-    const T* A_ptr = modes.data();
-    const T* w_ptr = weights.data();
+    // ---- raw pointers (no temporaries) ----
+    const T* A_ptr = modes.data();   // points into the NumPy buffer
+    const T* w_ptr = weights.data(); // points into the NumPy buffer
 
-    // Map A as (P*C × M) row-major; w as (M)
+    // Map modes as (P*C × M) row-major without copying
     Eigen::Map<const RowMat> A(A_ptr, P*C, M);
     Eigen::Map<const Vec>    w(w_ptr, M);
 
-    // Allocate output (P, C) row-major
+    // Allocate output (P,C) NumPy array; we will write directly into its buffer
     py::array_t<T> out({P, C});
     T* out_ptr = out.mutable_data();
-    Eigen::Map<RowMat> O(out_ptr, P, C);
 
-    // Release the GIL during compute
+    // Release the GIL while doing the GEMV
     py::gil_scoped_release nogil;
 
-    // Portable (Eigen 3.3+): write result directly into output buffer as a vector
+    // Write the result directly to the output buffer as a vector view (P*C,)
     Eigen::Map<Vec> y(out_ptr, P*C);
-    y.noalias() = A * w;
+    y.noalias() = A * w;            // no temporaries created
 
-    return out;
+    return out; // (P,C) view over the same buffer
 }
 
 

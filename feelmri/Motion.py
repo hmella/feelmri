@@ -121,10 +121,10 @@ class POD:
       self.data = data              # (P, C, t)
       self.local_to_global_map = global_to_local
       self.n_modes = n_modes
-      self.modes, self.weights = self.calculate_pod(remove_mean=False)
       self.timeshift = timeshift
       self.is_periodic = is_periodic
       self.interpolation_method = interpolation_method
+      self.modes, self.weights = self.calculate_pod(remove_mean=False)
       self.spline_coeffs = self.spline_fit()
       pps = []
       for s in self.spline_coeffs:
@@ -176,8 +176,8 @@ class POD:
     :param remove_mean: if True, removes the temporal mean from the data before calculating POD
     :return: tuple of (modes, weights) where modes are the POD modes and weights are the corresponding weights
     """
-    # start = time.perf_counter()
-    # MPI_print(f"[POD] Calculating POD with {self.n_modes} modes and {self.taylor_order} order")
+    start = time.perf_counter()
+    MPI_print(f"[POD] Calculating POD with {self.n_modes} modes and {self.interpolation_method} interpolation")
 
     n_tsteps = self.times.shape[0]
     flat_sv = self.data.reshape(-1, n_tsteps)
@@ -212,7 +212,7 @@ class POD:
     if self.local_to_global_map is not None:
       phi = phi[self.local_to_global_map, :, :]
 
-    # MPI_print(f"[POD] Finished POD calculation in {time.perf_counter() - start:.2f} seconds")
+    MPI_print(f"[POD] Finished POD calculation in {time.perf_counter() - start:.2f} seconds")
 
     return phi, weights
 
@@ -258,6 +258,7 @@ class POD:
     :param timeshift: new timeshift value
     """
     self.timeshift = timeshift
+
 
 
 class PODVelocity(POD):
