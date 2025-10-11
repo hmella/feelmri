@@ -37,7 +37,7 @@ if __name__ == '__main__':
   MPI_print('Voxel size: ({:.2f}, {:.2f}, {:.2f}) mm'.format(vxsz[0], vxsz[1], vxsz[2]))
 
   # Create FEM phantom object
-  phantom = FEMPhantom(script_path/'phantoms/beating_heart.xdmf', scale_factor=1.0)
+  phantom = FEMPhantom(script_path/'phantoms/heart_P1_hex.xdmf', scale_factor=1.0)
 
   # Translate phantom to obtain the desired slice location
   phantom.orient(planning.MPS, planning.LOC.to('m'))
@@ -219,6 +219,7 @@ if __name__ == '__main__':
     mag = np.abs(I[...,0,:])
     phi = np.angle(I[...,0,:])
     plotter = MRIPlotter(images=[mag, phi], title=['Magnitude', 'Phase'], FOV=planning.FOV.m_as('m'))
+    # plotter.export_images('free_running/im')
     plotter.show()
 
   #   plotter = MRIPlotter(images=[np.abs(K[...,0,:])], title=['k-space'], FOV=planning.FOV.m_as('m'))

@@ -39,7 +39,7 @@ if __name__ == '__main__':
   enc = VelocityEncoding(pars.VelocityEncoding.VENC, np.array(venc_dirs))
 
   # Create FEM phantom object
-  phantom = FEMPhantom(script_path/'phantoms/aorta_CFD.xdmf', velocity_label='velocity', scale_factor=0.01)
+  phantom = FEMPhantom(script_path/'phantoms/aorta_P1_tetra.xdmf', velocity_label='velocity', scale_factor=0.01)
 
   # Translate phantom to obtain the desired slice location
   phantom.orient(planning.MPS, planning.LOC.to('m'))
@@ -52,7 +52,7 @@ if __name__ == '__main__':
   # Create array to store displacements
   v = Q_(np.zeros([phantom.global_shape[0], 3, phantom.Nfr], dtype=np.float32), 'm/s')
   for fr in range(phantom.Nfr):
-    # Read displacement data in frame fr and interpolate to the submesh
+    # Read velocity data in frame fr and interpolate to the submesh
     phantom.read_data(fr)
     v[..., fr] = Q_(phantom.to_submesh(phantom.point_data['velocity'] @ planning.MPS, global_mesh=True), 'm/s')
 

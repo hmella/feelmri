@@ -35,7 +35,7 @@ if __name__ == '__main__':
                           length_units=parameters.Formatting.units)
 
   # Create FEM phantom object
-  phantom = FEMPhantom(path=script_path/'phantoms/water_and_fat.xdmf', scale_factor=0.01)
+  phantom = FEMPhantom(path=script_path/'phantoms/water_fat_P1_prism.xdmf', scale_factor=0.01)
 
   # Translate phantom to obtain the desired slice location
   phantom.orient(planning.MPS, planning.LOC)

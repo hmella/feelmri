@@ -39,7 +39,7 @@ if __name__ == '__main__':
   enc = VelocityEncoding(parameters.VENC, np.array(venc_dirs))
 
   # Navier-Stokes simulation data to be used
-  phantom_file = 'phantoms/aorta_CFD.xdmf'
+  phantom_file = 'phantoms/aorta_P1_tetra.xdmf'
 
   # Create FEM phantom object
   phantom = FEMPhantom(path=phantom_file, velocity_label='velocity', scale_factor=0.01)

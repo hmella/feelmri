@@ -12,7 +12,7 @@ cell_type = 'wedge'
 domains = [i for i in range(10)]
 
 # Path to meshes
-path_to_mesh = Path('meshes/water_and_fat.msh')
+path_to_mesh = Path('meshes/water_fat_P1_prism.msh')
 
 # Import mesh with walls in VTU format
 mesh = meshio.read(path_to_mesh)
@@ -34,7 +34,7 @@ for i, markers in enumerate(mesh.cell_data['gmsh:physical']):
     point_markers[mesh.cells[i].data.flatten()] = markers[i]
 
 # Interpolated phantom with walls
-xdmf_file = 'meshes/xdmf/water_and_fat.xdmf'
+xdmf_file = 'meshes/xdmf/water_fat_P1_prism.xdmf'
 file = XDMFFile(filename=xdmf_file, nodes=nodes, elements=({cell_type: cells}))
 
 # Write timeseries

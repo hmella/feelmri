@@ -33,7 +33,7 @@ if __name__ == '__main__':
   script_path = Path(__file__).parent
 
   # Import imaging parameters
-  parameters = ParameterHandler(script_path/'parameters/water_and_fat.yaml')
+  parameters = ParameterHandler(script_path/'parameters/water_fat_P1_prism.yaml')
 
   # Import PVSM file to get the FOV, LOC and MPS orientation
   planning = PVSMParser(script_path/parameters.Formatting.planning,
@@ -47,7 +47,7 @@ if __name__ == '__main__':
   for cs in range(Nb_species):
 
     # Create FEM phantom object
-    phantoms.append(FEMPhantom(path=script_path/'phantoms/water_and_fat.xdmf', scale_factor=0.01))
+    phantoms.append(FEMPhantom(path=script_path/'phantoms/water_fat_P1_prism.xdmf', scale_factor=0.01))
     phantoms[cs].read_data(0)
 
     # Translate phantom to obtain the desired slice location
@@ -119,7 +119,7 @@ if __name__ == '__main__':
     # Field inhomogeneity (e.g., due to susceptibility effects)
     inhomogeneity.append(spatial(phantoms[cs].local_nodes))
     inhomogeneity[cs] /= np.abs(spatial(phantoms[cs].global_nodes).flatten()).max()
-    inhomogeneity[cs] *= Q_(0.0 * 1.5 * 1e-6, 'T')  # Scale to a reasonable value (e.g., 1.5 ppm)
+    inhomogeneity[cs] *= Q_(1.5 * 1e-6, 'T')  # Scale to a reasonable value (e.g., 1.5 ppm)
 
   # Create sequence object
   seq = Sequence()

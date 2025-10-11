@@ -7753,7 +7753,7 @@
         </Domain>
       </Property>
       <Property name="FileName" id="15919.FileName" number_of_elements="1">
-        <Element index="0" value="/home/hmella-eie/git/feelmri/examples/phantoms/water_and_fat.xdmf"/>
+        <Element index="0" value="/home/hmella-eie/git/feelmri/examples/phantoms/water_fat_P1_prism.xdmf"/>
         <Domain name="files" id="15919.FileName.files"/>
       </Property>
       <Property name="PointArrayInfo" id="15919.PointArrayInfo" number_of_elements="2">
@@ -8572,7 +8572,7 @@
     <ProxyCollection name="sources">
       <Item id="16179" name="Box1" logname="Box1"/>
       <Item id="16416" name="Transform1" logname="Transform1"/>
-      <Item id="15919" name="water_and_fat.xdmf" logname="water_and_fat.xdmf"/>
+      <Item id="15919" name="water_fat_P1_prism.xdmf" logname="water_fat_P1_prism.xdmf"/>
     </ProxyCollection>
     <ProxyCollection name="timekeeper">
       <Item id="256" name="TimeKeeper1"/>

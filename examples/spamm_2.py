@@ -38,7 +38,7 @@ if __name__ == '__main__':
                           length_units=parameters.Formatting.units)
 
   # Create FEM phantom object
-  phantom = FEMPhantom(path=script_path/'phantoms/beating_heart_P2.xdmf', scale_factor=1.0)
+  phantom = FEMPhantom(path=script_path/'phantoms/heart_P2_tetra.xdmf', scale_factor=1.0)
 
   # Translate phantom to obtain the desired slice location
   phantom.orient(planning.MPS, planning.LOC)
