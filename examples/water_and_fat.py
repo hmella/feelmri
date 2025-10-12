@@ -33,7 +33,7 @@ if __name__ == '__main__':
   script_path = Path(__file__).parent
 
   # Import imaging parameters
-  parameters = ParameterHandler(script_path/'parameters/water_fat_P1_prism.yaml')
+  parameters = ParameterHandler(script_path/'parameters/water_and_fat.yaml')
 
   # Import PVSM file to get the FOV, LOC and MPS orientation
   planning = PVSMParser(script_path/parameters.Formatting.planning,
