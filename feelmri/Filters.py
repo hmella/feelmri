@@ -6,11 +6,11 @@ def Riesz(size, width=0.6, lift=0.7):
     '''Riesz filter for k-space apodization.
     Parameters
     ----------
-    size : int
+    size: int
         Size of the filter.
-    width : float, optional
+    width: float, optional
         Width of the transition region. The default is 0.6.
-    lift : float, optional
+    lift: float, optional
         Minimum value of the filter. The default is 0.7.
     Returns
     -------
@@ -34,11 +34,11 @@ def Tukey(size, width=0.6, lift=0.7):
     '''Tukey filter for k-space apodization.
     Parameters
     ----------
-    size : int
+    size: int
         Size of the filter.
-    width : float, optional
+    width: float, optional
         Width of the transition region. The default is 0.6.
-    lift : float, optional
+    lift: float, optional
         Minimum value of the filter. The default is 0.7.
     Returns
     -------
