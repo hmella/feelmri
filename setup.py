@@ -70,16 +70,6 @@ ext_modules = [
         language='c++',
     ),
     Pybind11Extension(
-        'feelmri.MeshRefinement',
-        sources=['feelmri/cpp/MeshRefinement.cpp'],
-        include_dirs=[
-            # Path to pybind11 headers
-            get_pybind_include(),
-            '/usr/include/eigen3/'
-        ],
-        language='c++',
-    ),
-    Pybind11Extension(
         'feelmri.MRI',
         sources=['feelmri/cpp/MRI.cpp'],
         include_dirs=[

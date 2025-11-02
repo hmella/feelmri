@@ -5,17 +5,24 @@ import warnings
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
-from pint import Quantity as Q_
+from pint import Quantity as Quantity
 
 from feelmri.BlochSimulator import solve_mri
 from feelmri.Motion import POD
-from feelmri.MPIUtilities import MPI_print, MPI_rank, MPI_comm
+from feelmri.MPIUtilities import MPI_comm, MPI_print, MPI_rank
 from feelmri.MRObjects import Scanner
 from feelmri.Phantom import FEMPhantom
 
 
 class SequenceBlock:
-  def __init__(self, gradients=[], rf_pulses=[], dt_rf=Q_(0.01, 'ms'), dt_gr=Q_(-1, 'ms'), dt=Q_(10, 'ms'), dur=Q_(-1, 'ms'), empty=False, store_magnetization=False):
+  def __init__(self, gradients : list = [], 
+               rf_pulses : list = [], 
+               dt_rf : Quantity = Quantity(0.01, 'ms'), 
+               dt_gr : Quantity = Quantity(-1, 'ms'), 
+               dt : Quantity = Quantity(10, 'ms'), 
+               dur : Quantity = Quantity(-1, 'ms'), 
+               empty : bool = False, 
+               store_magnetization : bool = False):
     self.gradients = gradients
     self.M_gradients = [g for g in self.gradients if g.axis == 0]
     self.P_gradients = [g for g in self.gradients if g.axis == 1]
@@ -54,15 +61,15 @@ class SequenceBlock:
     # Get time extent depending on gradient or RF timings
     # Get (t_min, t_max) for each gradient
     if self.gradients:
-      time_extent_gr = Q_(np.array([(g.time.m, (g.time+g.dur).m) for g in self.gradients], dtype=np.float32), units=self.gradients[0].timings.u)
+      time_extent_gr = Quantity(np.array([(g.time.m, (g.time+g.dur).m) for g in self.gradients], dtype=np.float32), units=self.gradients[0].timings.u)
     else:
-      time_extent_gr = Q_(np.array([(0, 0)], dtype=np.float32), units='ms')
+      time_extent_gr = Quantity(np.array([(0, 0)], dtype=np.float32), units='ms')
 
     # Get (t_min, t_max) for each rf pulse
     if self.rf_pulses:
-      time_extent_rf = Q_(np.array([((rf.time-rf.ref).m, (rf.time-rf.ref+rf.dur).m) for rf in self.rf_pulses], dtype=np.float32), units=self.rf_pulses[0].ref.u)
+      time_extent_rf = Quantity(np.array([((rf.time-rf.ref).m, (rf.time-rf.ref+rf.dur).m) for rf in self.rf_pulses], dtype=np.float32), units=self.rf_pulses[0].ref.u)
     else:
-      time_extent_rf = Q_(np.array([(0, 0)], dtype=np.float32), units='ms')
+      time_extent_rf = Quantity(np.array([(0, 0)], dtype=np.float32), units='ms')
 
     # Time extent
     t_min = np.min([time_extent_gr.m_as('ms').min(axis=0), time_extent_rf.m_as('ms').min(axis=0)])
@@ -72,9 +79,9 @@ class SequenceBlock:
 
     # Update duration if dur is negative
     if self.dur.m_as('ms') < 0:
-      self.dur = Q_(t_max - t_min, 'ms')
+      self.dur = Quantity(t_max - t_min, 'ms')
 
-    return [Q_(t_min, 'ms'), Q_(t_max, 'ms')]
+    return [Quantity(t_min, 'ms'), Quantity(t_max, 'ms')]
 
   def _discrete_objects(self):
     # TODO: make sure that both gradients and RF pulses keep the units. Do not use .m_as('ms') or .m here.
@@ -113,13 +120,13 @@ class SequenceBlock:
         rf_timings = np.array([])
 
     # Sequence timings
-    seq_timings = np.arange(self.time_extent[0].m, self.time_extent[1].m, self.dt.m)
+    seQuantitytimings = np.arange(self.time_extent[0].m, self.time_extent[1].m, self.dt.m)
 
     # Concatenate all timings, sort them and remove duplicates.
-    all_timings = np.concatenate((gr_timings, rf_timings, seq_timings))
+    all_timings = np.concatenate((gr_timings, rf_timings, seQuantitytimings))
     all_timings = np.unique(np.sort(all_timings))
 
-    return Q_(all_timings, units='ms')
+    return Quantity(all_timings, units='ms')
   
   def change_time(self, time):
     # Update reference time for each gradient and RF pulse
@@ -168,14 +175,14 @@ class SequenceBlock:
 
 
 class Sequence:
-  def __init__(self, blocks=[]):
+  def __init__(self, blocks : list = []):
     self.blocks = blocks
     self.Nb_blocks = len(self.blocks)
     self.time_extent = self._get_extent()
     self.dur = self.time_extent[1] - self.time_extent[0]
     self.non_empty = [~block.empty for block in self.blocks if block is not None]
 
-  def add_block(self, block: SequenceBlock | Q_, dt: Q_ = Q_(10, 'ms')):
+  def add_block(self, block: SequenceBlock | Quantity, dt: Quantity = Quantity(10, 'ms')):
     # Add a block to the sequence
     if isinstance(block, SequenceBlock):
       block = block.copy()  # Ensure we work with a copy
@@ -185,9 +192,9 @@ class Sequence:
       self.time_extent = self._get_extent()
       self.dur = self.time_extent[1] - self.time_extent[0]
       self.non_empty.append(not block.empty)
-    elif isinstance(block, Q_):
+    elif isinstance(block, Quantity):
       # If a duration is provided, create a new block with that duration
-      if block > Q_(0, 'ms'):
+      if block > Quantity(0, 'ms'):
         block = SequenceBlock(dur=block.to('ms'), dt=dt, empty=True, store_magnetization=False)
         block.change_time(self.time_extent[-1].to('ms'))
         self.blocks = [b for b in self.blocks + [block]]
@@ -218,7 +225,7 @@ class Sequence:
       t_min = np.min([time_extent_b.min(axis=0)])
       t_max = np.max([time_extent_b.max(axis=0)])
 
-    return (Q_(t_min, 'ms'), Q_(t_max, 'ms'))
+    return (Quantity(t_min, 'ms'), Quantity(t_max, 'ms'))
   
   def plot(self, blocks=None, tight_layout=True, figsize=None, export_to=None):
     if MPI_rank == 0:
@@ -230,7 +237,6 @@ class Sequence:
       else:            # Plot selected blocks
         discrete_blocks = [block._discrete_objects() for block in self.blocks[blocks]]
         extents = [block.time_extent for block in self.blocks[blocks]]
-
 
       fig, ax = plt.subplots(4, 1, figsize=figsize)
       for i, objects in enumerate(discrete_blocks):
@@ -271,8 +277,8 @@ class BlochSolver:
                phantom: FEMPhantom, 
                scanner: Scanner = Scanner(), 
                M0: np.ndarray | float = 1.0, 
-               T1: Q_ = Q_(1000.0, 'ms'), 
-               T2: Q_ = Q_(100.0, 'ms'), 
+               T1: Quantity = Quantity(1000.0, 'ms'), 
+               T2: Quantity = Quantity(100.0, 'ms'), 
                delta_B: np.ndarray | float = 0.0,
                pod_trajectory: POD | None = None,
                initial_Mxy: np.ndarray | float = 0.0,
@@ -282,8 +288,8 @@ class BlochSolver:
     self.scanner = scanner
     self.phantom = phantom
     self.M0 = M0
-    self.T1 = Q_(T1.m * ones, T1.units)
-    self.T2 = Q_(T2.m * ones, T2.units)
+    self.T1 = Quantity(T1.m * ones, T1.units)
+    self.T2 = Quantity(T2.m * ones, T2.units)
     self.delta_B = delta_B * ones
     self.initial_Mxy = initial_Mxy * ones.astype(np.complex64)
     self.initial_Mz = initial_Mz * ones if initial_Mz is not None else M0 * ones

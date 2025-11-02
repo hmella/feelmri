@@ -1,23 +1,6 @@
 import numpy as np
 
 
-# Get tissue and background indicators
-def get_segmentation_mask(u_image, tol=1.0e-15):
-    '''
-    '''
-    # Background pixels
-    condition = np.abs(u_image) < tol
-    tissue      = np.where(~condition)
-    background  = np.where(condition)
-
-#    # Get np.pixels with tissue
-#    condition = u_image != 0.0
-#    tissue      = np.where(condition)
-#    background  = np.where(~condition)
-#
-    return tissue, background
-
-
 # Add complex noise
 def add_cpx_noise(image, mask=1, std=[], relative_std=[], SNR=20, ref=0, recover_noise=False):
   """

@@ -4,7 +4,6 @@ from pint import Quantity
 
 from feelmri.MPIUtilities import MPI_comm, MPI_rank, scatterKspace
 from feelmri.MRObjects import Gradient, Scanner
-from feelmri.Units import *
 
 # plt.rcParams['text.usetex'] = True
 

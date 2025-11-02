@@ -3,7 +3,7 @@ import warnings
 
 import matplotlib.pyplot as plt
 import numpy as np
-from pint import Quantity as Q_
+from pint import Quantity
 from scipy.interpolate import interp1d
 
 from feelmri.MPIUtilities import MPI_print, MPI_rank
@@ -30,19 +30,25 @@ class Scanner:
   __init__(self, field_strength=1.5, gradient_strength=33, gradient_slew_rate=200)
     Initializes the Scanner with the given field strength, gradient strength, and gradient slew rate.
   """
-  def __init__(self, field_strength: Q_ = Q_(1.5, 'T'), 
-              gradient_strength: Q_ = Q_(33,'mT/m'),
-              gradient_slew_rate: Q_ = Q_(180,'mT/m/ms')):
+  def __init__(self, field_strength: Quantity = Quantity(1.5, 'T'), 
+              gradient_strength: Quantity = Quantity(33,'mT/m'),
+              gradient_slew_rate: Quantity = Quantity(180,'mT/m/ms')):
     self.field_strength = field_strength
     self.gradient_strength = gradient_strength
     self.gradient_slew_rate = gradient_slew_rate
-    self.gammabar = Q_(42.58e6, 'Hz/T')
-    self.gamma = Q_(42.58e6*2*np.pi, 'rad*Hz/T')
+    self.gammabar = Quantity(42.58e6, 'Hz/T')
+    self.gamma = Quantity(42.58e6*2*np.pi, 'rad*Hz/T')
 
 
 # Gradient
 class Gradient:
-  def __init__(self, slope=None, lenc=Q_(1.0,'ms'), strength=None, scanner=Scanner(), ref=Q_(0.0,'ms'), time=Q_(0.0,'ms'), axis=0):
+  def __init__(self, slope=None, 
+              lenc=Quantity(1.0,'ms'), 
+              strength=None, 
+              scanner=Scanner(), 
+              ref=Quantity(0.0,'ms'), 
+              time=Quantity(0.0,'ms'), 
+              axis=0):
     self.scanner = scanner
     self.Gr_max = scanner.gradient_strength  # [mT/m]
     self.Gr_sr = scanner.gradient_slew_rate  # [mT/m/ms]
@@ -116,18 +122,18 @@ class Gradient:
     """
     # TODO
     if self.lenc <= 0.0:
-      timings = Q_(np.array([0.0, 
+      timings = Quantity(np.array([0.0, 
                           self.slope.m,
                           self.slope.m+self.slope.m], dtype=np.float32), self.slope.u)
-      amplitudes = Q_(np.array([0.0, 
+      amplitudes = Quantity(np.array([0.0, 
                             self.strength.m,
                             0.0], dtype=np.float32), self.strength.u)
     else:
-      timings = Q_(np.array([0.0, 
+      timings = Quantity(np.array([0.0, 
                           self.slope.m, 
                           self.slope.m+self.lenc.m, 
                           self.slope.m+self.lenc.m+self.slope.m], dtype=np.float32), self.slope.u)
-      amplitudes = Q_(np.array([0.0, 
+      amplitudes = Quantity(np.array([0.0, 
                             self.strength.m, 
                             self.strength.m, 
                             0.0], dtype=np.float32), self.strength.u)
@@ -140,7 +146,7 @@ class Gradient:
 
     return timings, amplitudes, interp
 
-  def change_ref(self, ref: Q_):
+  def change_ref(self, ref: Quantity):
     """
     Update the reference time for the gradient.
 
@@ -257,7 +263,7 @@ class Gradient:
     # Update timings and amplitudes in array
     self.timings, self.amplitudes, self.interpolator = self.group_timings()
 
-  def make_bipolar(self, VENC: Q_):
+  def make_bipolar(self, VENC: Quantity):
     ''' Calculate the time needed to apply the velocity encoding gradients
     based on the values of Gr_max and Gr_sr'''
 
@@ -276,7 +282,7 @@ class Gradient:
     # If lenc = 0, pi = 2*gamma*G(t)*VENC*slope^2
     # which is equivalent to: pi = 2*gamma*SR*VENC*slope^3
     slope = (self.Gr_max/self.Gr_sr).to('ms')
-    slope_req = np.cbrt(Q_(np.pi,'rad')/(2*self.scanner.gamma.to('rad/ms/mT')*self.Gr_sr.to('mT/m/ms')*VENC.to('m/ms')))
+    slope_req = np.cbrt(Quantity(np.pi,'rad')/(2*self.scanner.gamma.to('rad/ms/mT')*self.Gr_sr.to('mT/m/ms')*VENC.to('m/ms')))
 
     # Check if rectangle parts of the gradient are needed
     if slope_req <= slope:
@@ -313,7 +319,7 @@ class Gradient:
 
     return g
 
-  def area(self, t0: Q_ = None, nb_samples=1000):
+  def area(self, t0: Quantity = None, nb_samples=1000):
     ''' Calculate the area of the gradient '''
     # Calculate area
     if t0 is None:
@@ -321,10 +327,10 @@ class Gradient:
     time = np.linspace(t0.m_as('ms'), (self.time - self.ref + self.dur).m_as('ms'), nb_samples)
     area = np.trapz(self.interpolator(time), time)
 
-    return Q_(area, 'mT*ms/m')
+    return Quantity(area, 'mT*ms/m')
 
 
-  def match_area(self, area: Q_, dur: Q_ = None):
+  def match_area(self, area: Quantity, dur: Quantity = None):
     """
     Adjust self.slope, self.lenc and self.strength so that
     1) the gradient net area equals `area`, and
@@ -344,7 +350,7 @@ class Gradient:
       if dur < 2 * slope_max:
         # Slope for desired duration
         self.slope = dur / 2
-        self.lenc = Q_(0.0, 'ms')
+        self.lenc = Quantity(0.0, 'ms')
         # area = G * slope  =>  G = area / slope
         self.strength = (area / self.slope).to(self.Gr_max.u)
         if self.strength > self.Gr_max:
@@ -440,7 +446,7 @@ class Gradient:
 
     # Update gradient durations based on the maximum duration of the gradients
     max_dur = max([
-      g.dur if g.strength != 0.0 else Q_(0.0, 'ms')
+      g.dur if g.strength != 0.0 else Quantity(0.0, 'ms')
       for d in range(nb_dirs)
       for g in gradients[d]
     ])
@@ -460,7 +466,17 @@ class Gradient:
 
 
 class RF:
-  def __init__(self, scanner=Scanner(), NbLobes=[2,2], alpha=0.46, shape='apodized_sinc', flip_angle=Q_(np.pi/2,'rad'), dur=Q_(2.0,'ms'), ref=Q_(0.0,'ms'), time=Q_(0.0,'ms'), nb_samples=200, phase_offset=Q_(0.0,'rad'), frequency_offset=Q_(0.0,'Hz')):
+  def __init__(self, scanner=Scanner(),
+              NbLobes=[2,2], 
+              alpha=0.46, 
+              shape='apodized_sinc', 
+              flip_angle=Quantity(np.pi/2,'rad'), 
+              dur=Quantity(2.0,'ms'), 
+              ref=Quantity(0.0,'ms'), 
+              time=Quantity(0.0,'ms'), 
+              nb_samples=200, 
+              phase_offset=Quantity(0.0,'rad'), 
+              frequency_offset=Quantity(0.0,'Hz')):
     self.scanner = scanner
     self.NbLobes = NbLobes
     self.alpha = alpha
@@ -607,7 +623,7 @@ class RF:
 
     return interp_real, interp_imag
 
-  def change_ref(self, ref: Q_):
+  def change_ref(self, ref: Quantity):
     """
     Update the reference time for the gradient.
 
