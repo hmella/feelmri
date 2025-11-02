@@ -1,157 +1,26 @@
-import os
-import pickle
 from pathlib import Path
 from subprocess import run
 
 import meshio
 import numpy as np
-from scipy.io import savemat
 
-from feelmri.MPIUtilities import MPI_comm, MPI_rank
+from feelmri.MPIUtilities import MPI_comm, MPI_rank, MPI_print
 
 try:
   from pyevtk.hl import imageToVTK
   from pyevtk.vtk import VtkGroup  
 except ImportError:
-  print("feelmri import error: pyevtk python module not available")
+  MPI_print("feelmri import error: pyevtk python module not available")
 
-
-# Save Python objects
-def save_pyobject(obj, filename, sep_proc=False):
-    # Write file
-    if not sep_proc:
-        if MPI_rank == 0:
-            with open(filename, 'wb') as output:
-                pickle.dump(obj, output, -1)
-    else:
-        # Split filename path
-        root, ext = os.path.splitext(filename)
-        with open(root+'_{:d}'.format(MPI_rank)+ext, 'wb') as output:
-            pickle.dump(obj, output, -1)
-
-# Load Python objects
-def load_pyobject(filename, sep_proc=False):
-
-    # Load files
-    if not sep_proc:
-        if MPI_rank==0:
-            with open(filename, 'rb') as output:
-                obj = pickle.load(output)
-        else:
-            obj = None
-
-        # Broadcast object
-        obj = MPI_comm.bcast(obj, root=0)
-    else:
-        # Split filename path
-        root, ext = os.path.splitext(filename)
-        with open(root+'_{:d}'.format(MPI_rank)+ext, 'rb') as output:
-            obj = pickle.load(output)
-
-    return obj
-
-
-# Write Functions to vtk
-def write_vtk(functions, path=None, name=None):
-
-    # Verify if output folder exists
-    directory = os.path.dirname(path)
-    if directory != []:
-        if not os.path.exists(directory):
-            os.makedirs(directory)
-
-    # Get mesh
-    try:
-        mesh = functions.spins.mesh
-    except:
-        mesh = functions[0].spins.mesh
-
-    # Prepare data as a dictionary
-    point_data = {}
-    for i, (u, n) in enumerate(zip(functions,name)):
-
-        # Element shape
-        element_shape = u.dim
-
-        if element_shape == 2:
-          d = u.vector()
-          data = np.zeros([d.shape[0], d.shape[1]+1], dtype=d.dtype)
-          data[:,:-1] = d
-        else:
-          data = u.vector()
-
-        point_data[n] = data
-
-    mesh.point_data = point_data
-    meshio.write(path, mesh)
-
-
-# Export images
-def export_image(data, path=None, name=None):
-
-    if name is None:
-        name = 'I'
-
-    # Export data
-    savemat(path+'.mat',{name: data})
-
-
-# Scale images
-def scale_data(I, mag=True, pha=False, real=False, imag=False, dtype=np.uint64):
-
-    # slope and intercept
-    ScaleIntercept = np.ceil(np.abs(I).max())
-    ScaleSlope =  np.iinfo(dtype).max/(2*ScaleIntercept)
-
-    # Data extraction
-    if mag:
-        mag = (ScaleSlope*np.abs(I)+ScaleIntercept).astype(dtype)
-    if pha:
-        pha = (ScaleSlope*1000*(np.angle(I)+np.pi)).astype(dtype)
-    if real:
-        real = (ScaleSlope*(np.real(I)+ScaleIntercept)).astype(dtype)
-    if imag:
-        imag = (ScaleSlope*(np.imag(I)+ScaleIntercept)).astype(dtype)
-
-    # Rescaling parameters
-    RescaleSlope = 1.0/ScaleSlope
-    RescaleIntercept = -ScaleIntercept
-
-    # output
-    output = {}
-    if mag:
-        output["mag"] = {"Image": mag,
-                        "RescaleSlope": RescaleSlope,
-                        "RescaleIntercept": RescaleIntercept}
-    if pha:
-        output["pha"] = {"Image": pha,
-                        "RescaleSlope": RescaleSlope,
-                        "RescaleIntercept": RescaleIntercept}
-    if real:
-        output["real"] = {"Image": real,
-                        "RescaleSlope": RescaleSlope,
-                        "RescaleIntercept": RescaleIntercept}
-    if imag:
-        output["imag"] = {"Image": imag,
-                        "RescaleSlope": RescaleSlope,
-                        "RescaleIntercept": RescaleIntercept}
-
-    return output
-
-
-# Rescale image
-def rescale_image(I):
-
-    # Get images, slope and intercept
-    Im = dict()
-    for (key, value) in I.items():
-        Im[key] = I[key]['Image']*I[key]['RescaleSlope'] + I[key]['RescaleIntercept']
-
-    return Im
 
 # File class to write individual or cine VTI files
 class VTIFile:
-  def __init__(self, filename='image.pvd', origin=np.zeros([3,]), spacing=np.ones([3,]), direction=np.eye(3).flatten(), nbFrames=1, dt=1):
+  def __init__(self, filename : str = 'image.pvd', 
+               origin : np.ndarray = np.zeros([3,]), 
+               spacing : np.ndarray = np.ones([3,]), 
+               direction : np.ndarray = np.eye(3).flatten(), 
+               nbFrames : int = 1, 
+               dt : float = 1):
     self.filename = Path(filename) if '.pvd' in filename else Path(filename+'.pvd')
     self.origin = origin
     self.spacing = spacing
@@ -160,6 +29,14 @@ class VTIFile:
     self.dt = dt
 
   def write(self, cellData=None, pointData=None):
+    '''Write VTI or PVD files.
+    Parameters
+    ----------
+    cellData : dict, optional
+        Dictionary of cell data to write. The default is None.
+    pointData : dict, optional
+        Dictionary of point data to write. The default is None.
+    '''
 
     # Make sure the containing folder exists
     self.filename.parent.mkdir(parents=True, exist_ok=True)
@@ -171,9 +48,9 @@ class VTIFile:
     if self.nbFrames > 1:
 
       # Write cine images
-      print("Writing vti files...")
+      MPI_print("Writing vti files...")
       for fr in range(self.nbFrames):
-        print("    Writing fame {:d}".format(fr))
+        MPI_print("    Writing fame {:d}".format(fr))
 
         # cellData at frame fr
         if cellData != None:
@@ -221,6 +98,7 @@ class VTIFile:
       pvd.save()
 
   def make_contiguous(self, A):
+    '''Make array contiguous in memory.'''
     if not A.data.contiguous:
       return np.ascontiguousarray(A)
     else:
@@ -241,9 +119,20 @@ class XDMFFile:
     self.__firstwrite__ = True
 
   def write(self, pointData=None, cellData=None, time=0.0):
+    '''Write XDMF files.
+    Parameters
+    ----------
+    pointData : dict of np.ndarray, optional
+        Dictionary of point data arrays to write. The default is None.
+    cellData : dict of np.ndarray, optional
+        Dictionary of cell data arrays to write. The default is None.
+    time : float, optional
+        Time value to write. The default is 0.0.
+    '''
 
+    # First write: create file and store mesh
     if self.__firstwrite__:
-      print("Writing XDMF file...")
+      MPI_print("Writing XDMF file...")
 
       # Make sure containing folder exists
       self.filename.parent.mkdir(parents=True, exist_ok=True)
@@ -261,6 +150,9 @@ class XDMFFile:
     self.writer.write_data(time, point_data=pointData, cell_data=cellData)
 
   def close(self):
+    '''Close XDMF file and move to the right folder.'''
+    MPI_print("Closing XDMF file...")
+
     # Close h5 files
     self.writer.__exit__()
 
@@ -270,14 +162,24 @@ class XDMFFile:
 
 # File class to write individual or cine TXT files
 class TXTFile:
-  def __init__(self, filename='image.txt', nodes=None, metadata=None):
+  def __init__(self, filename: str | Path = 'image.txt', 
+               nodes : np.ndarray = None, 
+               metadata: dict = None):
     self.filename = Path(filename) if '.txt' in filename else Path(filename+'.txt')
     self.nodes = nodes        # numpy ndarray
     self.metadata = metadata  # dictionary
     self._idx = 0
     self.__firstwrite__ = True
 
-  def write(self, pointData=None, time=0.0):
+  def write(self, pointData: dict = None, time: float = 0.0):
+    '''Write TXT files.
+    Parameters
+    ----------
+    pointData : dict of np.ndarray, optional
+        Dictionary of point data arrays to write. The default is None.
+    time : float, optional
+        Time value to write. The default is 0.0.
+    '''
     # Make sure containing folder exists
     if self.__firstwrite__:
       self.filename.parent.mkdir(parents=True, exist_ok=True)

@@ -6,9 +6,9 @@ MPI_comm = MPI.COMM_WORLD
 MPI_size = MPI_comm.Get_size()
 MPI_rank = MPI_comm.Get_rank()
 
-
 # Scatter array
 def scatterKspace(kspace, times):
+  ''' Scatter k-space and time arrays to all MPI processes '''
   if MPI_rank==0:
 
     # Number of readout points
@@ -40,6 +40,7 @@ def scatterKspace(kspace, times):
 # Sum images obtained in each processor into a single
 # array
 def gather_data(data):
+  ''' Gather data from all MPI processes by summing them up '''
 
   # Get the local data type
   dtype = data.dtype
@@ -56,5 +57,9 @@ def gather_data(data):
 
 # Printing function for parallel processing
 def MPI_print(*args, **kwargs):
+  ''' Print only from the root process (rank 0) '''
   if MPI_rank == 0:
     print(*args, **kwargs)
+
+  # Synchronize all processes
+  MPI_comm.Barrier()

@@ -4,12 +4,12 @@ import warnings
 import meshio
 import numpy as np
 import pymetis
-from pint import Quantity as Q_
+from pint import Quantity
 from scipy.interpolate import RBFInterpolator
+from scipy.sparse import lil_matrix
 
 from feelmri.FEAssemble import MassAssemble
 from feelmri.FiniteElements import FiniteElement, QuadratureRule
-from feelmri.MeshRefinement import refine_mesh
 from feelmri.MPIUtilities import MPI_print, MPI_rank, MPI_size
 
 # Define a dictionary for the element types
@@ -51,6 +51,8 @@ class FEMPhantom:
     self.acceleration_label = acceleration_label
     self.pressure_label = pressure_label
     self.dtype = dtype
+    self.point_data = None
+    self.cell_data = None
     mesh, self.reader, self.Nfr = self._prepare_reader()
     self.cell_type = mesh['cell_type']
     self.global_elements = mesh['elements']
@@ -60,8 +62,6 @@ class FEMPhantom:
     self.local_nodes = mesh['nodes']
     self.local_shape = self.global_nodes.shape
     self.bbox = self.bounding_box()
-    self.point_data = None
-    self.cell_data = None
     self.distribute_mesh()
 
   def _prepare_reader(self):
@@ -72,6 +72,7 @@ class FEMPhantom:
       # Import mesh
       nodes, all_elems = reader.read_points_cells()
       elems = all_elems[0].data
+      elems_type = all_elems[0].type
 
       # Scale mesh
       nodes *= self.scale_factor
@@ -84,7 +85,12 @@ class FEMPhantom:
       mesh = meshio.read(self.path)
       nodes = mesh.points
       elems = mesh.cells[0].data
+      elems_type = mesh.cells[0].type
       reader = None
+
+      # Cell and point data
+      self.point_data = mesh.point_data
+      self.cell_data = mesh.cell_data
 
       # Scale mesh
       nodes *= self.scale_factor
@@ -98,12 +104,12 @@ class FEMPhantom:
     # Mesh dictionary
     mesh = {'nodes': nodes, 
             'elements': elems, 
-            'cell_type': all_elems[0].type}
+            'cell_type': elems_type}
 
     return mesh, reader, Nfr
 
 
-  def create_submesh(self, markers, refine=False, element_size=0.01):
+  def create_submesh(self, markers, refine=False):
     '''
     Create a submesh from the global mesh based on the markers provided.
     Parameters
@@ -136,21 +142,6 @@ class FEMPhantom:
 
     # Remap the element node indices to the new submesh node indices
     submesh_elems = mapped_nodes[submesh_elems]
-
-    # Mesh refinement
-    if refine:
-      # Machine time
-      t0 = time.perf_counter()
-
-      # Debugging info
-      MPI_print("[MeshRefinement] Number of elements before refining: {:d}".format(len(submesh_elems)))
-
-      # Refine mesh
-      submesh_nodes, submesh_elems = refine_mesh(submesh_nodes, submesh_elems, element_size)
-
-      # Debugging info
-      MPI_print("[MeshRefinement] Number of elements after refining: {:d}".format(len(submesh_elems)))
-      MPI_print("[MeshRefinement] Elapsed time for refinement: {:.2f} s".format(time.perf_counter()-t0))
 
     # Backup original mesh
     self._global_nodes = self.global_nodes
@@ -327,8 +318,8 @@ class FEMPhantom:
       return interp_data
 
 
-  def orient(self, MPS_ori: np.ndarray, LOC: Q_):
-    ''' Translate phantom to obtain the desired slice location '''
+  def orient(self, MPS_ori: np.ndarray, LOC: Quantity):
+    ''' Translate phantom image coordinate system to obtain the desired slice location '''
     # Get orientation
     MPS_ori = MPS_ori.astype(self.dtype)
     LOC = LOC.astype(self.dtype)
@@ -336,6 +327,17 @@ class FEMPhantom:
     # Translate and rotate
     self.global_nodes = (self.global_nodes - LOC.m) @ MPS_ori
     self.local_nodes = (self.local_nodes - LOC.m) @ MPS_ori
+
+  def reorient(self, MPS_ori: np.ndarray, LOC: Quantity):
+    ''' Translate phantom ot its original coordinate system (undo orient operation) '''
+    # Get orientation
+    MPS_ori = MPS_ori.astype(self.dtype)
+    LOC = LOC.astype(self.dtype)
+
+    # Translate and rotate
+    self.global_nodes = self.global_nodes @ MPS_ori.T + LOC.m
+    self.local_nodes = self.local_nodes @ MPS_ori.T + LOC.m
+
 
   def mass_matrix(self, lumped=False, use_submesh=False, quadrature_order=2):
     ''' Assemble mass matrix for integrals '''
@@ -354,15 +356,9 @@ class FEMPhantom:
 
     # Make matrix lumped if requested
     if lumped:
-      try:
-        from scipy.sparse import lil_matrix
-        diag = M.sum(axis=1)
-        M = lil_matrix(M.shape, dtype=M.dtype)
-        M.setdiag(diag)
-      except ImportError:
-        if MPI_rank == 0:
-          warnings.warn('Lumped mass matrix not available. Please install scipy.')
-
+      diag = M.sum(axis=1)
+      M = lil_matrix(M.shape, dtype=M.dtype)
+      M.setdiag(diag)
     return M
   
   def moving_mass_matrix(self, local_nodes, lumped=False, use_submesh=False, quadrature_order=2):
@@ -382,13 +378,8 @@ class FEMPhantom:
 
     # Make matrix lumped if requested
     if lumped:
-      try:
-        from scipy.sparse import lil_matrix
-        diag = M.sum(axis=1)
-        M = lil_matrix(M.shape, dtype=M.dtype)
-        M.setdiag(diag)
-      except ImportError:
-        if MPI_rank == 0:
-          warnings.warn('Lumped mass matrix not available. Please install scipy.')
+      diag = M.sum(axis=1)
+      M = lil_matrix(M.shape, dtype=M.dtype)
+      M.setdiag(diag)
 
     return M

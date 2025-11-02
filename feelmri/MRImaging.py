@@ -2,17 +2,21 @@ import warnings
 
 import matplotlib.pyplot as plt
 import numpy as np
-from pint import Quantity as Q_
+from pint import Quantity
 from scipy.integrate import RK45
 from scipy.interpolate import interp1d
 
 from feelmri.MPIUtilities import MPI_rank
 from feelmri.MRObjects import RF, Gradient, Scanner
-from feelmri.Units import *
 
 
 class Bloch:
-  def __init__(self, gamma=42.58, z0=0.0, z=0.0, eval_gradient=None, B1e=None, small_angle=False):
+  def __init__(self, gamma=42.58, 
+               z0=0.0, 
+               z=0.0, 
+               eval_gradient=None, 
+               B1e=None, 
+               small_angle=False):
     self.gamma = gamma
     self.z0 = z0
     self.z = z
@@ -89,7 +93,7 @@ class SliceProfile:
     calculate(y0=np.array([0,0,1]).reshape((3,))):
       Calculates the slice profile by solving the Bloch equations.
   """
-  def __init__(self, z0=Q_(0.0,'m'), delta_z=Q_(0.008,'m'), bandwidth='maximum', rf=RF(), dt=Q_(1e-4,'ms'), profile_samples=150, plot=False, small_angle=False, refocusing_area_frac=1, scanner=Scanner(), solve_profile=False, dtype=np.float32):
+  def __init__(self, z0=Quantity(0.0,'m'), delta_z=Quantity(0.008,'m'), bandwidth='maximum', rf=RF(), dt=Quantity(1e-4,'ms'), profile_samples=150, plot=False, small_angle=False, refocusing_area_frac=1, scanner=Scanner(), solve_profile=False, dtype=np.float32):
     self.z0 = z0
     self.delta_z = delta_z
     self.rf = rf
@@ -179,7 +183,7 @@ class SliceProfile:
     """
 
     # Calculate gradient amplitude needed for the desired slice thickness and bandwidth
-    Gz = Q_(np.min([self.bandwidth.m_as('Hz')/self.scanner.gammabar.m_as('Hz/T')/self.delta_z.m_as('m'), self.scanner.gradient_strength.m_as('T/m')]),'T/m')
+    Gz = Quantity(np.min([self.bandwidth.m_as('Hz')/self.scanner.gammabar.m_as('Hz/T')/self.delta_z.m_as('m'), self.scanner.gradient_strength.m_as('T/m')]),'T/m')
 
     # RF pulse durations based on required bandwidth
     half1 = ((self.rf.NbLobes[0]+1)/self.bandwidth).to('ms')
@@ -329,7 +333,7 @@ class SliceProfile:
 
 
 class VelocityEncoding:
-  def __init__(self, VENC: Q_, directions: list, dtype=np.float32, normalize_dirs: bool = False):
+  def __init__(self, VENC: Quantity, directions: list, dtype=np.float32, normalize_dirs: bool = False):
     """
     Initializes the MRImaging object with VENC and directions.
 

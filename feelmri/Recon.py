@@ -11,6 +11,20 @@ from feelmri.MPIUtilities import MPI_print
 
 
 def CartesianRecon(K, trajectory, filter={'type': 'Tukey', 'width': 0.9, 'lift': 0.3}):
+  '''Reconstruct an image from Cartesian k-space data.
+  Parameters
+  ----------
+  K : np.ndarray
+      The k-space data to be reconstructed. Shape: (num_measurements, num_phases, num_slices, ...)
+  trajectory : KSpaceTrajectory object
+      The k-space trajectory object.
+  filter : dict, optional
+      The filter to be applied in k-space. The default is {'type': 'Tukey', 'width': 0.9, 'lift': 0.3}.
+  Returns
+  -------
+  I : np.ndarray
+      The reconstructed image. Shape: (num_measurements, num_phases, num_slices, ...)
+  '''
 
   # Fix the direction of kspace lines measured in the opposite direction
   if isinstance(trajectory, CartesianStack) and trajectory.lines_per_shot > 1:   
