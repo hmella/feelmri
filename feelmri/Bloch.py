@@ -15,14 +15,14 @@ from feelmri.Phantom import FEMPhantom
 
 
 class SequenceBlock:
-  def __init__(self, gradients : list = [], 
-               rf_pulses : list = [], 
-               dt_rf : Quantity = Quantity(0.01, 'ms'), 
-               dt_gr : Quantity = Quantity(-1, 'ms'), 
-               dt : Quantity = Quantity(10, 'ms'), 
-               dur : Quantity = Quantity(-1, 'ms'), 
-               empty : bool = False, 
-               store_magnetization : bool = False):
+  def __init__(self, gradients: list = [], 
+               rf_pulses: list = [], 
+               dt_rf: Quantity = Quantity(0.01, 'ms'), 
+               dt_gr: Quantity = Quantity(-1, 'ms'), 
+               dt: Quantity = Quantity(10, 'ms'), 
+               dur: Quantity = Quantity(-1, 'ms'), 
+               empty: bool = False, 
+               store_magnetization: bool = False):
     self.gradients = gradients
     self.M_gradients = [g for g in self.gradients if g.axis == 0]
     self.P_gradients = [g for g in self.gradients if g.axis == 1]
@@ -175,7 +175,7 @@ class SequenceBlock:
 
 
 class Sequence:
-  def __init__(self, blocks : list = []):
+  def __init__(self, blocks: list = []):
     self.blocks = blocks
     self.Nb_blocks = len(self.blocks)
     self.time_extent = self._get_extent()

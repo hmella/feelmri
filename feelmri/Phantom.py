@@ -114,11 +114,11 @@ class FEMPhantom:
     Create a submesh from the global mesh based on the markers provided.
     Parameters
     ----------
-    markers : np.ndarray
+    markers: np.ndarray
         A boolean array indicating which elements to include in the submesh.
-    refine : bool, optional
+    refine: bool, optional
         If True, the submesh will be refined. Default is False.
-    element_size : float, optional
+    element_size: float, optional
         The target size of the elements in the refined mesh. Default is 0.01.
     Returns
     -------
@@ -240,7 +240,7 @@ class FEMPhantom:
 
     Parameters
     ----------
-    data : np.ndarray
+    data: np.ndarray
         The data to convert, shape (N, M) where N is the number of nodes and M is the number of channels.
 
     Returns
@@ -278,14 +278,14 @@ class FEMPhantom:
 
       Parameters
       ----------
-      data : np.ndarray
+      data: np.ndarray
           The data to interpolate, shape (N, M) where N is the number of nodes and M is the number of channels.
-      local : bool, optional
+      local: bool, optional
           If True, the interpolation is done only on the local CPU nodes. If False, it uses the full mesh nodes.
           Default is True.
-      kernel : str, optional
+      kernel: str, optional
           The kernel to use for the RBF interpolation. Default is 'linear'.
-      neighbors : int, optional
+      neighbors: int, optional
           The number of nearest neighbors to use for the interpolation. Default is 25.
       """
       try:

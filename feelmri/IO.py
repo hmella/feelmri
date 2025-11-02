@@ -15,12 +15,12 @@ except ImportError:
 
 # File class to write individual or cine VTI files
 class VTIFile:
-  def __init__(self, filename : str = 'image.pvd', 
-               origin : np.ndarray = np.zeros([3,]), 
-               spacing : np.ndarray = np.ones([3,]), 
-               direction : np.ndarray = np.eye(3).flatten(), 
-               nbFrames : int = 1, 
-               dt : float = 1):
+  def __init__(self, filename: str = 'image.pvd', 
+               origin: np.ndarray = np.zeros([3,]), 
+               spacing: np.ndarray = np.ones([3,]), 
+               direction: np.ndarray = np.eye(3).flatten(), 
+               nbFrames: int = 1, 
+               dt: float = 1):
     self.filename = Path(filename) if '.pvd' in filename else Path(filename+'.pvd')
     self.origin = origin
     self.spacing = spacing
@@ -32,9 +32,9 @@ class VTIFile:
     '''Write VTI or PVD files.
     Parameters
     ----------
-    cellData : dict, optional
+    cellData: dict, optional
         Dictionary of cell data to write. The default is None.
-    pointData : dict, optional
+    pointData: dict, optional
         Dictionary of point data to write. The default is None.
     '''
 
@@ -122,11 +122,11 @@ class XDMFFile:
     '''Write XDMF files.
     Parameters
     ----------
-    pointData : dict of np.ndarray, optional
+    pointData: dict of np.ndarray, optional
         Dictionary of point data arrays to write. The default is None.
-    cellData : dict of np.ndarray, optional
+    cellData: dict of np.ndarray, optional
         Dictionary of cell data arrays to write. The default is None.
-    time : float, optional
+    time: float, optional
         Time value to write. The default is 0.0.
     '''
 
@@ -163,7 +163,7 @@ class XDMFFile:
 # File class to write individual or cine TXT files
 class TXTFile:
   def __init__(self, filename: str | Path = 'image.txt', 
-               nodes : np.ndarray = None, 
+               nodes: np.ndarray = None, 
                metadata: dict = None):
     self.filename = Path(filename) if '.txt' in filename else Path(filename+'.txt')
     self.nodes = nodes        # numpy ndarray
@@ -175,9 +175,9 @@ class TXTFile:
     '''Write TXT files.
     Parameters
     ----------
-    pointData : dict of np.ndarray, optional
+    pointData: dict of np.ndarray, optional
         Dictionary of point data arrays to write. The default is None.
-    time : float, optional
+    time: float, optional
         Time value to write. The default is 0.0.
     '''
     # Make sure containing folder exists

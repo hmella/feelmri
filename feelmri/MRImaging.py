@@ -168,12 +168,12 @@ class SliceProfile:
 
     Parameters:
     -----------
-    y0 : np.ndarray, optional
+    y0: np.ndarray, optional
       Initial magnetization vector. Default is np.array([0,0,1]).reshape((3,)).
 
     Returns:
     --------
-    interp_profile : scipy.interpolate.interp1d
+    interp_profile: scipy.interpolate.interp1d
       Interpolated profile of the slice selection.
 
     Notes:

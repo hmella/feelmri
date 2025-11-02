@@ -16,13 +16,13 @@ class Scanner:
 
   Attributes
   ----------
-  field_strength : float
+  field_strength: float
     The magnetic field strength of the scanner in Tesla (default is 1.5 T).
-  gradient_strength : float
+  gradient_strength: float
     The gradient strength of the scanner in millitesla per meter (default is 33 mT/m).
-  gradient_slew_rate : float
+  gradient_slew_rate: float
     The gradient slew rate of the scanner in millitesla per meter per millisecond (default is 200 mT/m/ms).
-  gammabar : float
+  gammabar: float
     The gyromagnetic ratio in Hz/T (default is 42.58e6 Hz/T).
 
   Methods
@@ -178,13 +178,13 @@ class Gradient:
 
     Parameters:
     -----------
-    k_bw : float
+    k_bw: float
       Bandwidth in 1/m.
-    receiver_bw : float, optional
+    receiver_bw: float, optional
       Receiver bandwidth in Hz. If provided, lenc is fixed and calculated accordingly.
-    ro_samples : int, optional
+    ro_samples: int, optional
       Number of readout samples.
-    ofac : float, optional
+    ofac: float, optional
       Oversampling factor.
 
     Returns:
@@ -199,10 +199,10 @@ class Gradient:
     Otherwise, the method calculates the parameters assuming only the ramps are needed.
 
     The calculated parameters are stored in the instance variables:
-    - self.lenc : Length in ms
-    - self.strength : Gradient amplitude in mT/m
-    - self.slope : Slope in ms
-    - self.dur : Duration in ms
+    - self.lenc: Length in ms
+    - self.strength: Gradient amplitude in mT/m
+    - self.slope: Slope in ms
+    - self.dur: Duration in ms
 
                                              __________
                 _1_ /|\                    /|          |\
@@ -569,12 +569,12 @@ class RF:
 
     Parameters:
     -----------
-    t : float
+    t: float
       The time at which the RF pulse is evaluated.
 
     Returns:
     --------
-    B1e : float
+    B1e: float
       The amplitude of the RF pulse at time t.
 
     Notes:

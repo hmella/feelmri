@@ -14,15 +14,15 @@ def CartesianRecon(K, trajectory, filter={'type': 'Tukey', 'width': 0.9, 'lift':
   '''Reconstruct an image from Cartesian k-space data.
   Parameters
   ----------
-  K : np.ndarray
+  K: np.ndarray
       The k-space data to be reconstructed. Shape: (num_measurements, num_phases, num_slices, ...)
-  trajectory : KSpaceTrajectory object
+  trajectory: KSpaceTrajectory object
       The k-space trajectory object.
-  filter : dict, optional
+  filter: dict, optional
       The filter to be applied in k-space. The default is {'type': 'Tukey', 'width': 0.9, 'lift': 0.3}.
   Returns
   -------
-  I : np.ndarray
+  I: np.ndarray
       The reconstructed image. Shape: (num_measurements, num_phases, num_slices, ...)
   '''
 
@@ -169,20 +169,20 @@ def reconstruct_nufft(
 
     Parameters
     ----------
-    kdata : np.ndarray
+    kdata: np.ndarray
         (nb_readout=R, nb_lines=L, nb_slices=S, nb_channels=C), complex.
-    ktraj : tuple[np.ndarray, np.ndarray, np.ndarray | None]
+    ktraj: tuple[np.ndarray, np.ndarray, np.ndarray | None]
         (kx, ky, kz) each shaped (R, L, S) in cycles/FOV. For 2D stacks, kz can be zeros.
-    img_shape : tuple
+    img_shape: tuple
         (Nx, Ny, Nz) for 3D, or (Nx, Ny) for 2D (if all kz are zero/None).
-    dcw : np.ndarray | None
+    dcw: np.ndarray | None
         Optional density compensation weights, flattened length M=R*L*S.
-    auto_dcw : str | None
+    auto_dcw: str | None
         "pipe-menon" (default, robust), "radial-2d" (fast for stack-of-radials),
         or "speed" (good for time-ordered spirals). Ignored if dcw provided.
-    oversamp, kernel_size : NUFFT plan parameters.
-    mode : "adjoint" or "cg" (if available in your pynufft).
-    combine : None keeps coil axis; "rss" does root-sum-of-squares.
+    oversamp, kernel_size: NUFFT plan parameters.
+    mode: "adjoint" or "cg" (if available in your pynufft).
+    combine: None keeps coil axis; "rss" does root-sum-of-squares.
 
     Returns
     -------
