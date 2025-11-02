@@ -16,42 +16,45 @@ git clone https://github.com/hernanmella/feelmri && cd feelmri/
 ```
 
 ### Dependencies
-Dependencies can be installed via the ```install_dependencies.sh``` script. You can run:
+Most of the required dependencies can be installed via pip. However, some dependencies may require additional system packages. Below are the instructions for installing the necessary dependencies on Ubuntu/Debian-based systems.
+
+
+Dependencies such as ```build-essential```, ```python3-dev```, ```python3-pip```, ```python3-tk```, ```python3-setuptools```, ```libopenmpi-dev```, ```mpich```, and ```cmake``` can be installed via the ```install_dependencies.sh``` script as follows:
 ```bash
-source install_dependencies.sh  # be careful with the sudo commands inside this script
+source install_dependencies.sh
 ```
 or
 ```bash
 chmod a+x install_dependencies.sh && ./install_dependencies.sh
 ```
 
-### Installing FEelMRI
-To install the library, run:
+All the required Python dependencies are listed in the ```requirements.txt``` file. These can be installed via pip:
 ```bash
-pip3 install .
+pip3 install -r requirements.txt --user
 ```
-You may need to prepend ```sudo```, though this is not recommended. To install without ```sudo```, add the ```--user``` flag:
+
+### FEelMRI library installation
+To install the library, within the ```feelmri/``` directory run:
 ```bash
 pip3 install . --user
 ```
 
 
-### Docker images
-Two Dockerfiles are provided in the ```docker/``` folder: one for CPU parallelization and one for GPU parallelization using CUDA. To build either image, run:
+### Docker images for multi-platform compatibility
+To ensure compatibility across different systems and avoid dependency issues, you can use Docker to install and run FEelMRI in a containerized environment.
+
+A Dockerfile is provided in the ```docker/``` folder. To build a Docker image, use the following command:
 ```bash
-docker build --build-arg UID=$(id -u) --build-arg GID=$(id -g) . -f docker/Dockerfile_foo -t image_name
+docker build --build-arg UID=$(id -u) --build-arg GID=$(id -g) . -f docker/Dockerfile -t image_name
 ```
 Here, ```foo``` can be either ```cpu``` or ```gpu```, and ```image_name``` will be the tag for your image. The ```--build-arg UID=$(id -u)``` and ```--build-arg GID=$(id -g)``` arguments ensure that files created inside the container are owned by your user, avoiding permission issues.
 
 #### Starting a FEelMRI Docker Container
-* **CPU container**:
-  ```bash
-  docker run --name container_name --shm-size 256m -ti -v $(pwd):/home/FEelMRI/ image_name
-  ```
-* **GPU container**:  
-  ```bash
-  docker run --name container_name  --runtime=nvidia --gpus all --shm-size 256m -ti -v $(pwd):/home/feelmri/ image_name
-  ```
+To start a Docker container with FEelMRI, use the following command based on your needs:
+```bash
+docker run --name container_name --shm-size 256m -ti -v $(pwd):/home/FEelMRI/ image_name
+```
+Here, replace ```container_name``` with your desired container name and ```image_name``` with the tag of the image you built earlier. The ```--shm-size 256m``` option increases the shared memory size, which can be beneficial for certain applications.
 
 #### Allowing plots inside containers
 To enable plotting within Docker containers, run (in place of the above `docker run` commands):
