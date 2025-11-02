@@ -226,7 +226,7 @@ if __name__ == '__main__':
   K = gather_data(K)
 
   # Add noise to kspace
-  K = add_cpx_noise(K, relative_std=0.00001)
+  K = add_cpx_noise(K, relative_std=0.01)
 
   # Reconstruct images
   RES = pars.Imaging.RECON_RES
@@ -251,8 +251,3 @@ if __name__ == '__main__':
   if MPI_rank == 0:
     plotter = MRIPlotter(images=[m, phi_vx, phi_vy, phi_vz, phi_ref], title=['Magnitude', '$\\phi_{vx}$ ', '$\\phi_{vy}$', '$\\phi_{vz}$', '$\\phi_{ref}$'], FOV=planning.FOV.m_as('m'), swap_axes=[0, 2])
     plotter.show()
-    # plotter.export_images('4dflow_images/plot_1/')
-
-  #   plotter = MRIPlotter(images=[m, phi_vx, phi_vy, phi_vz, phi_ref], title=['Magnitude', '$\\phi_{vx}$ ', '$\\phi_{vy}$', '$\\phi_{vz}$', '$\\phi_{ref}$'], FOV=planning.FOV.m_as('m'))
-  #   plotter.show()
-  #   plotter.export_images('4dflow_images/plot_2/')
