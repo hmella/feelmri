@@ -8,18 +8,11 @@ from pathlib import Path
 import numpy as np
 from pint import Quantity as Q_
 
-from feelmri.Bloch import BlochSolver, Sequence, SequenceBlock
-from feelmri.IO import XDMFFile
-from feelmri.KSpaceTraj import CartesianStack
-from feelmri.Motion import POD, RespiratoryMotion
-from feelmri.MPIUtilities import MPI_print, MPI_rank, gather_data
-from feelmri.MRImaging import PositionEncoding, SliceProfile
-from feelmri.MRObjects import RF, Gradient, Scanner
+from feelmri.Bloch import Sequence, SequenceBlock
+from feelmri.KSpaceTraj import CartesianStack, RadialStack, SpiralStack
+from feelmri.MRImaging import SliceProfile
+from feelmri.MRObjects import RF, Scanner
 from feelmri.Parameters import ParameterHandler, PVSMParser
-from feelmri.Phantom import FEMPhantom
-from feelmri.Plotter import MRIPlotter
-from feelmri.Recon import CartesianRecon
-from feelmri.Tagging import SPAMM
 
 if __name__ == '__main__':
 
@@ -75,19 +68,7 @@ if __name__ == '__main__':
     seq.add_block(time_spacing, dt=Q_(1, 'ms'))  # Time spacing between frames
   seq.plot()
 
-  # # Bloch solver
-  # solver = BlochSolver(seq, phantom, 
-  #                       scanner=scanner, 
-  #                       M0=1e+9, 
-  #                       T1=Q_(parameters.Phantom.T1, 'ms'), 
-  #                       T2=Q_(parameters.Phantom.T2star, 'ms'), 
-  #                       delta_B=delta_B0.reshape((-1, 1)),
-  #                       pod_trajectory=pod_sum)
-
-  # # Solve for x and y directions
-  # Mxy, Mz = solver.solve() 
-
-  # Generate kspace trajectory
+  # Generate cartesian kspace trajectory
   traj = CartesianStack(FOV=planning.FOV.to('m'),
                       t_start=sp.rephasing.dur + sp.rf.dur2,
                       res=parameters.Imaging.RES, 
@@ -98,3 +79,27 @@ if __name__ == '__main__':
                       receiver_bw=parameters.Hardware.r_BW.to('Hz'), 
                       plot_seq=True)
   traj.plot_trajectory()
+
+  # Generate radial kspace trajectory
+  traj_radial = RadialStack(FOV=planning.FOV.to('m'),
+                      t_start=sp.rephasing.dur + sp.rf.dur2,
+                      golden_angle=True,
+                      res=parameters.Imaging.RES, 
+                      oversampling=parameters.Imaging.Oversampling, 
+                      MPS_ori=planning.MPS,
+                      LOC=planning.LOC.m,
+                      receiver_bw=parameters.Hardware.r_BW.to('Hz'), 
+                      plot_seq=True)
+  traj_radial.plot_trajectory()
+
+  # Generate spiral kspace trajectory
+  traj_spiral = SpiralStack(FOV=planning.FOV.to('m'),
+                      t_start=sp.rephasing.dur + sp.rf.dur2,
+                      density_exponent=1,
+                      res=parameters.Imaging.RES, 
+                      oversampling=parameters.Imaging.Oversampling, 
+                      MPS_ori=planning.MPS,
+                      LOC=planning.LOC.m,
+                      receiver_bw=parameters.Hardware.r_BW.to('Hz'), 
+                      plot_seq=True)
+  traj_spiral.plot_trajectory()
