@@ -1,13 +1,32 @@
 
-<!-- <p align="center"> -->
-  <img height="150" src="gifs/logo.png" alt="color picker" />
-<!-- </p> -->
+<p align="center">
+  <img height="200" src="images/logo.png" alt="color picker" />
+</p>
 
 **FEelMRI** is an open-source and multi-platform library for generating synthetic magnetic resonance images from finite-element (FE) simulations. The library is designed to handle complex phenomena whose behavior is described by partial differential equations and approximated using FEM. **FEelMRI** supports FE meshes with arbitrary cell geometries and simulations performed in any discrete function space.
 
-<p align="center">
-  <img height="216" src="gifs/spamm.gif" alt="color picker" /> <img height="216" src="gifs/aorta.gif" alt="color picker" />
-</p>
+<table align="center">
+  <tr>
+    <td align="center">
+      <img height="216" src="images/spamm.gif" alt="SPAMM MRI"/><br>
+      <b>Orthogonal-CSPAMM MRI</b>
+    </td>
+    <td align="center">
+      <img height="216" src="images/aorta.gif" alt="Aorta MRI"/><br>
+      <b>4D flow MRI</b>
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <img height="135" src="images/abdomen.png" alt="Abdomen Image"/><br>
+      <b>Abdomen FFE</b>
+    </td>
+    <td align="center">
+      <img height="135" src="images/free_running.png" alt="Free Running MRI"/><br>
+      <b>Free Running MRI</b>
+    </td>
+  </tr>
+</table>
 
 ## Table of Contents
 - [Installation instructions](#installation-instructions)
