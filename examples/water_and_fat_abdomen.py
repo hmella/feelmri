@@ -47,7 +47,7 @@ if __name__ == '__main__':
   for cs in range(Nb_species):
 
     # Create FEM phantom object
-    phantoms.append(FEMPhantom(path=script_path/'phantoms/abdomen.xdmf', scale_factor=0.001))
+    phantoms.append(FEMPhantom(path=script_path/'phantoms/abdomen_P1_tetra.xdmf', scale_factor=0.001))
 
     # Translate phantom to obtain the desired slice location
     phantoms[cs].orient(planning.MPS, planning.LOC.to('m'))
@@ -115,7 +115,7 @@ if __name__ == '__main__':
     # Field inhomogeneity (e.g., due to susceptibility effects)
     inhomogeneity.append(spatial(phantoms[cs].local_nodes))
     inhomogeneity[cs] /= np.abs(spatial(phantoms[cs].global_nodes).flatten()).max()
-    inhomogeneity[cs] *= Q_(1.5 * 1e-6, 'T')  # Scale to a reasonable value (e.g., 1.5 ppm)
+    inhomogeneity[cs] *= Q_(20.5 * 1e-6, 'T')  # Scale to a reasonable value (e.g., 1.5 ppm)
 
   # Create sequence object
   seq = Sequence()
