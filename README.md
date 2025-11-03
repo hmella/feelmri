@@ -60,6 +60,10 @@ To install the library, first clone the repository and navigate to the ```feelmr
 ```bash
 git clone https://github.com/hernanmella/feelmri && cd feelmri/
 ```
+After cloning, the first step should be to unzip the finite-element phantoms used in the examples:
+```bash
+7z x examples/phantoms/phantoms_compressed.zip -o examples/phantoms/
+```
 
 ### Installing FEelMRI
 To install the library, within the cloned directory run:
