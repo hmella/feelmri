@@ -112,27 +112,10 @@ mpirun -n nb_cores python3 foo.py
 Replace ```nb_cores``` with the number of CPU cores you want to use and ```foo.py``` with the name of the example script you wish to run.
 
 ## How to contribute
-We welcome contributions from the community! If you would like to contribute to FEelMRI, please follow these steps:
-1. Fork the repository on GitHub.
-2. Create a new branch for your feature or bug fix.
-3. Make your changes and commit them with clear messages.
-4. Push your changes to your forked repository.
-5. Open a pull request to the main repository.
+We welcome contributions from the community! More information on how to contribute can be found in the [CONTRIBUTING.md](CONTRIBUTING.md) file.
 
 ## How to cite
 Article under review. Citation details will be provided soon.
-
-#### Finite-element simulations
-Some of the finite-element simulations used in the examples were obtained from open-source datasets previously published:
-- Cardiac phantom: [https://zenodo.org/records/16638797](https://zenodo.org/records/16638797)
-  - R. Aróstica et al., “A software benchmark for cardiac elastodynamics,” Computer Methods in Applied Mechanics and Engineering, 2025, doi: [10.1016/j.cma.2024.117485](https://www.sciencedirect.com/science/article/pii/S0045782524007394).
-
-- Aortic phantom: [https://www.vascularmodel.com/](https://www.vascularmodel.com/)
-  - H. Mella et al., “Evaluating the impact of blood rheology in hemodynamic parameters by 4D flow MRI in large vessels considering the hematocrit effect,” Biomedical Signal Processing and Control, 2026, doi: [10.1016/j.bspc.2025.108145](https://www.sciencedirect.com/science/article/pii/S1746809425006561).
-  - J. F. Jr. LaDisa et al., “Computational Simulations Demonstrate Altered Wall Shear Stress in Aortic Coarctation Patients Treated by Resection with End-to-end Anastomosis,” Congenital Heart Disease, 2011, doi: [10.1111/j.1747-0803.2011.00553.x](https://onlinelibrary.wiley.com/doi/abs/10.1111/j.1747-0803.2011.00553.x).
-- Abdominal phantom: [https://github.com/jisilva8/abdominal_qsm_phantom](https://github.com/jisilva8/abdominal_qsm_phantom)
-  - J Silva et al., "Toward a realistic in silico abdominal phantom for QSM". Magnetic Resonance in Medicine, 2023, doi: [10.1002/mrm.29597](https://onlinelibrary.wiley.com/doi/full/10.1002/mrm.29597).
-
 
 ## License
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details
