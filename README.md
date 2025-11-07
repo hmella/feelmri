@@ -2,11 +2,8 @@
   <img height="180" src="images/logo.png" alt="FEelMRI logo" />
 </p>
 
-<h1 align="center">FEelMRI</h1>
-
 <p align="center">
-  <b>Finite Element–based MRI Simulation Library</b><br>
-  <i>Generate synthetic magnetic resonance images from finite-element simulations</i>
+  <b>A fast, simple, and extensible Python library for transforming Finite Element simulations into MR Images</b>
 </p>
 
 <p align="center">
@@ -16,8 +13,6 @@
 </p>
 
 ---
-
-### Overview
 
 **FEelMRI** is an open-source, cross-platform library designed to **generate synthetic magnetic resonance (MR) images** from **finite element (FE) simulations**.
 It can handle complex physical phenomena governed by partial differential equations (PDEs) and supports **arbitrary cell geometries** and **discrete function spaces**.
