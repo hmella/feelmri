@@ -5,6 +5,7 @@ LABEL org.opencontainers.image.authors="hernan.mella@pucv.cl"
 
 # Set environment variable to allow matplotlib to run in a docker container
 ENV MPLCONFIGDIR="./tmp/matplotlib"
+ENV OMPI_MCA_btl_vader_single_copy_mechanism=none
 
 # Create new user
 ARG UID=1000
@@ -24,27 +25,34 @@ USER root
 RUN apt-get update && apt-get install -y apt-transport-https && apt-get install -y sudo && apt-get -y upgrade
 
 # Install FEelMRI dependencies
-RUN apt-get install -y python3-tk python3-setuptools cmake git && \
-    apt-get install -y libopenmpi-dev mpich screen nano && \
-    apt-get install -y build-essential python3-dev python3-pip
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    python3 \
+    python3-dev \
+    python3-pip \
+    python3-tk \
+    cmake \
+    ninja-build \
+    git \
+    libopenmpi-dev \
+    screen \
+    nano \
+ && rm -rf /var/lib/apt/lists/*
 
-# Eigen installation
-RUN cd /tmp/ && git clone https://github.com/eigenteam/eigen-git-mirror.git && \
-    cd eigen-git-mirror && mkdir build && cd build/ && \
-    cmake -DCMAKE_INSTALL_PREFIX=/usr .. && make install
+# Copy FEelMRI source code to temporary build directory
+RUN mkdir /tmp/feelmri_build/
+COPY pyproject.toml /tmp/feelmri_build/
+COPY CMakeLists.txt /tmp/feelmri_build/
+COPY README.md /tmp/feelmri_build/
+COPY cpp/ /tmp/feelmri_build/cpp/
+COPY python/ /tmp/feelmri_build/python/
 
 # Install FEelMRI
-RUN mkdir /tmp/feelmri/ && mkdir /tmp/feelmri/feelmri/
-COPY feelmri /tmp/feelmri/feelmri/
-COPY setup.py /tmp/feelmri/
-RUN cd /tmp/feelmri/ && ls && python3 setup.py install && \
-    rm -rf build/ tmp/ dist/ feelmri.egg-info/
-RUN cd && cd /tmp/ && rm -rf eigen-git-mirror feelmri
+RUN cd /tmp/feelmri_build/ && pip3 install .
 
-# Fix openmpi error messages
-ENV OMPI_MCA_btl_vader_single_copy_mechanism=none
+# Clean up temporary build files
+RUN rm -rf build/ tmp/ dist/ feelmri.egg-info/
+RUN rm -rf /tmp/feelmri_build/
 
 # Change default user
 USER feelmri
