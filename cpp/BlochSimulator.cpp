@@ -1,8 +1,4 @@
-#include <pybind11/eigen/tensor.h>
-#include <pybind11/pybind11.h>
-#include <pybind11/eigen.h>
-#include <pybind11/stl.h>
-#include <Eigen/Dense>
+#include "BlochSimulator.h"
 
 using namespace Eigen;
 namespace py = pybind11;
@@ -278,38 +274,4 @@ Magnetization<T> solve_mri(
     }
 
     return {Mxy, Mz};
-}
-
-
-PYBIND11_MODULE(BlochSimulator, m) {
-  // Define function overloads
-  // Overload for the case with pod_trajectory
-  m.def("solve_mri", py::overload_cast<
-    const Matrix<float, Dynamic, 3, RowMajor> & ,
-    const Matrix<float, Dynamic, 1> & ,
-    const Matrix<float, Dynamic, 1> & ,
-    const Matrix<float, Dynamic, 1> & ,
-    const float & ,
-    const float & ,
-    const Matrix<std::complex<float>, Dynamic, 1> &,
-    const Matrix<float, Dynamic, 3> & ,
-    const Matrix<float, Dynamic, 1> & ,
-    const Matrix<bool, Dynamic, 1> & ,
-    const Matrix<std::complex<float>, Dynamic, 1> & ,
-    const Matrix<float, Dynamic, 1> & ,
-    const py::function &>(&solve_mri<float>));
-  m.def("solve_mri", py::overload_cast<
-    const Matrix<float, Dynamic, 3, RowMajor> & ,
-    const Matrix<float, Dynamic, 1> & ,
-    const Matrix<float, Dynamic, 1> & ,
-    const Matrix<float, Dynamic, 1> & ,
-    const float & ,
-    const float & ,
-    const Matrix<std::complex<float>, Dynamic, 1> &,
-    const Matrix<float, Dynamic, 3> & ,
-    const Matrix<float, Dynamic, 1> & ,
-    const Matrix<bool, Dynamic, 1> & ,
-    const Matrix<std::complex<float>, Dynamic, 1> & ,
-    const Matrix<float, Dynamic, 1> & ,
-    const py::none &>(&solve_mri<float>));
 }

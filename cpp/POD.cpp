@@ -1,7 +1,4 @@
-#include <pybind11/pybind11.h>
-#include <pybind11/numpy.h>
-#include <pybind11/eigen.h>
-#include <Eigen/Dense>
+#include "POD.h"
 
 namespace py = pybind11;
 
@@ -38,12 +35,4 @@ py::array_t<T> tensordot_modes_weights(
     y.noalias() = A * w;            // no temporaries created
 
     return out; // (P,C) view over the same buffer
-}
-
-
-PYBIND11_MODULE(POD, m) {
-  m.def("tensordot_modes_weights",
-        &tensordot_modes_weights<float>,
-        py::arg("modes").noconvert(), py::arg("weights").noconvert(),
-        "Compute (P,C,M)·(M,) -> (P,C) (float32)");
 }

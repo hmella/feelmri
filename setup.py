@@ -3,7 +3,7 @@ import os
 import sys
 
 import setuptools
-from setuptools import setup
+from setuptools import setup, find_packages
 from pybind11.setup_helpers import Pybind11Extension, build_ext
 
 
@@ -38,18 +38,8 @@ class get_pybind_include(object):
 
 ext_modules = [
     Pybind11Extension(
-        'feelmri.MathCpp',
-        sources=['feelmri/cpp/Math.cpp'],
-        include_dirs=[
-            # Path to pybind11 headers
-            get_pybind_include(),
-            '/usr/include/eigen3/',
-        ],
-        language='c++',
-    ),
-    Pybind11Extension(
-        'feelmri.FEAssemble',
-        sources=['feelmri/cpp/FEAssemble.cpp'],
+        'feelmri.Assemble',
+        sources=['cpp/Assemble.cpp'],
         include_dirs=[
             # Path to pybind11 headers
             get_pybind_include(),
@@ -60,32 +50,32 @@ ext_modules = [
     ),
     Pybind11Extension(
         'feelmri.BlochSimulator',
-        sources=['feelmri/cpp/BlochSimulator.cpp'],
+        sources=['cpp/BlochSimulator.cpp'],
         include_dirs=[
             # Path to pybind11 headers
             get_pybind_include(),
             '/usr/include/eigen3/',
-            'feelmri/cpp/'
+            'cpp/'
         ],
         language='c++',
     ),
     Pybind11Extension(
         'feelmri.MRI',
-        sources=['feelmri/cpp/MRI.cpp'],
+        sources=['cpp/MRI.cpp'],
         include_dirs=[
             # Path to pybind11 headers
             get_pybind_include(),
-            '/usr/include/eigen3/','feelmri/cpp/'
+            '/usr/include/eigen3/','cpp/'
         ],
         language='c++',
     ),
     Pybind11Extension(
         'feelmri.POD',
-        sources=['feelmri/cpp/POD.cpp'],
+        sources=['cpp/POD.cpp'],
         include_dirs=[
             # Path to pybind11 headers
             get_pybind_include(),
-            '/usr/include/eigen3/','feelmri/cpp/'
+            '/usr/include/eigen3/','cpp/'
         ],
         language='c++',
     ),
@@ -204,7 +194,8 @@ class BuildExt(build_ext):
 
 setup(name='feelmri',
       version='1.0',
-      packages=['feelmri'],
+      packages=find_packages(where="python"),
+      package_dir={"": "python"},
       description='Finite element MRI library. For the simulation of MR images from finite element simulations.',
       long_description=read('README.md'),
       ext_modules=ext_modules,
