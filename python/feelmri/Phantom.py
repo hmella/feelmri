@@ -8,7 +8,7 @@ from pint import Quantity
 from scipy.interpolate import RBFInterpolator
 from scipy.sparse import lil_matrix
 
-from feelmri.FEAssemble import MassAssemble
+from feelmri.Assemble import MassAssemble
 from feelmri.FiniteElements import FiniteElement, QuadratureRule
 from feelmri.MPIUtilities import MPI_print, MPI_rank, MPI_size
 
