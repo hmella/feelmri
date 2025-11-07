@@ -226,7 +226,7 @@ if __name__ == '__main__':
   K = gather_data(K)
 
   # Add noise to kspace
-  K = add_cpx_noise(K, relative_std=0.01)
+  K = add_cpx_noise(K, relative_std=0.001)
 
   # Reconstruct images
   RES = pars.Imaging.RECON_RES
