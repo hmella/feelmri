@@ -1,7 +1,7 @@
 [build-system]
 requires = ["scikit-build-core>=0.10",
-            "pybind11[global]>=2.11",
-            "numpy>=1.24",
+            "pybind11[global]>=3.0",
+            "numpy>=2.2",
             "setuptools>=61.0"]
 build-backend = "scikit_build_core.build"
 
@@ -13,9 +13,9 @@ readme = "README.md"
 requires-python = ">=3.8"
 authors = [{ name = "Hernan Mella", email = "hernan.mella@pucv.cl" }]
 dependencies = [
-  "numpy>=1.24",
-  "scipy>=1.10",
-  "pybind11>=2.11",
+  "numpy>=2.2",
+  "scipy>=1.15",
+  "pybind11>=3.0",
   "pyyaml",
   "mpi4py",
   "h5py",
