@@ -36,8 +36,7 @@ if(UNIX AND NOT APPLE)
             endif()
         else()
             message(STATUS "System dependencies will not be installed automatically.")
-            message(STATUS "If you want CMake to try installing them, rerun with:")
-            message(STATUS "    cmake -DINSTALL_SYSTEM_DEPS=ON ..")
+            message(STATUS "To enable auto-install, rerun with: cmake -DINSTALL_SYSTEM_DEPS=ON ..")
         endif()
     endif()
 endif()
@@ -49,11 +48,47 @@ endif()
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)  # Enable LTO if supported
 
-# Use Release mode by default
-if (NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+# ------------------------------------------------------------
+# Conditional optimization flags (architecture and LTO)
+# ------------------------------------------------------------
+include(CheckCXXCompilerFlag)
+
+function(add_supported_flag flag)
+    string(REPLACE "-" "_" flag_var "${flag}")
+    string(REPLACE "=" "_" flag_var "${flag_var}")
+    check_cxx_compiler_flag("${flag}" HAS_${flag_var})
+    if (HAS_${flag_var})
+        add_compile_options(${flag})
+    endif()
+endfunction()
+
+set(CPU_TUNING_FLAG_PAIRS
+    "-march=raptorlake;-mtune=raptorlake"
+    "-march=native;-mtune=native"
+)
+
+set(USED_CPU_FLAGS "")
+
+foreach(pair ${CPU_TUNING_FLAG_PAIRS})
+    string(REPLACE ";" " " candidate_flags "${pair}")
+    list(GET pair 0 march_flag)
+    check_cxx_compiler_flag("${march_flag}" HAS_MARCH)
+    if (HAS_MARCH)
+        message(STATUS "Using CPU tuning flags: ${candidate_flags}")
+        set(USED_CPU_FLAGS ${candidate_flags})
+        break()
+    endif()
+endforeach()
+
+if (USED_CPU_FLAGS)
+    add_compile_options(${USED_CPU_FLAGS})
+else()
+    message(WARNING "⚠️ No supported CPU tuning flags found — using generic tuning.")
 endif()
+
 
 # ------------------------------------------------------------
 # Dependencies
@@ -62,46 +97,37 @@ find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
 find_package(pybind11 CONFIG REQUIRED)
 
 # ------------------------------------------------------------
-# Eigen3 automatic installation (robust version)
+# Eigen3 automatic installation (cached and robust)
 # ------------------------------------------------------------
 include(FetchContent)
 
-# Declare and fetch Eigen manually
 FetchContent_Declare(
     Eigen
     GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
-    GIT_TAG 3.4.0
+		GIT_TAG nightly
 )
 
-# Explicitly fetch the content to ensure Eigen_SOURCE_DIR is defined
 FetchContent_GetProperties(Eigen)
 if (NOT eigen_POPULATED)
-    message(STATUS "Fetching Eigen3 from GitLab...")
+    message(STATUS "Fetching Eigen3 (nightly) from GitLab...")
     FetchContent_Populate(Eigen)
-# 		set(FETCHCONTENT_BASE_DIR "${CMAKE_BINARY_DIR}/_deps")
-		set(FETCHCONTENT_BASE_DIR "$ENV{HOME}/.cache/cmake")
+    set(FETCHCONTENT_BASE_DIR "$ENV{HOME}/.cache/cmake")
 endif()
 
-# Now set include paths explicitly
 set(EIGEN_INCLUDE_DIR "${eigen_SOURCE_DIR}")
 set(EIGEN_UNSUPPORTED_DIR "${eigen_SOURCE_DIR}/unsupported")
 
-message(STATUS "Eigen source directory: ${eigen_SOURCE_DIR}")
-message(STATUS "Eigen include directory: ${EIGEN_INCLUDE_DIR}")
-
-# Add include directories globally
 include_directories(${EIGEN_INCLUDE_DIR} ${EIGEN_UNSUPPORTED_DIR})
 
-# Warn if unsupported Tensor module is missing
 if (EXISTS "${EIGEN_UNSUPPORTED_DIR}/Eigen/CXX11/Tensor")
     message(STATUS "✅ Eigen unsupported module found at: ${EIGEN_UNSUPPORTED_DIR}")
 else()
-    message(WARNING "⚠️  Eigen unsupported module NOT found — Tensor functionality may be limited.")
+    message(WARNING "⚠️ Eigen unsupported module NOT found — Tensor functionality may be limited.")
 endif()
 
 
 # ------------------------------------------------------------
-# Source setup
+# Source setup (core modules)
 # ------------------------------------------------------------
 set(SRC_DIR cpp/feelmri)
 set(MODULES Assemble BlochSimulator MRI POD)
@@ -119,29 +145,26 @@ foreach(mod ${MODULES})
             ${Python_INCLUDE_DIRS}
     )
 
-    # Optimization flags
+    # Apply high-performance compile flags
     target_compile_options(${mod} PRIVATE
-        -Ofast -ffast-math -fno-math-errno -fno-trapping-math -ffp-contract=fast
+        -Ofast
+        -ffast-math
+        -fno-math-errno
+        -fno-trapping-math
+        -ffp-contract=fast
+        -fvisibility=hidden
+        -fPIC
+        -DNDEBUG
+        -DEIGEN_NO_DEBUG
+        -DEIGEN_FAST_MATH
+        -DEIGEN_DONT_PARALLELIZE
     )
 
     set_target_properties(${mod} PROPERTIES OUTPUT_NAME ${mod})
     install(TARGETS ${mod} DESTINATION feelmri)
-
-		# Avoid installing dependencies of each module separately
-		set_target_properties(${mod} PROPERTIES SKIP_INSTALL_ALL_DEPENDENCIES ON)		
-
+    set_target_properties(${mod} PROPERTIES SKIP_INSTALL_ALL_DEPENDENCIES ON)
 endforeach()
 
-# ------------------------------------------------------------
-# Optional OpenMP acceleration (multi-threaded Eigen)
-# ------------------------------------------------------------
-find_package(OpenMP)
-if(OpenMP_CXX_FOUND)
-    message(STATUS "Enabling OpenMP parallelization")
-    foreach(mod ${MODULES})
-        target_link_libraries(${mod} PRIVATE OpenMP::OpenMP_CXX)
-    endforeach()
-endif()
 
 # ------------------------------------------------------------
 # Summary output
@@ -149,8 +172,10 @@ endif()
 message(STATUS "------------------------------------------------------------")
 message(STATUS "FeelMRI build configuration summary:")
 message(STATUS "  C++ Standard:        ${CMAKE_CXX_STANDARD}")
+message(STATUS "  Build type:          ${CMAKE_BUILD_TYPE}")
 message(STATUS "  Python:              ${Python_EXECUTABLE}")
 message(STATUS "  Pybind11 includes:   ${pybind11_INCLUDE_DIRS}")
 message(STATUS "  Eigen include dir:   ${EIGEN_INCLUDE_DIR}")
 message(STATUS "  Eigen unsupported:   ${EIGEN_UNSUPPORTED_DIR}")
+message(STATUS "  LTO enabled:         ${CMAKE_INTERPROCEDURAL_OPTIMIZATION}")
 message(STATUS "------------------------------------------------------------")
