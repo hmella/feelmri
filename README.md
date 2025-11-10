@@ -24,21 +24,21 @@ It can handle complex physical phenomena governed by partial differential equati
     <tr>
       <td align="center">
         <img height="200" src="images/spamm.gif" alt="SPAMM MRI"/><br>
-        <b>Orthogonal-CSPAMM MRI</b>
+        <b>Orthogonal-CSPAMM</b>
       </td>
       <td align="center">
         <img height="200" src="images/aorta.gif" alt="Aorta MRI"/><br>
-        <b>4D Flow MRI</b>
+        <b>4D Flow</b>
       </td>
     </tr>
     <tr>
       <td align="center">
-        <img height="140" src="images/abdomen.png" alt="Abdomen FFE"/><br>
-        <b>Abdomen FFE</b>
+        <img height="140" src="images/abdomen.png" alt="Abdominal FFE"/><br>
+        <b>Abdominal FFE</b>
       </td>
       <td align="center">
-        <img height="140" src="images/free_running.png" alt="Free Running MRI"/><br>
-        <b>Free Running MRI</b>
+        <img height="140" src="images/free_running.png" alt="Free Running"/><br>
+        <b>Free Running</b>
       </td>
     </tr>
   </table>
@@ -46,7 +46,7 @@ It can handle complex physical phenomena governed by partial differential equati
 
 ---
 
-## Table of Contents
+## 📚 Table of Contents
 
 * [Installation](#-installation)
 * [Quick Start Example](#-quick-start-example)
@@ -58,12 +58,12 @@ It can handle complex physical phenomena governed by partial differential equati
 
 ---
 
-## Installation
+## 🚀 Installation
 
 > These steps were tested primarily on **Linux** systems.
 > For Windows and macOS, please refer to [Docker Setup](#-docker-setup-cross-platform).
 
-### 1) System Dependencies
+### 1️⃣ System Dependencies
 
 You’ll need some basic system libraries and build tools. On Ubuntu/Debian:
 
@@ -74,26 +74,26 @@ sudo apt-get update && sudo apt-get install -y --no-install-recommends \
     cmake ninja-build git libopenmpi-dev
 ```
 
-### 2) Clone the Repository
+### 2️⃣ Clone the Repository
 
 ```bash
 git clone https://github.com/hernanmella/feelmri.git
 cd feelmri
 ```
 
-### 3) Install FEelMRI
+### 3️⃣ Install FEelMRI
 
 ```bash
 pip install .
 ```
 
-Verify installation:
+Verify installation ✅:
 
 ```bash
 python3 -c "import feelmri; print(feelmri.__version__)"
 ```
 
-### 4) (Optional) Unzip Example Phantoms
+### 4️⃣ (Optional) Unzip Example Phantoms
 
 ```bash
 7z x examples/phantoms/phantoms_compressed.zip -o examples/phantoms/
@@ -101,7 +101,7 @@ python3 -c "import feelmri; print(feelmri.__version__)"
 
 ---
 
-## First Run
+## 🐍 First Run
 
 Example scripts are provided in the `examples/` directory.
 To run an example using multiple cores:
@@ -113,9 +113,12 @@ mpirun -n <nb_cores> python3 <example_script>.py
 
 Replace `<nb_cores>` with the number of CPU cores to use.
 
+### MRI planning with ParaView
+To plan and position the FOV position and orientation, you are referred to [examples/planning/](examples/planning/) directory.
+
 ---
 
-## Docker Setup (Cross-Platform)
+## 🐳 Docker Setup (Cross-Platform)
 
 If you prefer an isolated or multi-platform setup, you can use Docker.
 
@@ -153,7 +156,7 @@ docker run -it \
 
 ---
 
-## How to Contribute
+## 🤝 How to Contribute
 
 We welcome community contributions!
 To get started:
@@ -167,14 +170,14 @@ More details are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
-## Citation
+## 📖 Citation
 
 The related research article is currently under review.
 Citation details will be added soon.
 
 ---
 
-## License
+## 📜 License
 
 This project is distributed under the **MIT License**.
 See the [LICENSE](LICENSE) file for details.
