@@ -10,6 +10,9 @@
   <a href="https://github.com/hmella/feelmri/actions/workflows/ci.yml">
     <img src="https://github.com/hmella/feelmri/actions/workflows/ci.yml/badge.svg" alt="FEelMRI CI Status">
   </a>
+  <a href="https://codecov.io/gh/hmella/feelmri">
+    <img src="https://codecov.io/gh/hmella/feelmri/branch/main/graph/badge.svg" alt="Code Coverage">
+  </a>
   <a href="https://github.com/hmella/feelmri/blob/main/LICENSE">
     <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License">
   </a>

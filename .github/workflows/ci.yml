@@ -68,7 +68,7 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install .[dev] pytest matplotlib mpi4py
+          pip install -e .[dev] pytest pytest-cov
 
       # ------------------------------------------------------------
       # Verify MPI installation
@@ -81,7 +81,7 @@ jobs:
       # ------------------------------------------------------------
       # Run FEelMRI tests (with MPI)
       # ------------------------------------------------------------
-      - name: Run tests with MPI
+      - name: Run tests with MPI and coverage
         env:
           MPLBACKEND: Agg
           FEELMRI_FAST_TEST: "1"
@@ -89,8 +89,12 @@ jobs:
           echo "Unzipping phantom files..."
           7z x examples/phantoms/phantoms_compressed.zip -oexamples/phantoms/
 
-          echo "Running import tests..."
-          pytest -v --maxfail=1 --disable-warnings
+          echo "Running tests with coverage..."
+          export PYTHONPATH=$GITHUB_WORKSPACE:$PYTHONPATH
+          pytest -v --maxfail=1 --disable-warnings \
+            --cov=feelmri \
+            --cov-report=term-missing \
+            --cov-report=xml
 
       # ------------------------------------------------------------
       # Upload logs on failure (for debugging)
