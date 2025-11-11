@@ -1,16 +1,12 @@
 import os
-import sys
 
 os.environ["OPENBLAS_NUM_THREADS"] = "1" # export OPENBLAS_NUM_THREADS=1
-import pickle
-import time
 from pathlib import Path
 
 import numpy as np
 from pint import Quantity as Q_
 
 from feelmri.Bloch import BlochSolver, Sequence, SequenceBlock
-from feelmri.IO import XDMFFile
 from feelmri.KSpaceTraj import CartesianStack
 from feelmri.Motion import PODVelocity
 from feelmri.MPIUtilities import MPI_print, MPI_rank, gather_data
@@ -22,6 +18,16 @@ from feelmri.Parameters import ParameterHandler, PVSMParser
 from feelmri.Phantom import FEMPhantom
 from feelmri.Plotter import MRIPlotter
 from feelmri.Recon import CartesianRecon
+
+# Enable fast mode for testing if the environment variable is set
+FAST_MODE = os.getenv("FEELMRI_FAST_TEST", "0") == "1"
+
+if FAST_MODE:
+    Nb_frames = 1
+    dummy_pulses = 1
+else:
+    Nb_frames = int(...)
+    dummy_pulses = 80
 
 if __name__ == '__main__':
 
@@ -110,7 +116,8 @@ if __name__ == '__main__':
   bp2r = bp2.rotate(enc.directions)
 
   # Create sequence object and solve magnetization
-  Mxy_PC = np.zeros([phantom.local_nodes.shape[0], phantom.Nfr, enc.nb_directions], dtype=np.complex64)
+  Nb_frames = phantom.Nfr if not FAST_MODE else 1
+  Mxy_PC = np.zeros([phantom.local_nodes.shape[0], Nb_frames, enc.nb_directions], dtype=np.complex64)
   for d in range(enc.nb_directions):
 
     # Create sequence object and Bloch solver
@@ -138,7 +145,7 @@ if __name__ == '__main__':
 
     # Add dummy blocks to the sequence to reach steady state
     time_spacing = parameters.Imaging.TimeSpacing - imaging.dur
-    for i in range(80):
+    for i in range(dummy_pulses):
       seq.add_block(dummy)
       seq.add_block(time_spacing, dt=Q_(1, 'ms'))
 
@@ -146,7 +153,7 @@ if __name__ == '__main__':
     seq.add_block(times[-1] - seq.blocks[-1].time_extent[1] % times[-1], dt=Q_(1, 'ms'))
 
     # Add PC imaging sequence
-    for fr in range(phantom.Nfr):
+    for fr in range(Nb_frames):
       seq.add_block(imaging)
       seq.add_block(time_spacing, dt=Q_(1, 'ms'))  # Time spacing between frames
 
@@ -182,7 +189,7 @@ if __name__ == '__main__':
   ro_samples = traj.ro_samples
   ph_samples = traj.ph_samples
   slices = traj.slices
-  K = np.zeros([ro_samples, ph_samples, slices, enc.nb_directions, phantom.Nfr], dtype=np.complex64)
+  K = np.zeros([ro_samples, ph_samples, slices, enc.nb_directions, Nb_frames], dtype=np.complex64)
 
   T2star = (parameters.Phantom.T2star * np.ones([phantom.local_nodes.shape[0]])).astype(np.float32)
 
@@ -190,10 +197,10 @@ if __name__ == '__main__':
   M = phantom.mass_matrix(lumped=True)
 
   # Iterate over cardiac phases
-  for fr in range(phantom.Nfr):
+  for fr in range(Nb_frames):
 
       # Print progress
-      MPI_print('Frame {:d}/{:d}'.format(fr+1, phantom.Nfr))
+      MPI_print('Frame {:d}/{:d}'.format(fr+1, Nb_frames))
 
       # Update timeshift in the POD velocity
       pod_velocity.update_timeshift(fr * parameters.Imaging.TimeSpacing.m_as('ms'))

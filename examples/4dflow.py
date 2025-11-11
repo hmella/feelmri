@@ -19,6 +19,16 @@ from feelmri.Phantom import FEMPhantom
 from feelmri.Plotter import MRIPlotter
 from feelmri.Recon import reconstruct_nufft
 
+# Enable fast mode for testing if the environment variable is set
+FAST_MODE = os.getenv("FEELMRI_FAST_TEST", "0") == "1"
+
+if FAST_MODE:
+    Nb_frames = 1
+    dummy_pulses = 1
+else:
+    Nb_frames = int(...)
+    dummy_pulses = 80
+
 if __name__ == '__main__':
 
   # Get path of this script to allow running from any directory
@@ -106,7 +116,10 @@ if __name__ == '__main__':
   bp2r = bp2.rotate(enc.directions, normalize_dirs=True)
 
   # Number of imaging frames
-  Nb_frames = int(times[-1].m_as('ms') // pars.Imaging.TimeSpacing.m_as('ms'))
+  if FAST_MODE:
+      Nb_frames = 1
+  else:
+      Nb_frames = int(times[-1].m_as('ms') // pars.Imaging.TimeSpacing.m_as('ms'))
 
   # 4D Flow magnetization
   Mxy_PC = np.zeros([phantom.local_nodes.shape[0], Nb_frames, enc.nb_directions], dtype=np.complex64)
@@ -132,7 +145,7 @@ if __name__ == '__main__':
   # Add dummy blocks to the sequence to reach steady state
   TR_spacing = pars.Imaging.TR - dummy.dur
   CP_spacing = pars.Imaging.TimeSpacing - 3*pars.Imaging.TR
-  for i in range(80):
+  for i in range(dummy_pulses):
     seq.add_block(dummy)
     seq.add_block(TR_spacing, dt=Q_(1, 'ms'))
     seq.add_block(dummy)
