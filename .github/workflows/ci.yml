@@ -87,7 +87,7 @@ jobs:
           FEELMRI_FAST_TEST: "1"
         run: |
           echo "Unzipping phantom files..."
-          7z x examples/phantoms/phantoms_compressed.zip -o examples/phantoms/
+          7z x examples/phantoms/phantoms_compressed.zip -oexamples/phantoms/
 
           echo "Running import tests..."
           pytest -v --maxfail=1 --disable-warnings
