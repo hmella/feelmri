@@ -13,11 +13,6 @@ def ktoi(x, axes=None):
     axes = [i for i in range(len(x.shape)) if i < 3]
   return fftshift(ifftn(ifftshift(x, axes=axes), axes=axes), axes=axes)
 
-def wrap(x, value):
-  ''' Wrap x to the interval [-value/2, value/2] '''
-  # Wrap-to-value function
-  return np.mod(x + 0.5*value, value) - 0.5*value
-
 def Rx(tx):
   ''' Rotation matrix around X-axis for a rotation angle of tx (in radians) '''
   return np.array([[1, 0, 0],
