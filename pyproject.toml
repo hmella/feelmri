@@ -1,8 +1,9 @@
 [build-system]
 requires = ["scikit-build-core>=0.10",
-            "pybind11[global]>=3.0",
-            "numpy>=2.2",
-            "setuptools>=61.0"]
+            "pybind11",
+            "numpy",
+            "setuptools",
+            "wheel"]
 build-backend = "scikit_build_core.build"
 
 [project]
@@ -27,8 +28,31 @@ dependencies = [
   "fenics-basix",
   "pynufft",
 ]
+keywords = ["MRI", "finite-element", "simulation", "pybind11", "C++"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: C++",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux"
+]
+
+[project.urls]
+Homepage = "https://github.com/hmella/feelmri"
 
 [tool.scikit-build]
 wheel.packages = ["python/feelmri"]
-cmake.verbose = true
 cmake.minimum-version = "3.18"
+cmake.verbose = true
+build-dir = "build"
+ninja.make-fallback = true
+sdist.include = [
+    "CMakeLists.txt",
+    "cpp/",
+    "python/",
+    "README.md",
+    "LICENSE"
+]
+
+[tool.scikit-build.cmake.define]
+CMAKE_BUILD_TYPE = "Release"
+SKBUILD = "ON"
