@@ -7,9 +7,18 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/hernanmella/feelmri/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License"></a>
-  <a href="#"><img src="https://img.shields.io/badge/python-3.9%2B-blue.svg" alt="Python 3.9+"></a>
-  <a href="#"><img src="https://img.shields.io/badge/platform-linux%20%7C%20docker-lightgrey.svg" alt="Platforms"></a>
+  <a href="https://github.com/hmella/feelmri/actions/workflows/ci.yml">
+    <img src="https://github.com/hmella/feelmri/actions/workflows/ci.yml/badge.svg" alt="FEelMRI CI Status">
+  </a>
+  <a href="https://github.com/hmella/feelmri/blob/main/LICENSE">
+    <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License">
+  </a>
+  <a href="#">
+    <img src="https://img.shields.io/badge/python-3.9%2B-blue.svg" alt="Python 3.9+">
+  </a>
+  <a href="#">
+    <img src="https://img.shields.io/badge/platform-linux%20%7C%20docker-lightgrey.svg" alt="Platforms">
+  </a>
 </p>
 
 ---
