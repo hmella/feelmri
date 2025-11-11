@@ -179,6 +179,10 @@ if __name__ == '__main__':
   # Convert and stripe units
   T2 = T2star.m_as('ms')
 
+  # Fast mode for CI testing
+  if FAST_MODE:
+     traj.shots = [traj.shots[0]]
+
   # Generate k-space data for each shot and slice
   imaging_time = 0.0
   kspace_time = 0.0

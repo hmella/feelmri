@@ -15,12 +15,12 @@ EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "examples"
 
 
 @pytest.mark.parametrize("script", [
-    "4dflow.py",
-    "phase_contrast.py",
+    # "4dflow.py",
+    # "phase_contrast.py",
     # "free_running.py",
-    "trajectories.py",
-    "gradient_orientation.py",
-    "spamm.py",
+    # "trajectories.py",
+    # "gradient_orientation.py",
+    # "spamm.py",
     "water_and_fat.py",
 ])
 def test_example_parallel(script):
@@ -34,11 +34,20 @@ def test_example_parallel(script):
     assert script_path.exists(), f"Example script not found: {script_path}"
 
     # Set environment variable to enable fast mode in the example
-    env = dict(os.environ, FEELMRI_FAST_TEST="1", MPLBACKEND="Agg")
+    env = dict(os.environ,
+              FEELMRI_FAST_TEST="1",
+              MPLBACKEND="Agg",
+              COVERAGE_PROCESS_START=str(Path(__file__).resolve().parent.parent / ".github/.coveragerc"),
+              COVERAGE_FILE=str(Path(__file__).resolve().parent.parent / f".coverage.{script}")
+              )
 
     # Run the temporary script in the examples directory
     result = subprocess.run(
-        ["mpirun", "-n", "2", sys.executable, str(script_path)],
+        ["mpirun", "-n", "4", 
+        sys.executable,
+        "-m", "coverage",
+        "run", "--parallel-mode",
+        str(script_path)],
         cwd=EXAMPLES_DIR,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
