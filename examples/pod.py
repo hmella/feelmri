@@ -43,14 +43,14 @@ if __name__ == '__main__':
   # Define POD object
   dt = parameters.Imaging.TimeSpacing
   times = np.linspace(0, (phantom.Nfr-1)*dt, phantom.Nfr)
-  pod_velocity = POD(time_array=times.m_as('s'),
+  pod_velocity = POD(times=times.m_as('s'),
                     data=v.m_as('m/s'),
-                    global_to_local=phantom.global_to_local_nodes,
+                    global_to_local=phantom.local_to_global_nodes,
                     n_modes=30,
                     is_periodic=True)
 
   # Export pod and phantom velocities to XDMF file
-  file = XDMFFile('pod.xdmf', nodes=phantom.local_nodes, elements={'tetra': phantom.local_elements})
+  file = XDMFFile('pod.xdmf', nodes=phantom.local_nodes, elements={phantom.cell_type: phantom.local_elements})
   for fr in range(phantom.Nfr):
     t = fr*parameters.Imaging.TimeSpacing.m_as('s')
     file.write(pointData={'pod_velocity': pod_velocity(t), 'phantom_velocity': v[...,fr]}, time=t)
