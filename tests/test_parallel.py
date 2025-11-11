@@ -45,7 +45,7 @@ def test_example_parallel(script):
 
     # Run the temporary script in the examples directory
     result = subprocess.run(
-        ["mpirun", "-n", "4", 
+        ["mpirun", "-n", "2", 
         sys.executable,
         "-m", "coverage",
         "run", "--parallel-mode",
