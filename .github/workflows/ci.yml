@@ -1,4 +1,4 @@
-name: FEelMRI CI (MPI + PyTest)
+name: FEelMRI CI (MPI + Cache + PyTest)
 
 on:
   push:
@@ -19,12 +19,27 @@ jobs:
         uses: actions/checkout@v4
 
       # ------------------------------------------------------------
-      # Set up Python environment
+      # Set up Python environment (with built-in pip caching)
       # ------------------------------------------------------------
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
+          cache: "pip"   # 🧠 Caches Python dependencies installed via pip
+
+      # ------------------------------------------------------------
+      # Cache build and compiled objects
+      # ------------------------------------------------------------
+      - name: Cache build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.ccache
+            build/
+          key: build-${{ runner.os }}-${{ hashFiles('setup.cfg', 'pyproject.toml', '**/CMakeLists.txt') }}
+          restore-keys: |
+            build-${{ runner.os }}-
 
       # ------------------------------------------------------------
       # Install system dependencies (including MPI)
@@ -32,43 +47,55 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get update && sudo apt-get install -y --no-install-recommends \
-          build-essential \
-          python3 python3-dev python3-pip python3-tk \
-          cmake ninja-build git libopenmpi-dev
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            python3-dev \
+            python3-tk \
+            cmake \
+            ninja-build \
+            git \
+            libopenmpi-dev \
+            openmpi-bin \
+            mpich \
+            hdf5-tools \
+            ccache \
+            p7zip-full
+          sudo apt-get clean
 
       # ------------------------------------------------------------
-      # Install Python dependencies and FEelMRI itself
+      # Install FEelMRI and Python dependencies
       # ------------------------------------------------------------
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install .[dev] pytest
+          pip install .[dev] pytest matplotlib mpi4py
 
       # ------------------------------------------------------------
       # Verify MPI installation
       # ------------------------------------------------------------
-      - name: Check MPI installation
+      - name: Verify MPI
         run: |
           mpirun --version
-          mpiexec --version
           which mpirun
 
       # ------------------------------------------------------------
-      # Run FEelMRI test suite with MPI
+      # Run FEelMRI tests (with MPI)
       # ------------------------------------------------------------
       - name: Run tests with MPI
         env:
           MPLBACKEND: Agg
           FEELMRI_FAST_TEST: "1"
         run: |
-          # Run import and lightweight tests
+          echo "Unzipping phantom files..."
+          7z x examples/phantoms/phantoms_compressed.zip -o examples/phantoms/
+
+          echo "Running import tests..."
           pytest -v --maxfail=1 --disable-warnings
 
       # ------------------------------------------------------------
-      # Upload test results if needed
+      # Upload logs on failure (for debugging)
       # ------------------------------------------------------------
-      - name: Upload pytest logs (on failure)
+      - name: Upload pytest logs
         if: failure()
         uses: actions/upload-artifact@v4
         with:
