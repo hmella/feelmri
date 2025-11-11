@@ -12,6 +12,14 @@ from feelmri.MRImaging import VelocityEncoding
 from feelmri.Parameters import ParameterHandler, PVSMParser
 from feelmri.Phantom import FEMPhantom
 
+# Enable fast mode for testing if the environment variable is set
+FAST_MODE = os.getenv("FEELMRI_FAST_TEST", "0") == "1"
+
+if FAST_MODE:
+    Nb_frames = 1
+else:
+    Nb_frames = int(...)
+
 if __name__ == '__main__':
 
   # Get path of this script to allow running from any directory
@@ -50,8 +58,9 @@ if __name__ == '__main__':
                     is_periodic=True)
 
   # Export pod and phantom velocities to XDMF file
+  Nb_frames = phantom.Nfr if FAST_MODE==False else 1
   file = XDMFFile('pod.xdmf', nodes=phantom.local_nodes, elements={phantom.cell_type: phantom.local_elements})
-  for fr in range(phantom.Nfr):
+  for fr in range(Nb_frames):
     t = fr*parameters.Imaging.TimeSpacing.m_as('s')
     file.write(pointData={'pod_velocity': pod_velocity(t), 'phantom_velocity': v[...,fr]}, time=t)
   file.close()

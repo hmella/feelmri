@@ -15,12 +15,14 @@ EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "examples"
 
 
 @pytest.mark.parametrize("script", [
-    # "4dflow.py",
-    # "phase_contrast.py",
-    # "free_running.py",
-    # "trajectories.py",
-    # "gradient_orientation.py",
-    # "spamm.py",
+    "4dflow.py",
+    "free_running.py",
+    "gradient_orientation.py",
+    "phase_contrast.py",
+    "pod.py",
+    "pvsm_parameters.py",
+    "trajectories.py",    
+    "spamm.py",
     "water_and_fat.py",
 ])
 def test_example_runs(script):
