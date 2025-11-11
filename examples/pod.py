@@ -8,6 +8,7 @@ from pint import Quantity as Q_
 
 from feelmri.IO import XDMFFile
 from feelmri.Motion import POD
+from feelmri.MPIUtilities import MPI_rank
 from feelmri.MRImaging import VelocityEncoding
 from feelmri.Parameters import ParameterHandler, PVSMParser
 from feelmri.Phantom import FEMPhantom
@@ -59,7 +60,7 @@ if __name__ == '__main__':
 
   # Export pod and phantom velocities to XDMF file
   Nb_frames = phantom.Nfr if FAST_MODE==False else 1
-  file = XDMFFile('pod.xdmf', nodes=phantom.local_nodes, elements={phantom.cell_type: phantom.local_elements})
+  file = XDMFFile(f'pod_{MPI_rank}.xdmf', nodes=phantom.local_nodes, elements={phantom.cell_type: phantom.local_elements})
   for fr in range(Nb_frames):
     t = fr*parameters.Imaging.TimeSpacing.m_as('s')
     file.write(pointData={'pod_velocity': pod_velocity(t), 'phantom_velocity': v[...,fr]}, time=t)
