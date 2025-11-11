@@ -7,7 +7,6 @@ execute without errors — a form of regression testing for the full workflow.
 import os
 import subprocess
 import sys
-import uuid
 from pathlib import Path
 
 import pytest
