@@ -1,4 +1,4 @@
-name: FEelMRI CI (MPI + Cache + PyTest)
+name: CI (build and test)
 
 on:
   push:
@@ -25,7 +25,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-          cache: "pip"   # 🧠 Caches Python dependencies installed via pip
+          cache: "pip"   # Caches Python dependencies installed via pip
 
       # ------------------------------------------------------------
       # Cache build and compiled objects
