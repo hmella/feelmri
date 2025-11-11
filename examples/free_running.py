@@ -19,6 +19,16 @@ from feelmri.Phantom import FEMPhantom
 from feelmri.Plotter import MRIPlotter
 from feelmri.Recon import CartesianRecon
 
+# Enable fast mode for testing if the environment variable is set
+FAST_MODE = os.getenv("FEELMRI_FAST_TEST", "0") == "1"
+
+if FAST_MODE:
+    slices = 1
+    dummy_pulses = 1
+else:
+    slices = int(...)
+    dummy_pulses = 80
+
 if __name__ == '__main__':
 
   # Get path of this script to allow running from any directory
@@ -120,14 +130,14 @@ if __name__ == '__main__':
 
   # Generate kspace trajectory
   traj = CartesianStack(FOV=planning.FOV.to('m'),
-                      t_start=imaging.time_extent[1] - sp.rf.time,
-                      res=parameters.Imaging.RES, 
-                      oversampling=parameters.Imaging.Oversampling, 
-                      lines_per_shot=parameters.Imaging.LinesPerShot, 
-                      MPS_ori=planning.MPS,
-                      LOC=planning.LOC,
-                      receiver_bw=parameters.Hardware.r_BW.to('Hz'), 
-                      plot_seq=False)
+          t_start=imaging.time_extent[1] - sp.rf.time,
+          res=parameters.Imaging.RES, 
+          oversampling=parameters.Imaging.Oversampling, 
+          lines_per_shot=parameters.Imaging.LinesPerShot, 
+          MPS_ori=planning.MPS,
+          LOC=planning.LOC,
+          receiver_bw=parameters.Hardware.r_BW.to('Hz'), 
+          plot_seq=False)
   
   # Echo time
   MPI_print('Echo time: {:.1f} ms'.format(traj.echo_time.m_as('ms')))
@@ -144,7 +154,7 @@ if __name__ == '__main__':
   # Create and fill sequence object
   seq = Sequence()
   time_spacing = parameters.Imaging.TR.to('ms') - (imaging.time_extent[1] - sp.rf.ref)
-  for i in range(80):
+  for i in range(dummy_pulses):
     seq.add_block(dummy)  # Add dummy blocks to reach the steady state
     seq.add_block(time_spacing)  # Delay between imaging blocks
 
