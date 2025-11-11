@@ -62,6 +62,6 @@ if __name__ == '__main__':
   Nb_frames = phantom.Nfr if FAST_MODE==False else 1
   file = XDMFFile(f'pod_{MPI_rank}.xdmf', nodes=phantom.local_nodes, elements={phantom.cell_type: phantom.local_elements})
   for fr in range(Nb_frames):
-    t = fr*parameters.Imaging.TimeSpacing.m_as('s')
-    file.write(pointData={'pod_velocity': pod_velocity(t), 'phantom_velocity': v[...,fr]}, time=t)
+    t = fr * parameters.Imaging.TimeSpacing.m_as('s')
+    file.write(pointData={'pod_velocity': pod_velocity(t), 'phantom_velocity': v[phantom.local_to_global_nodes, :, fr]}, time=t)
   file.close()
