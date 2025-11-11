@@ -7,7 +7,6 @@ execute without errors — a form of regression testing for the full workflow.
 import os
 import subprocess
 import sys
-import uuid
 from pathlib import Path
 
 import pytest
@@ -35,11 +34,22 @@ def test_example_runs(script):
     assert script_path.exists(), f"Example script not found: {script_path}"
 
     # Set environment variable to enable fast mode in the example
-    env = dict(os.environ, FEELMRI_FAST_TEST="1", MPLBACKEND="Agg")
+    env = dict(os.environ,
+              FEELMRI_FAST_TEST="1",
+              MPLBACKEND="Agg",
+              COVERAGE_PROCESS_START=str(Path(__file__).resolve().parent.parent / ".github/.coveragerc"),
+              COVERAGE_FILE=str(Path(__file__).resolve().parent.parent / f".coverage.{script}")
+)
+
+    # Set unique coverage file for each example
+    env["COVERAGE_FILE"] = str(Path(__file__).resolve().parent.parent / f".coverage.{script}")
 
     # Run the temporary script in the examples directory
     result = subprocess.run(
-        [sys.executable, str(script_path)],
+        [sys.executable, 
+        "-m", "coverage", 
+        "run", "--parallel-mode",
+        str(script_path)],
         cwd=EXAMPLES_DIR,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

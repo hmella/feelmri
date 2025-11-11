@@ -11,6 +11,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
+    env:
+      PYTHONPATH: ${{ github.workspace }}/python
+      COVERAGE_PROCESS_START: ${{ github.workspace }}/.coveragerc
+      MPLBACKEND: Agg
+      FEELMRI_FAST_TEST: "1"
+
     steps:
       # ------------------------------------------------------------
       # Checkout the repository
@@ -19,13 +25,13 @@ jobs:
         uses: actions/checkout@v4
 
       # ------------------------------------------------------------
-      # Set up Python environment (with built-in pip caching)
+      # Set up Python environment (with pip caching)
       # ------------------------------------------------------------
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-          cache: "pip"   # Caches Python dependencies installed via pip
+          cache: "pip"
 
       # ------------------------------------------------------------
       # Cache build and compiled objects
@@ -48,18 +54,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential \
-            python3-dev \
-            python3-tk \
-            cmake \
-            ninja-build \
-            git \
-            libopenmpi-dev \
-            openmpi-bin \
-            mpich \
-            hdf5-tools \
-            ccache \
-            p7zip-full
+            build-essential python3-dev python3-tk \
+            cmake ninja-build git libopenmpi-dev openmpi-bin mpich \
+            hdf5-tools ccache p7zip-full
           sudo apt-get clean
 
       # ------------------------------------------------------------
@@ -68,7 +65,7 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e .[dev] pytest pytest-cov
+          pip install -e .[dev] pytest pytest-cov coverage codecov
 
       # ------------------------------------------------------------
       # Verify MPI installation
@@ -79,29 +76,49 @@ jobs:
           which mpirun
 
       # ------------------------------------------------------------
-      # Run FEelMRI tests (with MPI)
+      # Run tests with coverage
       # ------------------------------------------------------------
-      - name: Run tests with MPI and coverage
-        env:
-          MPLBACKEND: Agg
-          FEELMRI_FAST_TEST: "1"
+      - name: Run tests with coverage
         run: |
           echo "Unzipping phantom files..."
           7z x examples/phantoms/phantoms_compressed.zip -oexamples/phantoms/
-
-          echo "Running tests with coverage..."
-          export PYTHONPATH=$GITHUB_WORKSPACE:$PYTHONPATH
-          pytest -v --maxfail=1 --disable-warnings \
-            --cov=feelmri \
-            --cov-report=term-missing \
-            --cov-report=xml
+          coverage erase
+          pytest tests/test_examples_run.py
+          coverage combine
+          # Enforce minimum 50% coverage
+          coverage report -m --fail-under=50
+          # Generate HTML + XML for upload
+          coverage html
+          coverage xml
 
       # ------------------------------------------------------------
-      # Upload logs on failure (for debugging)
+      # Upload HTML coverage report as artifact
       # ------------------------------------------------------------
-      - name: Upload pytest logs
-        if: failure()
+      - name: Upload coverage HTML
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pytest-logs
-          path: .pytest_cache
+          name: coverage-html
+          path: htmlcov
+
+      # ------------------------------------------------------------
+      # Upload coverage results to Codecov (for badge)
+      # ------------------------------------------------------------
+      - name: Upload coverage to Codecov
+        if: always()
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage.xml
+          flags: unittests
+          name: feelmri
+          fail_ci_if_error: true
+
+      # ------------------------------------------------------------
+      # Run additional tests (MPI and import)
+      # ------------------------------------------------------------
+      - name: Run tests with MPI
+        run: pytest tests/test_parallel.py
+
+      - name: Run import tests
+        run: pytest tests/test_imports.py
