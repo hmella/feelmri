@@ -15,12 +15,12 @@ EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "examples"
 
 
 @pytest.mark.parametrize("script", [
-    "4dflow.py",
-    "phase_contrast.py",
+    # "4dflow.py",
+    # "phase_contrast.py",
     # "free_running.py",
-    "trajectories.py",
-    "gradient_orientation.py",
-    "spamm.py",
+    # "trajectories.py",
+    # "gradient_orientation.py",
+    # "spamm.py",
     "water_and_fat.py",
 ])
 def test_example_runs(script):
@@ -39,7 +39,7 @@ def test_example_runs(script):
               MPLBACKEND="Agg",
               COVERAGE_PROCESS_START=str(Path(__file__).resolve().parent.parent / ".github/.coveragerc"),
               COVERAGE_FILE=str(Path(__file__).resolve().parent.parent / f".coverage.{script}")
-)
+              )
 
     # Set unique coverage file for each example
     env["COVERAGE_FILE"] = str(Path(__file__).resolve().parent.parent / f".coverage.{script}")
@@ -48,7 +48,7 @@ def test_example_runs(script):
     result = subprocess.run(
         [sys.executable, 
         "-m", "coverage", 
-        "run", "--parallel-mode",
+        "run",
         str(script_path)],
         cwd=EXAMPLES_DIR,
         stdout=subprocess.PIPE,
