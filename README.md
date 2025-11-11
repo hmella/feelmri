@@ -108,7 +108,7 @@ python3 -c "import feelmri; print(feelmri.__version__)"
 ### 4️⃣ (Optional) Unzip Example Phantoms
 
 ```bash
-7z x examples/phantoms/phantoms_compressed.zip -o examples/phantoms/
+7z x examples/phantoms/phantoms_compressed.zip -oexamples/phantoms/
 ```
 
 ---
