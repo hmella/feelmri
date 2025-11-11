@@ -18,4 +18,8 @@ PYBIND11_MODULE(POD, m) {
         &tensordot_modes_weights<float>,
         py::arg("modes").noconvert(), py::arg("weights").noconvert(),
         "Compute (P,C,M)·(M,) -> (P,C) (float32)");
+  m.def("tensordot_modes_weights",
+        &tensordot_modes_weights<double>,
+        py::arg("modes").noconvert(), py::arg("weights").noconvert(),
+        "Compute (P,C,M)·(M,) -> (P,C) (float64)");        
 }

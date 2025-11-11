@@ -42,7 +42,7 @@ Tensor<std::complex<T>, 4, RowMajor> Signal(
 
 PYBIND11_MODULE(MRI, m) {
     m.doc() = "Utilities for MR image generation";
-    // Overloaded function for PC with different parameters      
+    // Overloaded Signal functions (float)
     m.def("Signal", py::overload_cast<const int &,
       const SparseMatrix<float> &,
       const std::vector<Tensor<float, 3>> &,
@@ -61,4 +61,23 @@ PYBIND11_MODULE(MRI, m) {
       const Array<float, Dynamic, 1> &,
       const Matrix<std::complex<float>, Dynamic, Dynamic> &,
       const py::none &>(&Signal<float>));
+    // Overloaded Signal functions (double)
+    m.def("Signal", py::overload_cast<const int &,
+      const SparseMatrix<double> &,
+      const std::vector<Tensor<double, 3>> &,
+      const Tensor<double, 3> &,
+      const Matrix<double, Dynamic, Dynamic> &,
+      const Array<double, Dynamic, 1> &,
+      const Array<double, Dynamic, 1> &,
+      const Matrix<std::complex<double>, Dynamic, Dynamic> &,
+      const py::function &>(&Signal<double>));  
+    m.def("Signal", py::overload_cast<const int &,
+      const SparseMatrix<double> &,
+      const std::vector<Tensor<double, 3>> &,
+      const Tensor<double, 3> &,
+      const Matrix<double, Dynamic, Dynamic> &,
+      const Array<double, Dynamic, 1> &,
+      const Array<double, Dynamic, 1> &,
+      const Matrix<std::complex<double>, Dynamic, Dynamic> &,
+      const py::none &>(&Signal<double>));
 }
