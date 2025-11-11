@@ -1,6 +1,7 @@
+dist/
+*feelmri.egg-info/
 python/feelmri/__pycache__/
 build/
-feelmri.*/
 tmp/
 MRImages/
 */__pycache__/
@@ -10,8 +11,9 @@ meshes/xdmf/
 meshes/*.msh
 *.png
 *.mp4
-.*
 *.txt
 *.log
 *.eps
 *.pdf
+*.xml
+.coverage*
