@@ -145,9 +145,6 @@ if __name__ == '__main__':
                         T2=T2[cs].reshape((-1, 1)), 
                         initial_Mz=1e+10*rho[cs].reshape((-1, 1)), delta_B=delta_B0[cs].m_as('mT').reshape((-1, 1))))
 
-    # Solve dummy blocks
-    solvers[cs].solve()
-
   # Generate kspace trajectory
   start = imaging.time_extent[1] - sp.rf.time
   traj = CartesianStack(FOV=planning.FOV.to('m'),
