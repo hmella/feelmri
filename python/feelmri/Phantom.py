@@ -10,7 +10,7 @@ from scipy.sparse import lil_matrix
 
 from feelmri.Assemble import MassAssemble
 from feelmri.FiniteElements import FiniteElement, QuadratureRule
-from feelmri.MPIUtilities import MPI_print, MPI_rank, MPI_size
+from feelmri.MPIUtilities import MPI_comm, MPI_print, MPI_rank, MPI_size
 
 # Define a dictionary for the element types
 element_dict = {
@@ -33,6 +33,15 @@ family_dict = {
     'tetra10': 'P',
     'wedge': 'P',
     'hexahedron': 'P'
+}
+
+# Dictionary for pymetis ncommon (the number of common nodes that two elements must have in order to put an edge between them in the dual graph)
+pymetis_ncommon = {
+    'triangle': 2,
+    'tetra': 3,
+    'tetra10': 3,
+    'wedge': 3,
+    'hexahedron': 4
 }
 
 
@@ -67,11 +76,11 @@ class FEMPhantom:
   def _prepare_reader(self):
     try:
       # Define reader from time series to import data
-      reader = meshio.xdmf.TimeSeriesReader(self.path)
-
-      # Import mesh
+      reader = meshio.xdmf.TimeSeriesReader(self.path)        
       nodes, all_elems = reader.read_points_cells()
       elems = all_elems[0].data
+
+      # Element type
       elems_type = all_elems[0].type
 
       # Scale mesh
@@ -82,15 +91,36 @@ class FEMPhantom:
 
     except Exception as e: 
       # Import mesh
-      mesh = meshio.read(self.path)
-      nodes = mesh.points
-      elems = mesh.cells[0].data
-      elems_type = mesh.cells[0].type
-      reader = None
+      if MPI_rank == 0:
+        mesh = meshio.read(self.path)
+        nodes = mesh.points
+        elems = mesh.cells[0].data
+        elems_type = mesh.cells[0].type
 
-      # Cell and point data
-      self.point_data = mesh.point_data
-      self.cell_data = mesh.cell_data
+        # Cell and point data
+        self.point_data = mesh.point_data
+        self.cell_data = mesh.cell_data
+      else:
+        mesh = None
+        nodes = None
+        elems = None
+        elems_type = None
+
+        # Cell and point data
+        self.point_data = None
+        self.cell_data = None
+
+      # Broadcast nodes and elements to all processes
+      mesh = MPI_comm.bcast(mesh, root=0)
+      nodes = MPI_comm.bcast(nodes, root=0)
+      elems = MPI_comm.bcast(elems, root=0)
+      elems_type = MPI_comm.bcast(elems_type, root=0)
+      self.point_data = MPI_comm.bcast(self.point_data, root=0)
+      self.cell_data = MPI_comm.bcast(self.cell_data, root=0)
+      MPI_comm.Barrier()
+
+      # No reader available
+      reader = None
 
       # Scale mesh
       nodes *= self.scale_factor
@@ -164,9 +194,16 @@ class FEMPhantom:
   def distribute_mesh(self):
     ''' Distribute mesh across MPI processes '''
     # Mesh partitioning
-    connectivity = self.global_elements.tolist()
+    connectivity = self.global_elements
     num_parts = MPI_size
-    _, membership, _ = pymetis.part_mesh(num_parts, connectivity, None, None, pymetis.GType.DUAL)
+    ncommon = pymetis_ncommon[self.cell_type]
+    if MPI_rank == 0:
+      _, membership, _ = pymetis.part_mesh(num_parts, connectivity, None, None, pymetis.GType.DUAL, ncommon)
+    else:
+      membership = None
+
+    # Broadcast partitioning to all processes
+    membership = MPI_comm.bcast(membership, root=0)
 
     # Map between local and global indices for cells. Given the a local index, it provides the corresponding global index
     l2g_cells_idx = np.argwhere(np.array(membership) == MPI_rank).ravel()
