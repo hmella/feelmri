@@ -56,8 +56,6 @@ if __name__ == '__main__':
   # We can a submesh to speed up the simulation. The submesh is created by selecting the elements that are inside the FOV
   mp = phantom.global_nodes[phantom.global_elements].mean(axis=1)
   markers = np.abs(mp[:, 2]) <= 0.5 * planning.FOV[2].m_as('m')
-  markers *= np.abs(mp[:, 1]) <= 0.5 * planning.FOV[1].m_as('m')
-  markers *= np.abs(mp[:, 0]) <= 0.5 * planning.FOV[0].m_as('m')
   phantom.create_submesh(markers)
 
   # Create array to store displacements
