@@ -26,7 +26,7 @@ if FAST_MODE:
     Nb_frames = 1
     dummy_pulses = 1
 else:
-    Nb_frames = int(...)
+    Nb_frames = -1
     dummy_pulses = 80
 
 if __name__ == '__main__':
