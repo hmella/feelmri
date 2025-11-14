@@ -26,7 +26,7 @@ if FAST_MODE:
     slices = 1
     dummy_pulses = 1
 else:
-    slices = int(...)
+    slices = -1
     dummy_pulses = 80
 
 if __name__ == '__main__':

@@ -19,7 +19,7 @@ FAST_MODE = os.getenv("FEELMRI_FAST_TEST", "0") == "1"
 if FAST_MODE:
     Nb_frames = 1
 else:
-    Nb_frames = int(...)
+    Nb_frames = -1
 
 if __name__ == '__main__':
 
