@@ -10,7 +10,6 @@ from feelmri.Bloch import BlochSolver, Sequence, SequenceBlock
 from feelmri.KSpaceTraj import CartesianStack
 from feelmri.Motion import PODVelocity
 from feelmri.MPIUtilities import MPI_print, MPI_rank, gather_data
-from feelmri.MRI import Signal
 from feelmri.MRImaging import SliceProfile, VelocityEncoding
 from feelmri.MRObjects import RF, Gradient, Scanner
 from feelmri.Noise import add_cpx_noise
@@ -191,8 +190,12 @@ if __name__ == '__main__':
 
   T2star = (parameters.Phantom.T2star * np.ones([phantom.local_nodes.shape[0]])).astype(np.float32)
 
-  # Assemble mass matrix for integrals (just once to accelerate the simulation)
-  M = phantom.mass_matrix(lumped=True)
+  # Set assembler for MRI signal evaluation using FEM
+  vxsz = planning.FOV.m_as('m')/np.array(parameters.Imaging.RES)
+  phantom.set_assembler(voxel_size=vxsz[0], quadrature_order=6, nodal_approximation=True, lumped=False)
+
+  # Set static fields
+  phantom.set_static_fields(T2=T2star.m_as('ms'), phi_dB0=delta_omega0.m_as('rad/ms'))
 
   # Iterate over cardiac phases
   for fr in range(Nb_frames):
@@ -203,8 +206,11 @@ if __name__ == '__main__':
       # Update timeshift in the POD velocity
       pod_velocity.update_timeshift(fr * parameters.Imaging.TimeSpacing.m_as('ms'))
 
+      # Update magnetization
+      phantom.update_magnetization(Mxy_PC[:, fr, :])
+
       # Generate 4D flow image
-      K[:,:,:,:,fr] = Signal(MPI_rank, M, traj.points, traj.times.m_as('ms'), phantom.local_nodes, delta_omega0.m_as('rad/ms'), T2star.m_as('ms'), Mxy_PC[:, fr, :], pod_velocity)
+      K[:,:,:,:,fr] = phantom.mri_signal(traj.points, traj.times.m_as('ms'), pod_velocity)
 
   # Gather results
   K = gather_data(K)

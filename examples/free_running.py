@@ -11,7 +11,6 @@ from feelmri.IO import XDMFFile
 from feelmri.KSpaceTraj import CartesianStack
 from feelmri.Motion import POD, RespiratoryMotion
 from feelmri.MPIUtilities import MPI_print, MPI_rank, gather_data
-from feelmri.MRI import Signal
 from feelmri.MRImaging import SliceProfile
 from feelmri.MRObjects import RF, Scanner
 from feelmri.Parameters import ParameterHandler, PVSMParser
@@ -173,11 +172,12 @@ if __name__ == '__main__':
   # # Create XDMF file for debugging
   # file = XDMFFile(script_path/'magnetization_{:d}.xdmf'.format(MPI_rank), nodes=phantom.local_nodes, elements={phantom.cell_type: phantom.local_elements})
 
-  # Assemble mass matrix for integrals (just once)
-  M = phantom.mass_matrix(lumped=False, quadrature_order=2)
+  # Set assembler for MRI signal evaluation using FEM
+  vxsz = planning.FOV.m_as('m')/np.array(parameters.Imaging.RES)
+  phantom.set_assembler(voxel_size=vxsz[0], quadrature_order=6, nodal_approximation=False, lumped=False)
 
-  # Convert and stripe units
-  T2 = T2star.m_as('ms')
+  # Set static fields
+  phantom.set_static_fields(T2=T2star.m_as('ms'), phi_dB0=delta_omega0)
 
   # Fast mode for CI testing
   if FAST_MODE:
@@ -199,6 +199,9 @@ if __name__ == '__main__':
       seq.add_block(time_spacing)  # Delay between imaging blocks
       Mxy, Mz = solver.solve(start=-2)
 
+      # Update magnetization
+      phantom.update_magnetization(Mxy)
+
       # k-space points per shot
       kspace_points = (traj.points[0][:,sh,s,np.newaxis], 
                       traj.points[1][:,sh,s,np.newaxis], 
@@ -206,7 +209,7 @@ if __name__ == '__main__':
       kspace_times = traj.times.m_as('ms')[:,sh,s,np.newaxis] - traj.t_start.m_as('ms')
 
       # Generate 4D flow image
-      tmp = Signal(MPI_rank, M, kspace_points, kspace_times, phantom.local_nodes, delta_omega0, T2, Mxy, pod_sum)
+      tmp = phantom.mri_signal(kspace_points, kspace_times, pod_sum)
       K[:,sh,s,:,0] = tmp.swapaxes(0, 1)[:,:,0]
 
       # Update reference time of POD trajectory

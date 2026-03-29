@@ -9,7 +9,6 @@ from pint import Quantity as Q_
 from feelmri.Bloch import BlochSolver, Sequence, SequenceBlock
 from feelmri.KSpaceTraj import CartesianStack
 from feelmri.MPIUtilities import MPI_print, MPI_rank, gather_data
-from feelmri.MRI import Signal
 from feelmri.MRImaging import SliceProfile
 from feelmri.MRObjects import RF, Scanner
 from feelmri.Noise import add_cpx_noise
@@ -162,8 +161,16 @@ if __name__ == '__main__':
   slices = traj.slices
   K = np.zeros([ro_samples, ph_samples, slices, 1, 1], dtype=np.complex64)
 
-  # Assemble mass matrices for integrals (just once)
-  M = [phantoms[cs].mass_matrix(lumped=True, quadrature_order=2) for cs in range(Nb_species)]
+  # Field inhomogeneities
+  delta_phi = [scanner.gammabar.to('1/mT/ms') * delta_B0[cs].to('mT') for cs in range(Nb_species)]
+  delta_omega = [2 * np.pi * delta_phi[cs].m_as('1/ms') for cs in range(Nb_species)]
+
+  # Set assembler for MRI signal evaluation using FEM
+  vxsz = planning.FOV.m_as('m')/np.array(parameters.Imaging.RES)
+  [phantoms[cs].set_assembler(voxel_size=vxsz[0], quadrature_order=6, lumped=True, nodal_approximation=True) for cs in range(Nb_species)]
+
+  # Set static fields
+  [phantoms[cs].set_static_fields(T2=T2[cs].m_as('ms'), phi_dB0=delta_omega[cs]) for cs in range(Nb_species)]
 
   # Time spacing needed to achieve the desired TR
   time_spacing = parameters.Imaging.TR - (imaging.time_extent[1] - sp.rf.ref)
@@ -188,13 +195,10 @@ if __name__ == '__main__':
 
         # Solve new blocks
         Mxy, Mz = solvers[cs].solve(start=-2)
-
-        # Define field inhomogeneity for this frame
-        delta_phi = scanner.gammabar.to('1/mT/ms') * delta_B0[cs].to('mT')
-        delta_omega = 2 * np.pi * delta_phi.m_as('1/ms')
+        phantoms[cs].update_magnetization(Mxy)
 
         # Generate 4D flow image
-        tmp = Signal(MPI_rank, M[cs], kspace_points, kspace_times, phantoms[cs].local_nodes, delta_omega, T2[cs].m_as('ms'), Mxy, None)
+        tmp = phantoms[cs].mri_signal(kspace_points, kspace_times)
         K[:,sh,s,:,0] += tmp.swapaxes(0, 1)[:,:,0]
 
   # Gather results
