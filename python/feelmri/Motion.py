@@ -9,7 +9,7 @@ from scipy.interpolate import (Akima1DInterpolator, CubicSpline,
                                PchipInterpolator, PPoly)
 
 from feelmri.MPIUtilities import MPI_print, MPI_rank
-from feelmri.POD import tensordot_modes_weights
+from feelmri.PODHelper import tensordot_modes_weights
 
 
 class RespiratoryMotion:
@@ -258,7 +258,6 @@ class POD:
     :param timeshift: new timeshift value
     """
     self.timeshift = timeshift
-
 
 
 class PODVelocity(POD):

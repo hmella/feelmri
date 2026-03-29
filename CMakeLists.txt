@@ -96,6 +96,29 @@ endif()
 find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
 find_package(pybind11 CONFIG REQUIRED)
 
+# --- Basix: use the basix that is installed in this Python env (fenics-basix wheel) ---
+execute_process(
+  COMMAND "${Python_EXECUTABLE}" -c
+    "import basix, os; print(os.path.join(os.path.dirname(basix.__file__), 'lib'))"
+  OUTPUT_VARIABLE BASIX_PY_LIBDIR
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+  RESULT_VARIABLE _basix_rc
+)
+if(NOT _basix_rc EQUAL 0)
+  message(FATAL_ERROR
+    "Basix not importable in this Python env. Install: python -m pip install fenics-basix")
+endif()
+
+find_library(BASIX_LIB
+  NAMES basix
+  PATHS "${BASIX_PY_LIBDIR}"
+  NO_DEFAULT_PATH
+  REQUIRED
+)
+
+message(STATUS "Basix wheel libdir: ${BASIX_PY_LIBDIR}")
+message(STATUS "Basix wheel lib:    ${BASIX_LIB}")
+
 # ------------------------------------------------------------
 # Eigen3 automatic installation (cached and robust)
 # ------------------------------------------------------------
@@ -130,7 +153,7 @@ endif()
 # Source setup (core modules)
 # ------------------------------------------------------------
 set(SRC_DIR cpp/feelmri)
-set(MODULES Assemble BlochSimulator MRI POD)
+set(MODULES MRIAssemble Assemble BlochSimulator PODHelper)
 
 foreach(mod ${MODULES})
     message(STATUS "Building module: ${mod}")
@@ -145,7 +168,9 @@ foreach(mod ${MODULES})
             ${Python_INCLUDE_DIRS}
     )
 
-    # Apply high-performance compile flags
+		target_link_libraries(${mod} PRIVATE "${BASIX_LIB}")
+
+		# Apply high-performance compile flags
     target_compile_options(${mod} PRIVATE
         -Ofast
         -ffast-math
@@ -154,6 +179,10 @@ foreach(mod ${MODULES})
         -ffp-contract=fast
         -fvisibility=hidden
         -fPIC
+        -funroll-loops
+        -fopenmp-simd
+        -mavx2
+        -mfma
         -DNDEBUG
         -DEIGEN_NO_DEBUG
         -DEIGEN_FAST_MATH

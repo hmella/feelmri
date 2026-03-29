@@ -1,4 +1,5 @@
 #pragma once
+
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 #include <pybind11/eigen.h>
@@ -13,7 +14,7 @@ py::array_t<T> tensordot_modes_weights(
 );
 
 
-PYBIND11_MODULE(POD, m) {
+PYBIND11_MODULE(PODHelper, m) {
   m.def("tensordot_modes_weights",
         &tensordot_modes_weights<float>,
         py::arg("modes").noconvert(), py::arg("weights").noconvert(),

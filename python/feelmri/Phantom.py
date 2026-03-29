@@ -8,11 +8,11 @@ from pint import Quantity
 from scipy.interpolate import RBFInterpolator
 from scipy.sparse import lil_matrix
 
-from feelmri.Assemble import MassAssemble
-from feelmri.FiniteElements import FiniteElement, QuadratureRule
+from feelmri.Assemble import basixMassAssemble as bMassAssemble
 from feelmri.MPIUtilities import MPI_comm, MPI_print, MPI_rank, MPI_size
+from feelmri.MRIAssemble import SignalAssembler
 
-# Define a dictionary for the element types
+# Define a dictionary for the element types (meshio to basix)
 element_dict = {
     'triangle': 'triangle',
     'tetra': 'tetrahedron',
@@ -71,6 +71,10 @@ class FEMPhantom:
     self.local_nodes = mesh['nodes']
     self.local_shape = self.global_nodes.shape
     self.bbox = self.bounding_box()
+
+    # Calculate element size
+    self._element_size_assembler = SignalAssembler(self.global_elements, self.global_nodes, self.cell_type, 1)
+    self.global_elem_size = self._element_size_assembler.estimate_element_sizes()
     self.distribute_mesh()
 
   def _prepare_reader(self):
@@ -138,6 +142,13 @@ class FEMPhantom:
 
     return mesh, reader, Nfr
 
+  def bounding_box(self):
+    ''' Calculate bounding box of the FEM geometry '''
+    bmin = np.min(self.global_nodes, axis=0)
+    bmax = np.max(self.global_nodes, axis=0)
+    if MPI_rank == 0:
+      print('[FEMPhantom] Bounding box: ({:f},{:f},{:f}), ({:f},{:f},{:f})'.format(bmin[0],bmin[1],bmin[2],bmax[0],bmax[1],bmax[2]))
+    return (bmin, bmax)
 
   def create_submesh(self, markers, refine=False):
     '''
@@ -176,6 +187,7 @@ class FEMPhantom:
     # Backup original mesh
     self._global_nodes = self.global_nodes
     self._global_elements = self.global_elements
+    self._global_elem_size = self.global_elem_size
     self._global_shape = self.global_shape
 
     # Update mesh parameters and backup original mesh
@@ -183,6 +195,9 @@ class FEMPhantom:
     self.global_elements = submesh_elems
     self.mesh_to_submesh_nodes = submesh_nodes_map
     self.global_shape = submesh_nodes.shape
+
+    self._element_size_assembler = SignalAssembler(self.global_elements, self.global_nodes, self.cell_type, 1)
+    self.global_elem_size = self._element_size_assembler.estimate_element_sizes()
 
     # Debugging info
     MPI_print("[FEMPhantom] Submesh created with {:d} elements and {:d} nodes".format(len(self.global_elements), len(self.global_nodes)))
@@ -210,6 +225,7 @@ class FEMPhantom:
 
     # Local cells
     local_elems = self.global_elements[l2g_cells_idx, :]
+    local_elem_size = self.global_elem_size[l2g_cells_idx]
 
     # Local nodes
     l2g_nodes_idx = np.unique(local_elems.flatten())
@@ -228,6 +244,7 @@ class FEMPhantom:
 
     # Update mesh parameters
     self.local_elements = local_elems
+    self.local_elem_size = local_elem_size
     self.local_nodes = local_nodes
     self.local_shape = local_nodes.shape
 
@@ -237,15 +254,6 @@ class FEMPhantom:
 
     # Add mesh partition 
     self.partitioning = np.array(membership).reshape(-1, 1)
-
-
-  def bounding_box(self):
-    ''' Calculate bounding box of the FEM geometry '''
-    bmin = np.min(self.global_nodes, axis=0)
-    bmax = np.max(self.global_nodes, axis=0)
-    if MPI_rank == 0:
-      print('[FEMPhantom] Bounding box: ({:f},{:f},{:f}), ({:f},{:f},{:f})'.format(bmin[0],bmin[1],bmin[2],bmax[0],bmax[1],bmax[2]))
-    return (bmin, bmax)
 
   def read_data(self, fr):
     ''' Read data at frame fr '''
@@ -376,20 +384,10 @@ class FEMPhantom:
     self.local_nodes = self.local_nodes @ MPS_ori.T + LOC.m
 
 
-  def mass_matrix(self, lumped=False, use_submesh=False, quadrature_order=2):
+  def mass_matrix(self, lumped=False, quadrature_order=2):
     ''' Assemble mass matrix for integrals '''
-    # Create finite element and quadrature rule according to the mesh type
-    cell_type = self.cell_type
-    fe = FiniteElement(family=family_dict[cell_type], 
-                       cell_type=element_dict[cell_type], 
-                       degree=degree_dict[cell_type], 
-                       variant='equispaced')
-    qr = QuadratureRule(cell_type=element_dict[cell_type], 
-                        order=quadrature_order, 
-                        rule='default')
-
     # Assemble mass matrix
-    M = MassAssemble(self.local_elements, self.local_nodes, fe, qr)
+    M = bMassAssemble(self.local_elements, self.local_nodes, self.cell_type, 'equispaced', 'default', quadrature_order)
 
     # Make matrix lumped if requested
     if lumped:
@@ -398,20 +396,10 @@ class FEMPhantom:
       M.setdiag(diag)
     return M
   
-  def moving_mass_matrix(self, local_nodes, lumped=False, use_submesh=False, quadrature_order=2):
+  def moving_mass_matrix(self, local_nodes, lumped=False, quadrature_order=2):
     ''' Assemble mass matrix for integrals '''
-    # Create finite element and quadrature rule according to the mesh type
-    cell_type = self.cell_type
-    fe = FiniteElement(family=family_dict[cell_type], 
-                       cell_type=element_dict[cell_type], 
-                       degree=degree_dict[cell_type], 
-                       variant='equispaced')
-    qr = QuadratureRule(cell_type=element_dict[cell_type], 
-                        order=quadrature_order, 
-                        rule='default')
-
     # Assemble mass matrix
-    M = MassAssemble(self.local_elements, local_nodes, fe, qr)
+    M = bMassAssemble(self.local_elements, local_nodes, self.cell_type, 'equispaced', 'default', quadrature_order)
 
     # Make matrix lumped if requested
     if lumped:
@@ -420,3 +408,84 @@ class FEMPhantom:
       M.setdiag(diag)
 
     return M
+  
+  def set_assembler(self, voxel_size, quadrature_order=1, nodal_approximation=False, lumped=True):
+    ''' Set assembler for integrals '''
+    small = np.where(self.local_elem_size < voxel_size)[0]
+    large = np.where(self.local_elem_size >= voxel_size)[0]
+    print("[Assembler] Rank {:d} has {:d}/{:d} elements with size < {:f}".format(MPI_rank, len(small), len(self.local_elem_size), voxel_size))
+    self.assembler = []
+    
+    for d in [(small, 1), (large, quadrature_order)]:
+      size, order = d
+      if np.size(size) == 0:
+        continue
+      self.assembler.append(SignalAssembler(self.local_elements[size,:], self.local_nodes, self.cell_type, order))
+
+    self.nodal_approximation__ = False
+    
+    # Create mass matrix if nodal_approximation is True
+    if nodal_approximation and small.size > 0:
+      self.nodal_approximation__ = True
+
+      # Assemble mass matrix
+      self.M_ = bMassAssemble(self.local_elements[small, :], self.local_nodes, self.cell_type, 'equispaced', 'default', quadrature_order)
+
+      # Make matrix lumped if requested
+      if lumped:
+        diag = self.M_.sum(axis=1)
+        self.M_ = lil_matrix(self.M_.shape, dtype=self.M_.dtype)
+        self.M_.setdiag(diag)
+        
+      # FIX 2: Convert to CSR so Pybind11 can map it cleanly to Eigen::SparseMatrix in C++
+      self.M_ = self.M_.tocsr()
+  
+  def update_magnetization(self, Mxy):
+    for i, a in enumerate(self.assembler):
+      if i == 0 and self.nodal_approximation__:
+        a.update_nodal_magnetization(self.M_, Mxy)
+      else:
+        a.update_magnetization(Mxy)
+
+  def precompute_trajectory(self, pod):
+    return [a.precompute_trajectory(pod) for a in self.assembler]
+
+  def set_static_fields(self, T2, phi_dB0):
+    [a.set_static_fields(T2, phi_dB0) for a in self.assembler]
+
+  def mri_signal(self, kspace_points, kspace_times, pod=None):
+    # Create help to call the correct function
+    eval_helper = []
+    
+    # Use enumerate to safely get the index and the object
+    for i, a in enumerate(self.assembler):
+      if i == 0 and self.nodal_approximation__:
+        eval_helper.append(a.signal_nodal)
+      else:
+        eval_helper.append(a.signal)
+
+    if isinstance(pod, list):
+      return sum([signal(kspace_points, kspace_times, p) for (signal, p) in zip(eval_helper, pod)])
+    else:
+      return sum([signal(kspace_points, kspace_times, pod) for signal in eval_helper])
+  
+  def signal(self, kspace_points, kspace_times, pod=None):
+    # Added isinstance check to prevent crashes when passing precomputed lists
+    if isinstance(pod, list):
+      return sum([a.signal(kspace_points, kspace_times, p) for (a, p) in zip(self.assembler, pod)])
+    else:
+      return sum([a.signal(kspace_points, kspace_times, pod) for a in self.assembler])  
+
+  def signal_nodal(self, kspace_points, kspace_times, pod=None):
+    """Simulate MRI k-space signal using ultra-fast nodal mass matrix integration."""
+    if isinstance(pod, list):
+      return sum([a.signal_nodal(kspace_points, kspace_times, p) for (a, p) in zip(self.assembler, pod)])
+    else:
+      return sum([a.signal_nodal(kspace_points, kspace_times, pod) for a in self.assembler])
+    
+  def signal_sum(self, kspace_points, kspace_times, pod=None):
+    """Simulate MRI k-space signal using ultra-fast nodal mass matrix integration."""
+    if isinstance(pod, list):
+      return sum([a.signal_sum(kspace_points, kspace_times, p) for (a, p) in zip(self.assembler, pod)])
+    else:
+      return sum([a.signal_sum(kspace_points, kspace_times, pod) for a in self.assembler])

@@ -1,5 +1,6 @@
 [build-system]
 requires = ["scikit-build-core>=0.10",
+            "fenics-basix>=0.10.0",
             "pybind11",
             "numpy",
             "setuptools",
@@ -25,7 +26,7 @@ dependencies = [
   "scikit-image",
   "pint",
   "pymetis",
-  "fenics-basix",
+  "fenics-basix>=0.10.0",
   "pynufft",
 ]
 keywords = ["MRI", "finite-element", "simulation", "pybind11", "C++"]
