@@ -39,6 +39,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     nano \
  && rm -rf /var/lib/apt/lists/*
 
+# # Basix system dependencies (blas/lapack)
+# RUN apt-get update && apt-get install -y --no-install-recommends \
+#     build-essential cmake ninja-build git \
+#     libopenblas-dev liblapack-dev gfortran \
+#     python3 python3-dev python3-pip \
+#     && rm -rf /var/lib/apt/lists/*
+
+# # Build & install Basix C++
+# ARG BASIX_REF=main
+# RUN git clone --depth 1 --branch ${BASIX_REF} https://github.com/FEniCS/basix.git /tmp/basix && \
+#     cmake -S /tmp/basix/cpp -B /tmp/basix/build \
+#       -DCMAKE_BUILD_TYPE=Release \
+#       -DCMAKE_INSTALL_PREFIX=/usr/local \
+#       -GNinja && \
+#     cmake --build /tmp/basix/build && \
+#     cmake --install /tmp/basix/build && \
+#     rm -rf /tmp/basix
+
 # Copy FEelMRI source code to temporary build directory
 RUN mkdir /tmp/feelmri_build/
 COPY pyproject.toml /tmp/feelmri_build/

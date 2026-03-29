@@ -1,4 +1,10 @@
 #include "BlochSimulator.h"
+#include <pybind11/pybind11.h>
+#include <pybind11/numpy.h>
+#include <pybind11/complex.h>
+#include <complex>
+#include <cmath>
+#include <utility>
 
 using namespace Eigen;
 namespace py = pybind11;
