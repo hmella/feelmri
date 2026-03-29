@@ -10,7 +10,6 @@ from feelmri.Bloch import BlochSolver, Sequence, SequenceBlock
 from feelmri.KSpaceTraj import RadialStack
 from feelmri.Motion import PODVelocity
 from feelmri.MPIUtilities import MPI_print, MPI_rank, gather_data
-from feelmri.MRI import Signal
 from feelmri.MRImaging import SliceProfile, VelocityEncoding
 from feelmri.MRObjects import RF, Gradient, Scanner
 from feelmri.Noise import add_cpx_noise
@@ -36,7 +35,6 @@ if __name__ == '__main__':
 
   # Import imaging parameters
   pars = ParameterHandler(script_path/'parameters/4dflow.yaml')
-
 
   # Import PVSM file to get the FOV, LOC and MPS orientation
   planning = PVSMParser(script_path/pars.Formatting.planning,
@@ -212,16 +210,20 @@ if __name__ == '__main__':
   slices = traj.slices
   K = np.zeros([ro_samples, ph_samples, slices, enc.nb_directions, Nb_frames], dtype=np.complex64)
 
-  T2star = (pars.Phantom.T2star * np.ones([phantom.local_nodes.shape[0]])).astype(np.float32)
-
-  # Assemble mass matrix for integrals (just once to accelerate the simulation)
-  M = phantom.mass_matrix(lumped=True, quadrature_order=2)
+  # Spatial map for T2 value
+  T2star = (pars.Phantom.T2star * np.ones([phantom.local_nodes.shape[0]])).astype(np.float32).m_as('ms')
 
   # Convert and stripe units
   traj_points = traj.points
   traj_times  = traj.times.m_as('ms') - traj.t_start.m_as('ms')
   delta_omega = delta_omega0.m_as('rad/ms')
-  T2 = T2star.m_as('ms')
+
+  # Set assembler for MRI signal evaluation using FEM
+  vxsz = planning.FOV.m_as('m')/np.array(pars.Imaging.RECON_RES)
+  phantom.set_assembler(voxel_size=vxsz[0], quadrature_order=6, nodal_approximation=True, lumped=True)
+
+  # Set static fields
+  phantom.set_static_fields(T2=T2star, phi_dB0=delta_omega)
 
   # Iterate over cardiac phases
   for fr in range(Nb_frames):
@@ -232,8 +234,11 @@ if __name__ == '__main__':
       # Update timeshift in the POD velocity
       pod_velocity.update_timeshift(fr * pars.Imaging.TimeSpacing.m_as('ms'))
 
+      # Update magnetization
+      phantom.update_magnetization(Mxy_PC[:, fr, :])
+
       # Generate 4D flow image
-      K[:,:,:,:,fr] = Signal(MPI_rank, M, traj_points, traj_times, phantom.local_nodes, delta_omega, T2, Mxy_PC[:, fr, :], pod_velocity)
+      K[:,:,:,:,fr] = phantom.mri_signal(traj.points, traj.times.m_as('ms'))
 
   # Gather results
   K = gather_data(K)
