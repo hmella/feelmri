@@ -12,29 +12,6 @@ from feelmri.Assemble import basixMassAssemble as bMassAssemble
 from feelmri.MPIUtilities import MPI_comm, MPI_print, MPI_rank, MPI_size
 from feelmri.MRIAssemble import SignalAssembler
 
-# Define a dictionary for the element types (meshio to basix)
-element_dict = {
-    'triangle': 'triangle',
-    'tetra': 'tetrahedron',
-    'tetra10': 'tetrahedron',
-    'wedge': 'prism',
-    'hexahedron': 'hexahedron'
-}
-degree_dict = {
-    'triangle': 1,
-    'tetra': 1,
-    'tetra10': 2,
-    'wedge': 1,
-    'hexahedron': 1
-}
-family_dict = {
-    'triangle': 'P',
-    'tetra': 'P',
-    'tetra10': 'P',
-    'wedge': 'P',
-    'hexahedron': 'P'
-}
-
 # Dictionary for pymetis ncommon (the number of common nodes that two elements must have in order to put an edge between them in the dual graph)
 pymetis_ncommon = {
     'triangle': 2,
@@ -43,7 +20,6 @@ pymetis_ncommon = {
     'wedge': 3,
     'hexahedron': 4
 }
-
 
 class FEMPhantom:
   def __init__(self, path: str = '', 
@@ -410,6 +386,7 @@ class FEMPhantom:
     return M
   
   def set_assembler(self, voxel_size, quadrature_order=1, nodal_approximation=False, lumped=True):
+    # TODO: add option to define low order (for small elements) and high order (for large elements) quadrature rules 
     ''' Set assembler for integrals '''
     small = np.where(self.local_elem_size < voxel_size)[0]
     large = np.where(self.local_elem_size >= voxel_size)[0]
