@@ -46,7 +46,7 @@ if __name__ == '__main__':
   for cs in range(Nb_species):
 
     # Create FEM phantom object
-    phantoms.append(FEMPhantom(path=script_path/'phantoms/water_fat_P1_prism_.xdmf', scale_factor=0.01))
+    phantoms.append(FEMPhantom(path=script_path/'phantoms/water_fat_P1_prism.xdmf', scale_factor=0.01))
     phantoms[cs].read_data(0)
 
     # Translate phantom to obtain the desired slice location
