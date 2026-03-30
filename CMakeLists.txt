@@ -27,6 +27,8 @@ if(UNIX AND NOT APPLE)
                     ninja-build
                     git
                     libopenmpi-dev
+                    libblas-dev
+                    liblapack-dev
                     screen
                     nano
                 RESULT_VARIABLE APT_RESULT
@@ -96,28 +98,26 @@ endif()
 find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
 find_package(pybind11 CONFIG REQUIRED)
 
-# --- Basix: use the basix that is installed in this Python env (fenics-basix wheel) ---
-execute_process(
-  COMMAND "${Python_EXECUTABLE}" -c
-    "import basix, os; print(os.path.join(os.path.dirname(basix.__file__), 'lib'))"
-  OUTPUT_VARIABLE BASIX_PY_LIBDIR
-  OUTPUT_STRIP_TRAILING_WHITESPACE
-  RESULT_VARIABLE _basix_rc
+# ------------------------------------------------------------
+# FEniCS Basix (C++) automatic compilation via FetchContent
+# ------------------------------------------------------------
+find_package(BLAS REQUIRED)
+find_package(LAPACK REQUIRED)
+
+include(FetchContent)
+FetchContent_Declare(
+    basix
+    GIT_REPOSITORY https://github.com/FEniCS/basix.git
+    GIT_TAG v0.10.0    # Matches the >=0.10.0 requirement in your pyproject.toml
+    SOURCE_SUBDIR cpp  # Tells CMake to look for CMakeLists.txt inside the cpp/ folder
 )
-if(NOT _basix_rc EQUAL 0)
-  message(FATAL_ERROR
-    "Basix not importable in this Python env. Install: python -m pip install fenics-basix")
+
+FetchContent_GetProperties(basix)
+if(NOT basix_POPULATED)
+    message(STATUS "Fetching and building FEniCS Basix C++ library from GitHub...")
+    FetchContent_Populate(basix)
+    add_subdirectory(${basix_SOURCE_DIR}/cpp ${basix_BINARY_DIR})
 endif()
-
-find_library(BASIX_LIB
-  NAMES basix
-  PATHS "${BASIX_PY_LIBDIR}"
-  NO_DEFAULT_PATH
-  REQUIRED
-)
-
-message(STATUS "Basix wheel libdir: ${BASIX_PY_LIBDIR}")
-message(STATUS "Basix wheel lib:    ${BASIX_LIB}")
 
 # ------------------------------------------------------------
 # Eigen3 automatic installation (cached and robust)
@@ -168,7 +168,7 @@ foreach(mod ${MODULES})
             ${Python_INCLUDE_DIRS}
     )
 
-		target_link_libraries(${mod} PRIVATE "${BASIX_LIB}")
+    target_link_libraries(${mod} PRIVATE basix)
 
 		# Apply high-performance compile flags
     target_compile_options(${mod} PRIVATE
