@@ -11,7 +11,6 @@ from feelmri.IO import XDMFFile
 from feelmri.KSpaceTraj import CartesianStack
 from feelmri.Motion import POD
 from feelmri.MPIUtilities import MPI_print, MPI_rank, gather_data
-from feelmri.MRI import Signal
 from feelmri.MRImaging import PositionEncoding, SliceProfile
 from feelmri.MRObjects import RF, Gradient, Scanner
 from feelmri.Parameters import ParameterHandler, PVSMParser
@@ -193,13 +192,17 @@ if __name__ == '__main__':
   # T2 relaxation time
   T2 = np.ones([phantom.local_nodes.shape[0], ], dtype=np.float32)*parameters.Phantom.T2
 
-  # Assemble mass matrix for integrals (just once)
-  M = phantom.mass_matrix(lumped=True, quadrature_order=2)
+  # Set assembler for MRI signal evaluation using FEM
+  vxsz = planning.FOV.m_as('m')/np.array(parameters.Imaging.RES)
+  phantom.set_assembler(voxel_size=vxsz[0], quadrature_order=6, nodal_approximation=True, lumped=False)
+
+  # Set static fields
+  phantom.set_static_fields(T2=T2.m_as('ms'), phi_dB0=delta_omega0)
 
   # Iterate over cardiac phases
   kspace_points = traj.points
   kspace_times = traj.times.m_as('ms') - traj.t_start.m_as('ms')
-  for fr in range(Nb_frames):
+  for fr in [0]: #range(Nb_frames):
 
     # Print progress
     MPI_print("Generating frame {:d}/{:d}".format(fr+1, Nb_frames))
@@ -207,8 +210,11 @@ if __name__ == '__main__':
     # Update reference time of POD trajectory
     pod_trajectory.update_timeshift(fr * parameters.Imaging.TimeSpacing.m_as('ms'))
 
+    # Update magnetization
+    phantom.update_magnetization(Mxy_spamm[:, fr, :])
+
     # Generate 4D flow image
-    K[:,:,:,:,fr] = Signal(MPI_rank, M, kspace_points, kspace_times, phantom.local_nodes, delta_omega0, T2.m_as('ms'), Mxy_spamm[:, fr, :], pod_trajectory)
+    K[:,:,:,:,fr] = phantom.mri_signal(kspace_points, kspace_times, pod_trajectory)
 
   # Gather results
   K = gather_data(K)
@@ -223,6 +229,6 @@ if __name__ == '__main__':
     mxy = np.abs(I[...,0,:] - I[...,1,:])
     plotter = MRIPlotter(images=[mx, my, mxy], 
                         title=['SPAMM X', 'SPAMM Y', 'O-CSPAMM'], 
-                        FOV=planning.FOV.m_as('m'), caxis=[0, 13])
+                        FOV=planning.FOV.m_as('m'))
     # plotter.export_images('spamm_images_semi_bloch/')
     plotter.show()
