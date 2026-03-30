@@ -50,7 +50,7 @@ def test_example_runs(script):
     result = subprocess.run(
         [sys.executable, 
         "-m", "coverage", 
-        "run",
+        "run", "-p",
         str(script_path)],
         cwd=EXAMPLES_DIR,
         stdout=subprocess.PIPE,
