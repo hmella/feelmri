@@ -104,12 +104,15 @@ find_package(pybind11 CONFIG REQUIRED)
 find_package(BLAS REQUIRED)
 find_package(LAPACK REQUIRED)
 
+# Force Basix to compile statically and embed directly into feelmri extensions
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "Force static libraries" FORCE)
+
 include(FetchContent)
 FetchContent_Declare(
     basix
     GIT_REPOSITORY https://github.com/FEniCS/basix.git
-    GIT_TAG v0.10.0    # Matches the >=0.10.0 requirement in your pyproject.toml
-    SOURCE_SUBDIR cpp  # Tells CMake to look for CMakeLists.txt inside the cpp/ folder
+    GIT_TAG v0.10.0
+    SOURCE_SUBDIR cpp
 )
 
 FetchContent_GetProperties(basix)
