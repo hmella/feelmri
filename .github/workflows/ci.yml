@@ -70,6 +70,9 @@ jobs:
       # ------------------------------------------------------------
       # Install FEelMRI and Python dependencies
       # ------------------------------------------------------------
+      - name: Install system dependencies for FEniCS Basix
+        run: sudo apt-get update && sudo apt-get install -y libblas-dev liblapack-dev
+
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
