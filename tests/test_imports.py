@@ -11,7 +11,7 @@ def test_import_top_level():
     assert hasattr(feelmri, "__version__"), "Package missing __version__ attribute"
 
 
-@pytest.mark.parametrize("module_name", ["Assemble", "MRI", "BlochSimulator", "POD"])
+@pytest.mark.parametrize("module_name", ["Assemble", "MRIAssemble", "BlochSimulator", "PODHelper"])
 def test_cpp_extensions_importable(module_name):
     """Test that compiled pybind11 modules can be imported."""
     import importlib

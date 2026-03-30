@@ -39,7 +39,7 @@ def test_example_runs(script):
     env = dict(os.environ,
               FEELMRI_FAST_TEST="1",
               MPLBACKEND="Agg",
-              COVERAGE_PROCESS_START=str(Path(__file__).resolve().parent.parent / ".github/.coveragerc"),
+              COVERAGE_PROCESS_START=str(Path(__file__).resolve().parent.parent / ".coveragerc"),
               COVERAGE_FILE=str(Path(__file__).resolve().parent.parent / f".coverage.{script}")
               )
 
