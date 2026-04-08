@@ -1,6 +1,21 @@
 cmake_minimum_required(VERSION 3.18)
 project(feelmri LANGUAGES CXX)
 
+# Globally cache downloaded dependencies across all builds
+set(FETCHCONTENT_BASE_DIR "$ENV{HOME}/.cache/cmake" CACHE PATH "Directory for downloaded FetchContent dependencies")
+
+# =========================================================
+# Compiler Caching (ccache) integration
+# =========================================================
+find_program(CCACHE_PROGRAM ccache)
+if(CCACHE_PROGRAM)
+    message(STATUS "✅ Found ccache: ${CCACHE_PROGRAM}")
+    set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
+    set(CMAKE_C_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
+else()
+    message(STATUS "ℹ️ ccache not found. Install ccache to speed up recompilations.")
+endif()
+
 # =========================================================
 # Dependency detection and optional installation
 # =========================================================
@@ -15,7 +30,15 @@ if(UNIX AND NOT APPLE)
     else()
         if(INSTALL_SYSTEM_DEPS)
             message(STATUS "Installing missing system dependencies with apt-get (requires sudo)...")
-            execute_process(COMMAND sudo ${APT_EXEC} update)
+
+            # Only run apt-get update once per build directory creation
+            if(NOT APT_UPDATED)
+                execute_process(COMMAND sudo ${APT_EXEC} update RESULT_VARIABLE UPDATE_RESULT)
+                if(UPDATE_RESULT EQUAL 0)
+                    set(APT_UPDATED TRUE CACHE INTERNAL "Apt update has been run")
+                endif()
+            endif()
+
             execute_process(
                 COMMAND sudo ${APT_EXEC} install -y --no-install-recommends
                     build-essential
@@ -31,6 +54,7 @@ if(UNIX AND NOT APPLE)
                     liblapack-dev
                     screen
                     nano
+                    ccache
                 RESULT_VARIABLE APT_RESULT
             )
             if(NOT APT_RESULT EQUAL 0)
@@ -104,44 +128,57 @@ find_package(pybind11 CONFIG REQUIRED)
 find_package(BLAS REQUIRED)
 find_package(LAPACK REQUIRED)
 
-# Force Basix to compile statically and embed directly into feelmri extensions
-set(BUILD_SHARED_LIBS OFF CACHE BOOL "Force static libraries" FORCE)
+# Check if basix is already installed on the system
+find_package(basix QUIET)
 
-include(FetchContent)
-FetchContent_Declare(
-    basix
-    GIT_REPOSITORY https://github.com/FEniCS/basix.git
-    GIT_TAG v0.10.0
-    SOURCE_SUBDIR cpp
-)
+if(basix_FOUND)
+    message(STATUS "✅ Found system basix.")
+else()
+    # Force Basix to compile statically and embed directly into feelmri extensions
+    set(BUILD_SHARED_LIBS OFF CACHE BOOL "Force static libraries" FORCE)
 
-FetchContent_GetProperties(basix)
-if(NOT basix_POPULATED)
-    message(STATUS "Fetching and building FEniCS Basix C++ library from GitHub...")
-    FetchContent_Populate(basix)
-    add_subdirectory(${basix_SOURCE_DIR}/cpp ${basix_BINARY_DIR})
+    include(FetchContent)
+    FetchContent_Declare(
+        basix
+        GIT_REPOSITORY https://github.com/FEniCS/basix.git
+        GIT_TAG v0.10.0
+        SOURCE_SUBDIR cpp
+    )
+
+    FetchContent_GetProperties(basix)
+    if(NOT basix_POPULATED)
+        message(STATUS "Fetching and building FEniCS Basix C++ library from GitHub...")
+        FetchContent_Populate(basix)
+        add_subdirectory(${basix_SOURCE_DIR}/cpp ${basix_BINARY_DIR})
+    endif()
 endif()
 
 # ------------------------------------------------------------
 # Eigen3 automatic installation (cached and robust)
 # ------------------------------------------------------------
-include(FetchContent)
+find_package(Eigen3 5.0 QUIET)
 
-FetchContent_Declare(
-    Eigen
-    GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
-		GIT_TAG nightly
-)
+if(Eigen3_FOUND)
+    message(STATUS "✅ Found system Eigen3: ${EIGEN3_INCLUDE_DIRS}")
+    set(EIGEN_INCLUDE_DIR "${EIGEN3_INCLUDE_DIRS}")
+    set(EIGEN_UNSUPPORTED_DIR "${EIGEN3_INCLUDE_DIRS}/unsupported")
+else()
+    include(FetchContent)
+    FetchContent_Declare(
+        Eigen
+        GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
+        GIT_TAG 5.0.1
+    )
 
-FetchContent_GetProperties(Eigen)
-if (NOT eigen_POPULATED)
-    message(STATUS "Fetching Eigen3 (nightly) from GitLab...")
-    FetchContent_Populate(Eigen)
-    set(FETCHCONTENT_BASE_DIR "$ENV{HOME}/.cache/cmake")
+    FetchContent_GetProperties(Eigen)
+    if (NOT eigen_POPULATED)
+        message(STATUS "Fetching Eigen3 (3.4.0) from GitLab...")
+        FetchContent_Populate(Eigen)
+    endif()
+
+    set(EIGEN_INCLUDE_DIR "${eigen_SOURCE_DIR}")
+    set(EIGEN_UNSUPPORTED_DIR "${eigen_SOURCE_DIR}/unsupported")
 endif()
-
-set(EIGEN_INCLUDE_DIR "${eigen_SOURCE_DIR}")
-set(EIGEN_UNSUPPORTED_DIR "${eigen_SOURCE_DIR}/unsupported")
 
 include_directories(${EIGEN_INCLUDE_DIR} ${EIGEN_UNSUPPORTED_DIR})
 
@@ -173,7 +210,7 @@ foreach(mod ${MODULES})
 
     target_link_libraries(${mod} PRIVATE basix)
 
-		# Apply high-performance compile flags
+    # Apply high-performance compile flags
     target_compile_options(${mod} PRIVATE
         -Ofast
         -ffast-math
@@ -210,4 +247,5 @@ message(STATUS "  Pybind11 includes:   ${pybind11_INCLUDE_DIRS}")
 message(STATUS "  Eigen include dir:   ${EIGEN_INCLUDE_DIR}")
 message(STATUS "  Eigen unsupported:   ${EIGEN_UNSUPPORTED_DIR}")
 message(STATUS "  LTO enabled:         ${CMAKE_INTERPROCEDURAL_OPTIMIZATION}")
+message(STATUS "  ccache enabled:      ${CCACHE_PROGRAM}")
 message(STATUS "------------------------------------------------------------")
