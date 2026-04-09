@@ -171,7 +171,10 @@ if __name__ == '__main__':
 
   # Set assembler for MRI signal evaluation using FEM
   vxsz = planning.FOV.m_as('m')/np.array(parameters.Imaging.RES)
-  [phantoms[cs].set_assembler(voxel_size=vxsz[0], quadrature_order=6, lumped=True, nodal_approximation=False) for cs in range(Nb_species)]
+  [phantoms[cs].set_assembler(voxel_size=vxsz[0], lorder=2, horder=8, nodal_approximation=False, lumped=False) for cs in range(Nb_species)]
+
+  # Print maximum and minimum element sizes
+  print([(phantoms[cs].global_elem_size.min(), phantoms[cs].global_elem_size.max()) for cs in range(Nb_species)])
 
   # Set static fields
   [phantoms[cs].set_static_fields(T2=T2[cs].m_as('ms'), phi_dB0=delta_omega[cs]) for cs in range(Nb_species)]
@@ -216,4 +219,5 @@ if __name__ == '__main__':
     mag = np.abs(I[...,0,:])
     phi = np.angle(I[...,0,:])
     plotter = MRIPlotter(images=[mag, phi], title=['Magnitude', 'Phase'], FOV=planning.FOV.m_as('m'))
+    plotter.export_images('results/', prefix='signal_full_nodal_8_hybrid', format='eps', dpi=150)
     plotter.show()
