@@ -24,6 +24,8 @@ FAST_MODE = os.getenv("FEELMRI_FAST_TEST", "0") == "1"
 if FAST_MODE:
     Nb_frames = 1
     dummy_pulses = 1
+    acq_resolution = [30, 25, 25]
+    recon_resolution = [30, 15, 25]
 else:
     Nb_frames = -1
     dummy_pulses = 80
@@ -35,6 +37,11 @@ if __name__ == '__main__':
 
   # Import imaging parameters
   pars = ParameterHandler(script_path/'parameters/4dflow.yaml')
+
+  # Make resolution lower for CI testing
+  if FAST_MODE:
+    pars.Imaging.ACQ_RES = np.array(acq_resolution)
+    pars.Imaging.RECON_RES = np.array(recon_resolution)
 
   # Import PVSM file to get the FOV, LOC and MPS orientation
   planning = PVSMParser(script_path/pars.Formatting.planning,
