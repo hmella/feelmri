@@ -18,6 +18,7 @@ EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "examples"
     "4dflow.py",
     "free_running.py",
     "gradient_orientation.py",
+    "gradient_spoiling.py",
     "phase_contrast.py",
     "pod.py",
     "pvsm_parameters.py",
