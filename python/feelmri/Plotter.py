@@ -96,7 +96,7 @@ class MRIPlotter:
         rows = np.ceil(len(self.images) / cols).astype(int)
         self.fig, self.ax = plt.subplots(rows, cols)
 
-  def export_images(self, output_dir):
+  def export_images(self, output_dir, prefix='im', format='png', dpi=150):
     """
     Exports all frames and slices of the MRI images to PNG files.
 
@@ -130,8 +130,8 @@ class MRIPlotter:
                 cbar = fig.colorbar(image, cax=colorbar_axes)
                 cbar.minorticks_on()
 
-                filename = os.path.join(output_dir, f'image_{i}_slice_{slice_idx}_frame_{frame_idx}.png')
-                plt.savefig(filename, bbox_inches='tight')
+                filename = os.path.join(output_dir, f'{prefix}_{i}_slice_{slice_idx}_frame_{frame_idx}.{format}')
+                plt.savefig(filename, bbox_inches='tight', dpi=dpi)
                 plt.close(fig)
 
   def show(self):
