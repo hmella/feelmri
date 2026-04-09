@@ -5,6 +5,7 @@ import warnings
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.patches import Circle
 from pint import Quantity as Quantity
 
 from feelmri.BlochSimulator import solve_mri
@@ -14,9 +15,18 @@ from feelmri.MRObjects import Scanner
 from feelmri.Phantom import FEMPhantom
 
 
+class ADC:
+    def __init__(self, times: np.ndarray):
+        """
+        times : numpy array of sampling times in ms (absolute inside block)
+        """
+        self.times = Quantity(times, 'ms')
+
+
 class SequenceBlock:
   def __init__(self, gradients: list = [], 
-               rf_pulses: list = [], 
+               rf_pulses: list = [],
+               adc: ADC | None = None,
                dt_rf: Quantity = Quantity(0.01, 'ms'), 
                dt_gr: Quantity = Quantity(-1, 'ms'), 
                dt: Quantity = Quantity(10, 'ms'), 
@@ -28,6 +38,7 @@ class SequenceBlock:
     self.P_gradients = [g for g in self.gradients if g.axis == 1]
     self.S_gradients = [g for g in self.gradients if g.axis == 2]
     self.rf_pulses = rf_pulses
+    self.adc = adc
     self.dt_rf = dt_rf
     self.dt_gr = dt_gr
     self.dt = dt
@@ -37,6 +48,7 @@ class SequenceBlock:
     self.Nb_times = len(self.discrete_times)
     self.empty = empty
     self.store_magnetization = store_magnetization
+    self._spoiler = False
 
   def copy(self):
     return copy.deepcopy(self)
@@ -46,7 +58,13 @@ class SequenceBlock:
     m_gr = np.sum([g(t) for g in self.M_gradients], axis=0)
     p_gr = np.sum([g(t) for g in self.P_gradients], axis=0)
     s_gr = np.sum([g(t) for g in self.S_gradients], axis=0)
-    return rf, (m_gr, p_gr, s_gr)
+    # return rf, (m_gr, p_gr, s_gr)
+    if self.adc is not None:
+        adc_mask = np.isclose(t, self.adc.times.m_as('ms'), rtol=1e-9, atol=1e-12)
+    else:
+        adc_mask = np.zeros_like(t, dtype=bool)
+
+    return rf, (m_gr, p_gr, s_gr), adc_mask
 
   def __repr__(self):
     return f"Sequence(gradients={self.gradients}, rf_pulses={self.rf_pulses}, dt_rf={self.dt_rf}, dt_gr={self.dt_gr})"
@@ -97,7 +115,9 @@ class SequenceBlock:
       start = (rf.time - rf.ref - eps).m
       end   = (rf.time - rf.ref + rf.dur + eps).m
       steps = int(np.ceil((end - start)/self.dt_rf.m))
+      print(start, end, steps)
       t  = np.linspace(start, end, steps)
+      print(np.linalg.norm(rf(t)))
       rf_d.append((t, rf(t)))
 
     return rf_d, M_d_gr, P_d_gr, S_d_gr
@@ -120,10 +140,16 @@ class SequenceBlock:
         rf_timings = np.array([])
 
     # Sequence timings
-    seQuantitytimings = np.arange(self.time_extent[0].m, self.time_extent[1].m, self.dt.m)
+    seq_timings = np.arange(self.time_extent[0].m, self.time_extent[1].m, self.dt.m)
+
+    # ADC timings
+    if self.adc is not None:
+        adc_times = self.adc.times.m_as('ms')
+    else:
+        adc_times = np.array([])
 
     # Concatenate all timings, sort them and remove duplicates.
-    all_timings = np.concatenate((gr_timings, rf_timings, seQuantitytimings))
+    all_timings = np.concatenate((gr_timings, rf_timings, seq_timings, adc_times))
     all_timings = np.unique(np.sort(all_timings))
 
     return Quantity(all_timings, units='ms')
@@ -205,6 +231,20 @@ class Sequence:
     else:
       warnings.warn("Only SequenceBlock or Quantity instances can be added to the sequence.")
 
+  def flatten(self):
+    # Flatten the sequence by creating a single block
+    all_gradients = []
+    all_rf_pulses = []
+    for block in self.blocks:
+      all_gradients.extend(block.gradients)
+      all_rf_pulses.extend(block.rf_pulses)
+    flattened_block = SequenceBlock(gradients=all_gradients, rf_pulses=all_rf_pulses)
+    self.blocks = [flattened_block]
+    self.Nb_blocks = 1
+    self.time_extent = self._get_extent()
+    self.dur = self.time_extent[1] - self.time_extent[0]
+    self.non_empty = [not flattened_block.empty]
+
   def update_block_references(self):
     # Update reference time for each block
     for i, block in enumerate(self.blocks):
@@ -229,46 +269,72 @@ class Sequence:
   
   def plot(self, blocks=None, tight_layout=True, figsize=None, export_to=None):
     if MPI_rank == 0:
-      # Plot RF pulses and MR gradients
-      titles = ['RF', 'M', 'P', 'S']
-      if blocks is None: # Plot all
-        discrete_blocks = [block._discrete_objects() for block in self.blocks]
-        extents = [block.time_extent for block in self.blocks]
-      else:            # Plot selected blocks
-        discrete_blocks = [block._discrete_objects() for block in self.blocks[blocks]]
-        extents = [block.time_extent for block in self.blocks[blocks]]
+        titles = ['RF', 'M', 'P', 'S']
 
-      fig, ax = plt.subplots(4, 1, figsize=figsize)
-      for i, objects in enumerate(discrete_blocks):
-        for j, obj in enumerate(objects):
-          if titles[j] == 'RF':
-            for t, amp in obj:
-              ax[j].plot(t, np.real(amp), label='Real', color='b')
-              ax[j].plot(t, np.imag(amp), label='Imaginary', color='r')
-          else:
-            for t, amp in obj:
-              ax[j].plot(t, amp, color='b')
-          ax[j].set_ylabel(titles[j])
+        if blocks is None:  # Plot all
+            discrete_blocks = [block._discrete_objects() for block in self.blocks]
+            extents = [block.time_extent for block in self.blocks]
+        else:               # Plot selected blocks
+            discrete_blocks = [block._discrete_objects() for block in self.blocks[blocks]]
+            extents = [block.time_extent for block in self.blocks[blocks]]
 
-        # Add vertical lines for block extents
-        [ax[k].axvline(extents[i][0].m, color=mcolors.CSS4_COLORS['pink'], linestyle=':') for k in range(4)]
-        [ax[k].axvline(extents[i][1].m, color=mcolors.CSS4_COLORS['pink'], linestyle='--') for k in range(4)]
+        # Create subplots (NO sharey, NO sharex → we sync manually)
+        fig, ax = plt.subplots(4, 1, figsize=figsize)
+        ax = np.asarray(ax)
 
-      # Add horizontal lines at zero
-      [ax[k].axhline(0, color=mcolors.CSS4_COLORS['gray'], linestyle='--') for k in range(4)]
+        def on_xlims_change(event_ax):
+          """Propagate x-limits from the modified axes."""
+          if getattr(fig, "_syncing", False):
+              return
+          fig._syncing = True
+          new_xlim = event_ax.get_xlim()
+          for other_ax in ax:
+              if other_ax is not event_ax:
+                  other_ax.set_xlim(new_xlim)
+          fig.canvas.draw_idle()
+          fig._syncing = False
 
-      # Set x- and y-limits
-      [ax[k].set_xlim([extents[0][0].m, extents[-1][1].m]) for k in range(4)]
+        # Attach callback only for x-axis
+        for a in ax:
+          a.callbacks.connect("xlim_changed", on_xlims_change)
 
-      ax[0].legend(['Real', 'Imaginary'], loc='upper right')
-      ax[-1].set_xlabel('Time (ms)')
-      if tight_layout:
-        plt.tight_layout()
-      if export_to is not None:
-        plt.savefig(export_to, bbox_inches='tight')
-      plt.show()
+        # -------- PLOTTING -------- #
+        for i, objects in enumerate(discrete_blocks):
+            for j, obj in enumerate(objects):
+                if titles[j] == 'RF':
+                    for t, amp in obj:
+                        ax[j].plot(t, np.real(amp), color='b')
+                        ax[j].plot(t, np.imag(amp), color='r')
+                else:
+                    for t, amp in obj:
+                        ax[j].plot(t, amp, color='b')
+                ax[j].set_ylabel(titles[j])
 
-    # Synchronize all processes
+            # Vertical block extent lines
+            for k in range(4):
+                ax[k].axvline(extents[i][0].m, color=mcolors.CSS4_COLORS['pink'], linestyle=':')
+                ax[k].axvline(extents[i][1].m, color=mcolors.CSS4_COLORS['pink'], linestyle='--')
+
+        # Horizontal zero lines
+        for k in range(4):
+            ax[k].axhline(0, color=mcolors.CSS4_COLORS['gray'], linestyle='--')
+
+        # Initial x-limits
+        for k in range(4):
+            ax[k].set_xlim([extents[0][0].m, extents[-1][1].m])
+
+        # Labels
+        ax[0].legend(['Real', 'Imaginary'], loc='upper right')
+        ax[-1].set_xlabel('Time (ms)')
+
+        if tight_layout:
+            plt.tight_layout()
+
+        if export_to is not None:
+            plt.savefig(export_to, bbox_inches='tight')
+
+        plt.show()
+
     MPI_comm.Barrier()
 
 
@@ -282,7 +348,8 @@ class BlochSolver:
                delta_B: np.ndarray | float = 0.0,
                pod_trajectory: POD | None = None,
                initial_Mxy: np.ndarray | float = 0.0,
-               initial_Mz: np.ndarray | float = None):
+               initial_Mz: np.ndarray | float = None,
+               perfect_spoiling: bool = True):
     ones = np.ones((phantom.local_nodes.shape[0], 1), dtype=np.float32)
     self.sequence = sequence
     self.scanner = scanner
@@ -294,6 +361,7 @@ class BlochSolver:
     self.initial_Mxy = initial_Mxy * ones.astype(np.complex64)
     self.initial_Mz = initial_Mz * ones if initial_Mz is not None else M0 * ones
     self.pod_trajectory = pod_trajectory
+    self.perfect_spoiling = perfect_spoiling
 
   def solve(self, start: int = 0, end: int = None):
     # Current machine time
@@ -342,29 +410,87 @@ class BlochSolver:
       # Precompute RF and gradients
       rf_pulses = np.zeros((discrete_times.shape[0], 1), dtype=np.complex64)
       gradients = np.zeros((discrete_times.shape[0], 3), dtype=np.float32)
-      rf, G = block(discrete_times)
+      rf, G, adc_mask = block(discrete_times)
       rf_pulses[:, 0] = rf
       gradients[:, 0] = G[0]
       gradients[:, 1] = G[1]
       gradients[:, 2] = G[2]
 
-      # Indicator array
+# Indicator array
       regime_idx = np.abs(rf_pulses) != 0.0
 
       # Solve
-      Mxy_, Mz_ = solve_mri(x, T1, T2, self.delta_B, self.M0, gamma, rf_pulses, gradients, dt, regime_idx, self.initial_Mxy, self.initial_Mz, self.pod_trajectory)
+      if block._spoiler is True:
+          # Build multi-isochromats quickly via vectorization
+          K = 25
+          elem_size = self.phantom.global_elem_size.min()
+          (x_big, T1_big, T2_big,
+          deltaB_big, Mxy_big, Mz_big) = create_multi_isochromats(
+              x, T1, T2,
+              self.delta_B,
+              self.initial_Mxy,
+              self.initial_Mz,
+              K=K,
+              pos_jitter=elem_size
+          )
+
+          # Solve for the expanded mesh
+          Mxy_hist, Mz_hist = solve_mri(
+              x_big, T1_big, T2_big, deltaB_big, self.M0, gamma, 
+              rf_pulses, gradients, dt, regime_idx, Mxy_big, Mz_big, 
+              self.pod_trajectory
+          )
+
+          # if MPI_rank == 0:
+          #   idx = 0
+          #   plot_multi_isochromat_dephasing(
+          #       idx,
+          #       x_big,
+          #       Mxy_big,
+          #       Mxy_hist,
+          #       K,
+          #       x_original=x,
+          #       elem_radius=elem_size,
+          #       t_index=-1,
+          #       show_positions=True,
+          #       title_prefix="Isochromat Dephasing")
+
+          # Collapse back to the FE resolution using only the final time step
+          Mxy_, Mz_ = collapse_isochromats(
+              Mxy_hist[:, -1],
+              Mz_hist[:, -1],
+              K=K,
+              mode="mean"
+          )
+          
+          # Reshape to keep consistency with solve_mri's usual 2D return format 
+          # so the downstream assignment Mxy[:, i] = Mxy_[:, -1] still works.
+          Mxy_ = Mxy_.reshape(-1, 1)
+          Mz_ = Mz_.reshape(-1, 1)
+          
+      else:
+          Mxy_, Mz_ = solve_mri(
+              x, T1, T2, self.delta_B, self.M0, gamma, 
+              rf_pulses, gradients, dt, regime_idx, 
+              self.initial_Mxy, self.initial_Mz, 
+              self.pod_trajectory
+          )
 
       # Update magnetizations
       Mxy[:, i] = Mxy_[:, -1]
       Mz[:, i]  = Mz_[:, -1]
 
       # Update the initial magnetization for the next block
-      # TODO: I'm not sure if this is correct, it should be checked.
       if block.empty is True:
         self.initial_Mxy[:,0] = Mxy_[:, -1]
       else:
-        # This is done because gradient or RF spoiling cannot be applied on coarse meshes. Therefore, we need to artificially spoil the magnetization.
-        self.initial_Mxy[:,0] = 0*Mxy_[:, -1]
+        # TODO: verify if there is a better way to know beforehand if the sequence will contain spoilers
+        if self.perfect_spoiling is True:
+          # This is done because gradient or RF spoiling cannot be applied on coarse meshes. Therefore, we need to artificially spoil the magnetization.
+          self.initial_Mxy[:,0] = 0.0
+        else:
+          self.initial_Mxy[:,0] = Mxy_[:, -1]
+
       self.initial_Mz[:,0] = Mz_[:, -1]
 
     # Print elapsed time
@@ -378,3 +504,166 @@ class BlochSolver:
     MPI_comm.Barrier()
 
     return Mxy[:, store_indices], Mz[:, store_indices]
+
+
+def create_multi_isochromats(x, T1, T2, delta_B, Mxy0, Mz0, K=100, pos_jitter=0.2e-3):
+    # np.repeat duplicates each row K times sequentially.
+    x_big      = np.repeat(x, K, axis=0)
+    T1_big     = np.repeat(T1, K, axis=0)
+    T2_big     = np.repeat(T2, K, axis=0)
+    deltaB_big = np.repeat(delta_B, K, axis=0)
+    Mxy_big    = np.repeat(Mxy0, K, axis=0)
+    Mz_big     = np.repeat(Mz0, K, axis=0)
+
+    # Generate jitter for all sub-isochromats at once and add to positions
+    N, dim = x.shape
+    radius = pos_jitter * 0.5
+    
+    # Ensure the jitter matches the precision of your input mesh (e.g., float32)
+    jitter = (radius * np.random.randn(N * K, dim)).astype(x.dtype)
+    x_big += jitter
+
+    return x_big, T1_big, T2_big, deltaB_big, Mxy_big, Mz_big
+
+
+def collapse_isochromats(Mxy_big, Mz_big, K, mode="mean"):
+    Mxy_big = np.asarray(Mxy_big)
+    Mz_big  = np.asarray(Mz_big)
+
+    if Mxy_big.ndim == 1:
+        Mxy_big = Mxy_big.reshape(-1, 1)
+    if Mz_big.ndim == 1:
+        Mz_big = Mz_big.reshape(-1, 1)
+
+    N_big = Mxy_big.shape[0]
+    N = N_big // K
+
+    # Reshape arrays to isolate the K isochromats for each node
+    # Shapes become (N, K, 1)
+    Mxy_reshaped = Mxy_big.reshape(N, K, -1)
+    Mz_reshaped  = Mz_big.reshape(N, K, -1)
+
+    # Compute mean or sum across the K axis (axis=1)
+    if mode == "mean":
+        Mxy_out = np.mean(Mxy_reshaped, axis=1)
+        Mz_out  = np.mean(Mz_reshaped, axis=1)
+    else:
+        Mxy_out = np.sum(Mxy_reshaped, axis=1)
+        Mz_out  = np.sum(Mz_reshaped, axis=1)
+
+    return Mxy_out, Mz_out
+
+
+def plot_multi_isochromat_dephasing(
+        idx,
+        x_big,
+        Mxy_big,
+        Mxy_hist,
+        K,
+        x_original=None,
+        elem_radius=None,
+        t_index=None,
+        show_positions=True,
+        title_prefix="Isochromat Dephasing"):
+    """
+    Visualizes the K isochromats from original FE node idx in the complex plane,
+    together with the original node and element radius.
+
+    Parameters
+    ----------
+    idx : int
+        FE node index to inspect.
+    x_big : array (N_big, dim)
+        Enlarged coordinates from create_multi_isochromats().
+    Mxy_big : array (N_big, 1)
+        Initial transverse magnetization.
+    Mxy_hist : array (N_big, n_time)
+        Time-history of Mxy for all isochromats (complex).
+    K : int
+        Number of sub-isochromats per original node.
+    x_original : array (N, dim), optional
+        Original node coordinates. Only used for plotting reference.
+    elem_radius : float, optional
+        Radius for element visualization around original node.
+    """
+
+    # ------------ Determine which rows in x_big / Mxy_big correspond to node idx -----------
+    start = idx * K
+    end   = start + K
+    iso_slice = slice(start, end)
+
+    # ------------ Pick the magnetizations to plot -----------
+    if t_index is None:
+        M = Mxy_big[iso_slice, 0]
+        title_t = "(initial)"
+    else:
+        if t_index >= Mxy_hist.shape[1]:
+            raise IndexError(
+                f"t_index={t_index} exceeds number of time points {Mxy_hist.shape[1]}"
+            )
+        M = Mxy_hist[iso_slice, t_index]
+        title_t = f"(t index = {t_index})"
+
+    # ------------ Prepare complex-plane coordinates -----------
+    Re = np.real(M)
+    Im = np.imag(M)
+
+    # ------------ Plot -----------
+    fig = plt.figure(figsize=(11, 5))
+
+    # --- complex plane ---
+    ax1 = fig.add_subplot(1, 2 if show_positions else 1, 1)
+    ax1.scatter(Re, Im, s=60, c='blue', label='Isochromats')
+
+    # Draw mean magnetization vector (spoiled result)
+    M_mean = np.mean(M)
+    ax1.scatter(np.real(M_mean), np.imag(M_mean), 
+                s=120, c='red', marker='x', label='Mean Mxy')
+
+    ax1.arrow(0, 0, np.real(M_mean), np.imag(M_mean),
+              head_width=0.02 * np.max(np.abs(Re + 1j * Im)),
+              color='red', linewidth=1.8)
+
+    ax1.axhline(0, color='black', linewidth=0.5)
+    ax1.axvline(0, color='black', linewidth=0.5)
+    ax1.set_xlabel("Real(Mxy)")
+    ax1.set_ylabel("Imag(Mxy)")
+    ax1.set_aspect("equal", "box")
+    ax1.set_title(f"{title_prefix} for node {idx} {title_t}\nComplex plane")
+    ax1.legend()
+
+    # arrows for each isochromat
+    rmax = np.max(np.abs(Re + 1j*Im))
+    for r, im in zip(Re, Im):
+        ax1.arrow(0, 0, r, im, head_width=0.02*rmax,
+                  length_includes_head=True, color="gray", alpha=0.4)
+
+    # --- jittered positions (2nd subplot) ---
+    if show_positions:
+        x_node = x_big[iso_slice]  # (K, dim)
+        ax2 = fig.add_subplot(1, 2, 2)
+
+        # plot jittered isochromats
+        ax2.scatter(x_node[:, 0], x_node[:, 1], c='blue', s=50, label="Isochromats")
+
+        # plot original node
+        if x_original is not None:
+            x0 = x_original[idx]
+            ax2.scatter([x0[0]], [x0[1]], c='black', s=80, marker='*', label="Original node")
+
+            # draw element radius as circle
+            if elem_radius is not None:
+                circle = Circle((x0[0], x0[1]), elem_radius,
+                                fill=False, linestyle='--', edgecolor='red', linewidth=1.2)
+                ax2.add_patch(circle)
+                ax2.set_xlim(x0[0] - elem_radius*1.5, x0[0] + elem_radius*1.5)
+                ax2.set_ylim(x0[1] - elem_radius*1.5, x0[1] + elem_radius*1.5)
+
+        ax2.set_xlabel("x")
+        ax2.set_ylabel("y")
+        ax2.set_title("Isochromat jittered positions\n(with original node + element radius)")
+        ax2.set_aspect("equal", "box")
+        ax2.legend()
+
+    plt.tight_layout()
+    plt.show()
