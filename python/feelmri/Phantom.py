@@ -385,7 +385,7 @@ class FEMPhantom:
 
     return M
   
-  def set_assembler(self, voxel_size, quadrature_order=1, nodal_approximation=False, lumped=True):
+  def set_assembler(self, voxel_size, lorder=1, horder=1, nodal_approximation=False, lumped=True):
     # TODO: add option to define low order (for small elements) and high order (for large elements) quadrature rules 
     ''' Set assembler for integrals '''
     small = np.where(self.local_elem_size < voxel_size)[0]
@@ -393,7 +393,7 @@ class FEMPhantom:
     print("[Assembler] Rank {:d} has {:d}/{:d} elements with size < {:f}".format(MPI_rank, len(small), len(self.local_elem_size), voxel_size))
     self.assembler = []
     
-    for d in [(small, 1), (large, quadrature_order)]:
+    for d in [(small, lorder), (large, horder)]:
       size, order = d
       if np.size(size) == 0:
         continue
@@ -406,7 +406,7 @@ class FEMPhantom:
       self.nodal_approximation__ = True
 
       # Assemble mass matrix
-      self.M_ = bMassAssemble(self.local_elements[small, :], self.local_nodes, self.cell_type, 'equispaced', 'default', quadrature_order)
+      self.M_ = bMassAssemble(self.local_elements[small, :], self.local_nodes, self.cell_type, 'equispaced', 'default', lorder)
 
       # Make matrix lumped if requested
       if lumped:
@@ -414,7 +414,7 @@ class FEMPhantom:
         self.M_ = lil_matrix(self.M_.shape, dtype=self.M_.dtype)
         self.M_.setdiag(diag)
         
-      # FIX 2: Convert to CSR so Pybind11 can map it cleanly to Eigen::SparseMatrix in C++
+      # Convert to CSR so Pybind11 can map it cleanly to Eigen::SparseMatrix in C++
       self.M_ = self.M_.tocsr()
   
   def update_magnetization(self, Mxy):
@@ -423,6 +423,7 @@ class FEMPhantom:
         a.update_nodal_magnetization(self.M_, Mxy)
       else:
         a.update_magnetization(Mxy)
+        a.update_full_magnetization(Mxy)
 
   def precompute_trajectory(self, pod):
     return [a.precompute_trajectory(pod) for a in self.assembler]
@@ -452,6 +453,13 @@ class FEMPhantom:
       return sum([a.signal(kspace_points, kspace_times, p) for (a, p) in zip(self.assembler, pod)])
     else:
       return sum([a.signal(kspace_points, kspace_times, pod) for a in self.assembler])  
+
+  def signal_full(self, kspace_points, kspace_times, pod=None):
+    # Added isinstance check to prevent crashes when passing precomputed lists
+    if isinstance(pod, list):
+      return sum([a.signal_full(kspace_points, kspace_times, p) for (a, p) in zip(self.assembler, pod)])
+    else:
+      return sum([a.signal_full(kspace_points, kspace_times, pod) for a in self.assembler])  
 
   def signal_nodal(self, kspace_points, kspace_times, pod=None):
     """Simulate MRI k-space signal using ultra-fast nodal mass matrix integration."""
