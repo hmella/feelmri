@@ -210,7 +210,7 @@ public:
         
         T t_old = T(-1);
         T t_last_geom_update = T(-1000.0); 
-        const T GEOM_UPDATE_TOL = T(1.0); // Minimum time delta (ms) to trigger a mesh geometry update
+        const T GEOM_UPDATE_TOL = T(1.0e-3); // Minimum time delta (ms) to trigger a mesh geometry update
         
         const bool has_traj = !pod_trajectory.is_none();
         py::function pod_func;
@@ -326,7 +326,7 @@ public:
         
         T t_old = T(-1);
         T t_last_geom_update = T(-1000.0); 
-        const T GEOM_UPDATE_TOL = T(1.0); // Minimum time delta (ms) to trigger a mesh geometry update
+        const T GEOM_UPDATE_TOL = T(1.0e-3); // Minimum time delta (ms) to trigger a mesh geometry update
         
         const bool has_traj = !pod_trajectory.is_none();
         py::function pod_func;
@@ -422,7 +422,7 @@ public:
     // =========================================================================
     // Computes the signal by evaluating physics strictly at the integration 
     // (quadrature) points to perfectly maintain high-frequency spatial dispersion.    
-    Tensor4CR full_signal(const std::vector<Tensor3> &kloc, const Tensor3 &t, 
+    Tensor4CR signal_full(const std::vector<Tensor3> &kloc, const Tensor3 &t,
                         const py::object &pod_trajectory = py::none())
     {
         const C i1(T(0), T(1));
@@ -438,7 +438,7 @@ public:
         
         T t_old = T(-1);
         T t_last_geom_update = T(-1000.0); 
-        const T GEOM_UPDATE_TOL = T(1.0);
+        const T GEOM_UPDATE_TOL = T(1.0e-3);
         
         const bool has_traj = !pod_trajectory.is_none();
         py::function pod_func;
@@ -551,7 +551,7 @@ public:
         
         T t_old = T(-1);
         T t_last_geom_update = T(-1000.0); 
-        const T GEOM_UPDATE_TOL = T(1.0);
+        const T GEOM_UPDATE_TOL = T(1.0e-3);
         
         const bool has_traj = !pod_trajectory.is_none();
         py::function pod_func;
@@ -734,7 +734,7 @@ PYBIND11_MODULE(MRIAssemble, m)
              py::arg("traj") = py::none(),
              "Simulate MRI k-space signal with optional moving mesh trajectory.")
 
-        .def("full_signal", &Assembler::full_signal,
+        .def("signal_full", &Assembler::signal_full,
              py::arg("kloc"), 
              py::arg("t"),
              py::arg("traj") = py::none(),
