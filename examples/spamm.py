@@ -194,7 +194,7 @@ if __name__ == '__main__':
 
   # Set assembler for MRI signal evaluation using FEM
   vxsz = planning.FOV.m_as('m')/np.array(parameters.Imaging.RES)
-  phantom.set_assembler(voxel_size=vxsz[0], quadrature_order=6, nodal_approximation=True, lumped=False)
+  phantom.set_assembler(voxel_size=vxsz[0], horder=6, nodal_approximation=True, lumped=False)
 
   # Set static fields
   phantom.set_static_fields(T2=T2.m_as('ms'), phi_dB0=delta_omega0)
