@@ -1,4 +1,5 @@
 import os
+import time
 
 os.environ["OPENBLAS_NUM_THREADS"] = "1" # export OPENBLAS_NUM_THREADS=1
 from pathlib import Path
@@ -17,11 +18,21 @@ from feelmri.Phantom import FEMPhantom
 from feelmri.Plotter import MRIPlotter
 from feelmri.Recon import CartesianRecon
 
+# Enable fast mode for testing if the environment variable is set
+FAST_MODE = os.getenv("FEELMRI_FAST_TEST", "0") == "1"
+
+if FAST_MODE:
+    Nb_frames = 1
+    dummy_pulses = 1
+    resolution = [70, 70, 1]
+    linespershot = 70
+else:
+    Nb_frames = -1
+    dummy_pulses = 80
 
 # Field inhomogeneity
 def spatial(x):
     return x[:,0] + x[:,1] + x[:,2]
-
 
 if __name__ == '__main__':
 
@@ -33,6 +44,11 @@ if __name__ == '__main__':
 
   # Import imaging parameters
   parameters = ParameterHandler(script_path/'parameters/water_and_fat.yaml')
+
+  # Make resolution lower for CI testing
+  if FAST_MODE:
+    parameters.Imaging.RES = np.array(resolution)
+    parameters.Imaging.LinesPerShot = linespershot
 
   # Import PVSM file to get the FOV, LOC and MPS orientation
   planning = PVSMParser(script_path/parameters.Formatting.planning,
@@ -183,6 +199,7 @@ if __name__ == '__main__':
   time_spacing = parameters.Imaging.TR - (imaging.time_extent[1] - sp.rf.ref)
 
   # Generate k-space data for chemical specie, shot and slice
+  START_TIME = time.time()
   for s in range(slices):
     for i, sh in enumerate(traj.shots):     
 
@@ -205,8 +222,15 @@ if __name__ == '__main__':
         phantoms[cs].update_magnetization(Mxy)
 
         # Generate 4D flow image
+        # tmp = phantoms[cs].signal_sum(kspace_points, kspace_times)
+        # tmp = phantoms[cs].signal_nodal(kspace_points, kspace_times)
+        # tmp = phantoms[cs].signal(kspace_points, kspace_times)
+        # tmp = phantoms[cs].signal_full(kspace_points, kspace_times)
         tmp = phantoms[cs].mri_signal(kspace_points, kspace_times)
         K[:,sh,s,:,0] += tmp.swapaxes(0, 1)[:,:,0]
+
+  END_TIME = time.time()
+  print("Execution time: {:.8f}".format(END_TIME - START_TIME))
 
   # Gather results
   K = add_cpx_noise(gather_data(K), relative_std=1e-3)

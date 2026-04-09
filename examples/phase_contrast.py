@@ -24,6 +24,7 @@ FAST_MODE = os.getenv("FEELMRI_FAST_TEST", "0") == "1"
 if FAST_MODE:
     Nb_frames = 1
     dummy_pulses = 1
+    resolution = [30, 15, 1]
 else:
     Nb_frames = -1
     dummy_pulses = 80
@@ -35,6 +36,10 @@ if __name__ == '__main__':
 
   # Import imaging parameters
   parameters = ParameterHandler(script_path/'parameters/phase_contrast.yaml')
+
+  # Make resolution lower for CI testing
+  if FAST_MODE:
+    parameters.Imaging.RES = np.array(resolution)
 
   # Import PVSM file to get the FOV, LOC and MPS orientation
   planning = PVSMParser(script_path/parameters.Formatting.planning,
