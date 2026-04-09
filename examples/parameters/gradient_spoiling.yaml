@@ -20,5 +20,5 @@ Formatting:
   units: "m"
 
 Phantom:
-  T2star: {value: 1e+10, unit: "ms"}
-  T1: {value: 1e+10, unit: "ms"} 
+  T2star: {value: 1.0e+10, unit: "ms"}
+  T1: {value: 1.0e+10, unit: "ms"} 
