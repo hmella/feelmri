@@ -172,7 +172,7 @@ else()
 
     FetchContent_GetProperties(Eigen)
     if (NOT eigen_POPULATED)
-        message(STATUS "Fetching Eigen3 (3.4.0) from GitLab...")
+        message(STATUS "Fetching Eigen3 (5.0.1) from GitLab...")
         FetchContent_Populate(Eigen)
     endif()
 
