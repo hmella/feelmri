@@ -179,8 +179,8 @@ Eigen::SparseMatrix<T> basixMassAssemble(
     const Eigen::MatrixXi& elems,
     const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& nodes,
     const std::string& meshio_type,
-    const std::string& /*quadrature_variant*/,
-    const std::string& /*quadrature_rule*/,
+    const std::string& quadrature_variant,
+    const std::string& quadrature_rule,
     const int quadrature_degree)
 {
     const int nb_elems   = elems.rows();
