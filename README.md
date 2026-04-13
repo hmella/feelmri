@@ -80,11 +80,24 @@ It can handle complex physical phenomena governed by partial differential equati
 You’ll need some basic system libraries and build tools. On Ubuntu/Debian:
 
 ```bash
-sudo apt-get update && sudo apt-get install -y --no-install-recommends \
+apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
-    python3 python3-dev python3-pip python3-tk \
-    cmake ninja-build git libopenmpi-dev
+    python3 \
+    python3-dev \
+    python3-pip \
+    python3-tk \
+    cmake \
+    ninja-build \
+    git \
+    libopenmpi-dev \
+    screen \
+    nano \
+    libblas-dev \
+    liblapack-dev \
+    ccache
 ```
+
+These dependencies can also be installed via ```pip`` by setting up the variable ```INSTALL_SYSTEM_DEPS``` as described below.
 
 ### 2️⃣ Clone the Repository
 
@@ -98,6 +111,11 @@ cd feelmri
 ```bash
 pip install .
 ```
+
+System dependencies can also be installed by setting the ```cmake``` argument ```INSTALL_SYSTEM_DEPS``` as:
+```bash
+CMAKE_ARGS="-DINSTALL_SYSTEM_DEPS=ON" pip3 install .
+``` 
 
 Verify installation ✅:
 
