@@ -1,11 +1,7 @@
-# Download base image ubuntu 18.04
+# Download base image ubuntu 22.04
 FROM ubuntu:22.04 AS base
 ARG DEBIAN_FRONTEND=noninteractive
 LABEL org.opencontainers.image.authors="hernan.mella@pucv.cl"
-
-# Set environment variable to allow matplotlib to run in a docker container
-ENV MPLCONFIGDIR="./tmp/matplotlib"
-ENV OMPI_MCA_btl_vader_single_copy_mechanism=none
 
 # Create new user
 ARG UID=1000
@@ -19,43 +15,25 @@ WORKDIR /home/feelmri
 USER root
 
 # Update Ubuntu Software repository
-# RUN apt -qq update && \
-#     apt -y --with-new-pkgs \
-#         -o Dpkg::Options::="--force-confold" upgrade
 RUN apt-get update && apt-get install -y apt-transport-https && apt-get install -y sudo && apt-get -y upgrade
 
 # Install FEelMRI dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    python3 \
-    python3-dev \
-    python3-pip \
-    python3-tk \
-    cmake \
-    ninja-build \
-    git \
-    libopenmpi-dev \
-    screen \
-    nano \
- && rm -rf /var/lib/apt/lists/*
-
-# # Basix system dependencies (blas/lapack)
-# RUN apt-get update && apt-get install -y --no-install-recommends \
-#     build-essential cmake ninja-build git \
-#     libopenblas-dev liblapack-dev gfortran \
-#     python3 python3-dev python3-pip \
-#     && rm -rf /var/lib/apt/lists/*
-
-# # Build & install Basix C++
-# ARG BASIX_REF=main
-# RUN git clone --depth 1 --branch ${BASIX_REF} https://github.com/FEniCS/basix.git /tmp/basix && \
-#     cmake -S /tmp/basix/cpp -B /tmp/basix/build \
-#       -DCMAKE_BUILD_TYPE=Release \
-#       -DCMAKE_INSTALL_PREFIX=/usr/local \
-#       -GNinja && \
-#     cmake --build /tmp/basix/build && \
-#     cmake --install /tmp/basix/build && \
-#     rm -rf /tmp/basix
+      build-essential \
+      python3 \
+      python3-dev \
+      python3-pip \
+      python3-tk \
+      cmake \
+      ninja-build \
+      git \
+      libopenmpi-dev \
+      screen \
+      nano \
+      libblas-dev \
+      liblapack-dev \
+      ccache
+ RUN rm -rf /var/lib/apt/lists/*
 
 # Copy FEelMRI source code to temporary build directory
 RUN mkdir /tmp/feelmri_build/
@@ -75,6 +53,3 @@ RUN rm -rf /tmp/feelmri_build/
 # Change default user
 USER feelmri
 WORKDIR /home/feelmri
-
-# To allow matplotlib to run in a docker container
-RUN export 
