@@ -65,7 +65,7 @@ if __name__ == '__main__':
     u[..., fr] = phantom.to_submesh(phantom.point_data['displacement'] @ planning.MPS, global_mesh=True)
 
   # Create POD for tissue displacements
-  dt = parameters.Imaging.TimeSpacing.to('ms')
+  dt = parameters.Phantom.TimeSpacing.to('ms')
   u_times = np.linspace(0, (phantom.Nfr-1)*dt, phantom.Nfr, dtype=np.float32)
   pod_trajectory = POD(times=u_times.m_as('ms'),
                       data=u,
@@ -83,8 +83,10 @@ if __name__ == '__main__':
       return x[:,0] + x[:,1] + x[:,2]
   delta_B0 = spatial(phantom.local_nodes)
   delta_B0 /= np.abs(spatial(phantom.global_nodes).flatten()).max()
-  delta_B0 *= 1.5 * 1e-6    # 1.5 ppm of the main magnetic field
-  delta_omega0 = 2.0 * np.pi * scanner.gammabar.m_as('1/ms/T') * delta_B0
+  delta_B0 *= scanner.field_strength * 1e-6 # 1.5 ppm of the main magnetic field
+
+  # Phase shift in rad/s
+  delta_omega0 = (2.0 * np.pi * scanner.gammabar * delta_B0).to('rad/ms')
 
   # Slice profile
   # The slice profile prepulse is calculated based on a reference RF pulse with
@@ -103,7 +105,7 @@ if __name__ == '__main__':
   # sp.optimize(frac_start=0.7, frac_end=0.8, N=100, profile_samples=100)
 
   # SPAMM magnetization
-  Nb_frames = phantom.Nfr if not FAST_MODE else 1
+  Nb_frames = np.floor(u_times.m_as('ms').max()/parameters.Imaging.TimeSpacing.m_as('ms')).astype(np.int32) if not FAST_MODE else 1
   Mxy_spamm = np.zeros((phantom.local_nodes.shape[0], Nb_frames, enc.nb_directions), dtype=np.complex64)
 
   # Simulate the SPAMM preparation block for each encoding direction
@@ -153,7 +155,7 @@ if __name__ == '__main__':
                          M0=1e+9, 
                          T1=parameters.Phantom.T1, 
                          T2=parameters.Phantom.T2, 
-                         delta_B=delta_B0.reshape((-1, 1)),
+                         delta_B=delta_B0.m_as('mT').reshape((-1, 1)),
                          pod_trajectory=pod_trajectory)
 
     # Solve for x and y directions
@@ -194,15 +196,15 @@ if __name__ == '__main__':
 
   # Set assembler for MRI signal evaluation using FEM
   vxsz = planning.FOV.m_as('m')/np.array(parameters.Imaging.RES)
-  phantom.set_assembler(voxel_size=vxsz[0], horder=6, nodal_approximation=True, lumped=False)
+  phantom.set_assembler(voxel_size=vxsz[0], lorder=3, nodal_approximation=True, lumped=False)
 
   # Set static fields
-  phantom.set_static_fields(T2=T2.m_as('ms'), phi_dB0=delta_omega0)
+  phantom.set_static_fields(T2=T2.m_as('ms'), phi_dB0=delta_omega0.m_as('rad/ms'))
 
   # Iterate over cardiac phases
   kspace_points = traj.points
   kspace_times = traj.times.m_as('ms') - traj.t_start.m_as('ms')
-  for fr in [0]: #range(Nb_frames):
+  for fr in range(Nb_frames):
 
     # Print progress
     MPI_print("Generating frame {:d}/{:d}".format(fr+1, Nb_frames))

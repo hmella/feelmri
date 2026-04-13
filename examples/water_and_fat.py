@@ -222,10 +222,6 @@ if __name__ == '__main__':
         phantoms[cs].update_magnetization(Mxy)
 
         # Generate 4D flow image
-        # tmp = phantoms[cs].signal_sum(kspace_points, kspace_times)
-        # tmp = phantoms[cs].signal_nodal(kspace_points, kspace_times)
-        # tmp = phantoms[cs].signal(kspace_points, kspace_times)
-        # tmp = phantoms[cs].signal_full(kspace_points, kspace_times)
         tmp = phantoms[cs].mri_signal(kspace_points, kspace_times)
         K[:,sh,s,:,0] += tmp.swapaxes(0, 1)[:,:,0]
 

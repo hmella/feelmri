@@ -1,11 +1,8 @@
 import os
 
 os.environ["OPENBLAS_NUM_THREADS"] = "1" # export OPENBLAS_NUM_THREADS=1
-import pickle
-import time
 from pathlib import Path
 
-import numpy as np
 from pint import Quantity as Q_
 
 from feelmri.Bloch import Sequence, SequenceBlock
