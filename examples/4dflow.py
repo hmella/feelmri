@@ -227,7 +227,7 @@ if __name__ == '__main__':
 
   # Set assembler for MRI signal evaluation using FEM
   vxsz = planning.FOV.m_as('m')/np.array(pars.Imaging.RECON_RES)
-  phantom.set_assembler(voxel_size=vxsz[0], lorder=1, horder=6, nodal_approximation=True, lumped=True)
+  phantom.set_assembler(voxel_size=100*vxsz[0], lorder=1, horder=6, nodal_approximation=True, lumped=True)
 
   # Set static fields
   phantom.set_static_fields(T2=T2star, phi_dB0=delta_omega)
@@ -245,7 +245,7 @@ if __name__ == '__main__':
       phantom.update_magnetization(Mxy_PC[:, fr, :])
 
       # Generate 4D flow image
-      K[:,:,:,:,fr] = phantom.mri_signal(traj.points, traj.times.m_as('ms'))
+      K[:,:,:,:,fr] = phantom.mri_signal(traj.points, traj.times.m_as('ms'), pod_velocity)
 
   # Gather results
   K = gather_data(K)
