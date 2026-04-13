@@ -114,7 +114,7 @@ pip install .
 
 System dependencies can also be installed by setting the ```cmake``` argument ```INSTALL_SYSTEM_DEPS``` as:
 ```bash
-CMAKE_ARGS="-DINSTALL_SYSTEM_DEPS=ON" pip3 install .
+CMAKE_ARGS="-DINSTALL_SYSTEM_DEPS=ON" pip install .
 ``` 
 
 Verify installation ✅:
