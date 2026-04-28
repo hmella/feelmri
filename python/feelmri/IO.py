@@ -12,74 +12,77 @@ from feelmri.MPIUtilities import MPI_comm, MPI_print, MPI_rank
 
 class VTIFile:
   def __init__(self, filename: str = 'image.pvd', 
-           origin: np.ndarray = np.zeros([3,]), 
-           spacing: np.ndarray = np.ones([3,]), 
-           direction: np.ndarray = np.eye(3).flatten(), 
-           nbFrames: int = 1, 
-           dt: float = 1):
-      if isinstance(filename, str):
-        self.filename = Path(filename) if filename.endswith('.pvd') else Path(filename+'.pvd')
-      elif isinstance(filename, Path):
-        self.filename = filename if filename.suffix == '.pvd' else filename.with_suffix('.pvd')
-      self.origin = origin
-      self.spacing = spacing
-      self.direction = direction
-      self.nbFrames = nbFrames
-      self.dt = dt
+               origin: np.ndarray = np.zeros([3,]), 
+               spacing: np.ndarray = np.ones([3,]), 
+               direction: np.ndarray = np.eye(3).flatten(), 
+               nbFrames: int = 1, 
+               dt: float = 1):
+    if isinstance(filename, str):
+      self.filename = Path(filename) if filename.endswith('.pvd') else Path(filename+'.pvd')
+    elif isinstance(filename, Path):
+      self.filename = filename if filename.suffix == '.pvd' else filename.with_suffix('.pvd')
+    self.origin = origin
+    self.spacing = spacing
+    self.direction = direction
+    self.nbFrames = nbFrames
+    self.dt = dt
 
   def write(self, cellData=None, pointData=None):
-      # Guard: Only Rank 0 talks to the disk
-      if MPI_rank == 0:
-        try:
-          self.filename.parent.mkdir(parents=True, exist_ok=True)
-          pvd = VtkGroup(str(self.filename.parent / self.filename.stem))
+    # Guard: Only Rank 0 talks to the disk
+    if MPI_rank == 0:
+      try:
+        self.filename.parent.mkdir(parents=True, exist_ok=True)
+        pvd = VtkGroup(str(self.filename.parent / self.filename.stem))
 
-          if self.nbFrames > 1:
-              print("Writing vti files...", flush=True)
-              for fr in range(self.nbFrames):
-                print(f"  Writing frame {fr:d}", flush=True)
+        if self.nbFrames > 1:
+          print("Writing vti files...", flush=True)
+          for fr in range(self.nbFrames):
+            print(f"  Writing frame {fr:d}", flush=True)
 
-                cdfr, ptfr = None, None
-                if cellData is not None:
-                  cdfr = {k: self.make_contiguous(v[..., fr]) for k, v in cellData.items()}
-                if pointData is not None:
-                  ptfr = {k: self.make_contiguous(v[..., fr]) for k, v in pointData.items()}   
+            cdfr, ptfr = None, None
+            if cellData is not None:
+              cdfr = {k: self.make_contiguous(v[..., fr]) for k, v in cellData.items()}
+            if pointData is not None:
+              ptfr = {k: self.make_contiguous(v[..., fr]) for k, v in pointData.items()}   
 
-                frame_path = str(self.filename.parent / f"{self.filename.stem}_{fr:04d}")
+            frame_path = str(self.filename.parent / f"{self.filename.stem}_{fr:04d}")
 
-                # Simplify the imageToVTK call logic
-                imageToVTK(frame_path, cellData=cdfr, pointData=ptfr, 
+            imageToVTK(frame_path, cellData=cdfr, pointData=ptfr, 
                        origin=self.origin, spacing=self.spacing, direction=self.direction)  
 
-                pvd.addFile(filepath=frame_path+'.vti', sim_time=fr*self.dt)
-              pvd.save()
-          else:
-              print("Writing vti files...", flush=True)
-              cdfr, ptfr = None, None
-              if cellData is not None:
-                cdfr = {k: self.make_contiguous(v) for k, v in cellData.items()}
-              if pointData is not None:
-                ptfr = {k: self.make_contiguous(v) for k, v in pointData.items()}
+            pvd.addFile(filepath=frame_path+'.vti', sim_time=fr*self.dt)
+          pvd.save()
+            
+        else:
+          print("Writing vti files...", flush=True)
+          cdfr, ptfr = None, None
+          
+          if cellData is not None:
+            # Automatically drop the 4th dimension if Nb_frames == 1 but array is 4D
+            cdfr = {k: self.make_contiguous(v[..., 0] if v.ndim == 4 else v) for k, v in cellData.items()}
+          if pointData is not None:
+            # Automatically drop the 4th dimension if Nb_frames == 1 but array is 4D
+            ptfr = {k: self.make_contiguous(v[..., 0] if v.ndim == 4 else v) for k, v in pointData.items()}
 
-              frame_path = str(self.filename.parent / self.filename.stem)
-              imageToVTK(frame_path, cellData=cdfr, pointData=ptfr, 
+          frame_path = str(self.filename.parent / self.filename.stem)
+          imageToVTK(frame_path, cellData=cdfr, pointData=ptfr, 
                      origin=self.origin, spacing=self.spacing, direction=self.direction)
-              
-              pvd.addFile(filepath=frame_path+'.vti', sim_time=0)
-              pvd.save()
-              
-        except Exception as e:
-          # Catch silent crashes and force them to print
-          print(f"\n--- CRITICAL ERROR ON RANK 0 ---\n{traceback.format_exc()}", flush=True)
-          MPI_comm.Abort(1)
+          
+          pvd.addFile(filepath=frame_path+'.vti', sim_time=0)
+          pvd.save()
+            
+      except Exception as e:
+        # Catch silent crashes and force them to print
+        print(f"\n--- CRITICAL ERROR ON RANK 0 ---\n{traceback.format_exc()}", flush=True)
+        MPI_comm.Abort(1)
 
-      # Keep all ranks perfectly synchronized so Rank 1 doesn't race ahead
-      MPI_comm.Barrier()
+    # Keep all ranks perfectly synchronized so Rank 1 doesn't race ahead
+    MPI_comm.Barrier()
 
   def make_contiguous(self, A):
-      # Safely cast to a pure numpy array
-      A_np = np.asarray(A)
-      return np.ascontiguousarray(A_np) if not A_np.flags.c_contiguous else A_np
+    # Safely cast to a pure numpy array (strips Pint units)
+    A_np = np.asarray(A)
+    return np.ascontiguousarray(A_np) if not A_np.flags.c_contiguous else A_np
 
 
 class XDMFFile:
