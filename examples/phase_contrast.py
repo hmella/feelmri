@@ -12,7 +12,7 @@ from feelmri.Bloch import BlochSolver, Sequence, SequenceBlock
 from feelmri.IO import VTIFile
 from feelmri.KSpaceTraj import CartesianStack
 from feelmri.Motion import PODVelocity
-from feelmri.MPIUtilities import MPI_print, MPI_rank, gather_data
+from feelmri.MPIUtilities import MPI_print, gather_data
 from feelmri.MRImaging import SliceProfile, VelocityEncoding
 from feelmri.MRObjects import RF, Gradient, Scanner
 from feelmri.Noise import add_cpx_noise
@@ -108,7 +108,8 @@ if __name__ == '__main__':
     profile_samples=100,
     rf=rf,
     dt=Q_(1e-2, 'ms'), 
-    plot=False, 
+    plot=True,          # show slice selection prepulse
+    solve_profile=True, # estimate and show slice profile 
     bandwidth=Q_(10, 'kHz'))
 
   # Create bipolar gradients
@@ -228,6 +229,7 @@ if __name__ == '__main__':
                         title=['M', '$\\phi_v$ ', '$\\phi_v + \\phi_0$', '$\\phi_0$'], 
                         FOV=planning.FOV.m_as('m'))
   plotter.show()
+  plotter.export_images(script_path/'phase_contrast/')
 
   # Write the velocity field to a VTI file for visualization in Paraview
   spacing = (planning.FOV.m_as('m')/parameters.Imaging.RES).tolist()  

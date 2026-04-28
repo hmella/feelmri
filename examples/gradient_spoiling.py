@@ -7,10 +7,8 @@ import numpy as np
 from pint import Quantity as Q_
 
 from feelmri.Bloch import BlochSolver, Sequence, SequenceBlock
-from feelmri.IO import XDMFFile
 from feelmri.KSpaceTraj import CartesianStack
-from feelmri.Motion import POD, RespiratoryMotion
-from feelmri.MPIUtilities import MPI_print, MPI_rank, gather_data
+from feelmri.MPIUtilities import MPI_print, gather_data
 from feelmri.MRImaging import SliceProfile
 from feelmri.MRObjects import RF, Gradient, Scanner
 from feelmri.Parameters import ParameterHandler, PVSMParser

@@ -20,6 +20,7 @@ EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "examples"
     "gradient_orientation.py",
     "gradient_spoiling.py",
     "phase_contrast.py",
+    "test_all_recon.py",
     "pod.py",
     "pvsm_parameters.py",
     "trajectories.py",    

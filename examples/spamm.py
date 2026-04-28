@@ -9,7 +9,7 @@ from pint import Quantity as Q_
 from feelmri.Bloch import BlochSolver, Sequence, SequenceBlock
 from feelmri.KSpaceTraj import CartesianStack
 from feelmri.Motion import POD
-from feelmri.MPIUtilities import MPI_print, MPI_rank, gather_data
+from feelmri.MPIUtilities import MPI_print, gather_data
 from feelmri.MRImaging import PositionEncoding, SliceProfile
 from feelmri.MRObjects import RF, Gradient, Scanner
 from feelmri.Parameters import ParameterHandler, PVSMParser

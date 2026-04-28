@@ -123,45 +123,6 @@ class SliceProfile:
     else:
       return bandwidth
 
-  def optimize(self, frac_start=1.0, frac_end=2.0, N=10, profile_samples=100):
-    """
-      Optimize the refocusing area fraction for a given number of points.
-    """
-    # Replace profile_samples and plot (temporary)
-    _profile_samples = self.profile_samples
-    _plot = self.plot
-    self.profile_samples = profile_samples
-    self.plot = False
-
-    # Slice positions
-    z_min = self.z0 - 2*self.delta_z
-    z_max = self.z0 + 2*self.delta_z
-    z_arr = np.linspace(z_min, z_max, self.profile_samples)
-
-    # Optimize refocusing area fraction
-    Mx = []
-    My = []
-    area_fracs = np.linspace(frac_start, frac_end, N)
-    for i, frac in enumerate(area_fracs):
-      self.refocusing_area_frac = frac
-      self.interp_profile = self.calculate()
-      Mx.append(np.abs(np.imag(self.interp_profile(z_arr))).max())
-      My.append(np.abs(np.real(self.interp_profile(z_arr))).max())
-      if MPI_rank == 0:
-        print('Iteration {:d} / {:d} - Refocusing area fraction: {:.5f}, Mx/My: {:.4f}'.format(i+1, N, frac, Mx[-1]/My[-1]))
-
-    # Verify which fraction gives the best result
-    idx = np.argmin(Mx)
-    self.refocusing_area_frac = area_fracs[idx]
-    self.interp_profile = self.calculate()
-
-    if MPI_rank == 0:
-      print('Optimal refocusing area fraction: {:.4f} (Mx/My = {:.4f})'.format(self.refocusing_area_frac, Mx[idx]/My[idx]))
-
-    # profile_samples back to original value
-    self.profile_samples = _profile_samples
-    self.plot = _plot
-
   def calculate(self, y0=np.array([0,0,1], dtype=np.float32).reshape((3,))):
     """
     Calculate the slice profile for MRI imaging.
