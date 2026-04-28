@@ -131,6 +131,9 @@ if __name__ == '__main__':
   dummy = imaging.copy()
   dummy.store_magnetization = False
 
+  # Plot the imaging block
+  imaging.plot()
+
   # Generate kspace trajectory
   traj = CartesianStack(FOV=planning.FOV.to('m'),
           t_start=imaging.time_extent[1] - sp.rf.time,
