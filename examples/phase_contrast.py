@@ -230,10 +230,10 @@ if __name__ == '__main__':
   plotter.show()
 
   # Write the velocity field to a VTI file for visualization in Paraview
-  spacing = (traj.FOV.m_as('m')/parameters.Imaging.RES).tolist()  
-  origin = -0.5*traj.FOV.m_as('m')
-  origin  = (traj.MPS_ori@origin + traj.LOC.m_as('m')).tolist()
-  direction = traj.MPS_ori.flatten().tolist()
+  spacing = (planning.FOV.m_as('m')/parameters.Imaging.RES).tolist()  
+  origin = -0.5*planning.FOV.m_as('m')
+  origin  = (planning.MPS@origin + planning.LOC.m_as('m')).tolist()
+  direction = planning.MPS.flatten().tolist()
 
   vti_file = VTIFile(script_path/'phase_contrast/velocity.pvd',
                     origin=origin,
