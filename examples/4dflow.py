@@ -9,7 +9,7 @@ from pint import Quantity as Q_
 from feelmri.Bloch import BlochSolver, Sequence, SequenceBlock
 from feelmri.KSpaceTraj import RadialStack
 from feelmri.Motion import PODVelocity
-from feelmri.MPIUtilities import MPI_print, MPI_rank, gather_data
+from feelmri.MPIUtilities import MPI_print, gather_data
 from feelmri.MRImaging import SliceProfile, VelocityEncoding
 from feelmri.MRObjects import RF, Gradient, Scanner
 from feelmri.Noise import add_cpx_noise
@@ -257,8 +257,9 @@ if __name__ == '__main__':
   RES = pars.Imaging.RECON_RES
   Im = reconstruct_nufft(
       kdata=K.reshape((K.shape[0], K.shape[1], K.shape[2], -1)),  # (R, L, S, C)
-      ktraj=tuple([k/(2*k.max()) for i, k in enumerate(traj_points)]),
+      ktraj=traj_points,
       img_shape=RES,
+      fov=planning.FOV.m_as('m'),
       auto_dcw="radial-2d",   # fast, good default for radials
       mode="adjoint",
       combine=None)

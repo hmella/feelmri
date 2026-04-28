@@ -390,176 +390,184 @@ class RadialStack(Trajectory):
 
 # SpiralStack trajectory
 class SpiralStack(Trajectory):
+  """
+  SpiralStack defines a realistic 3D stack-of-spirals k-space trajectory,
+  constrained by gradient amplitude and slew-rate hardware limits.
+
+  The total acquisition time is determined by the ADC (receiver bandwidth)
+  and gradient limits — not by the oversampling factor. Changing the
+  oversampling now only affects spatial density in k-space.
+  """
+
+  def __init__(self, *args,
+               density_exponent: float = 1.0,
+               safety_margin: float = 0.95,
+               **kwargs):
     """
-    SpiralStack defines a realistic 3D stack-of-spirals k-space trajectory,
-    constrained by gradient amplitude and slew-rate hardware limits.
+    Initialize the SpiralStack trajectory.
 
-    The total acquisition time is determined by the ADC (receiver bandwidth)
-    and gradient limits — not by the oversampling factor. Changing the
-    oversampling now only affects spatial density in k-space.
+    Parameters
+    ----------
+    density_exponent : float, optional
+        Power-law exponent controlling radial density.
+        p > 1 increases density near the periphery (default = 1.0).
+    safety_margin : float, optional
+        Fractional margin applied to gradient and slew limits (default = 0.95).
+    """
+    super().__init__(*args, **kwargs)
+    
+    # Explicitly verify phase encoding lines and re-initialize shots array
+    self.ph_samples = self.check_ph_enc_lines(self.ph_samples)
+    self.nb_shots = self.ph_samples // self.lines_per_shot
+    self.shots = [[None, ] * self.lines_per_shot for _ in range(self.nb_shots)]
+    
+    self.min_samples_per_turn = 32
+    self.interleaves = self.ph_samples
+    self.density_exponent = float(density_exponent)
+    self.safety_margin = float(safety_margin)
+    (self.points, self.times) = self.kspace_points()
+
+  def _base_spiral(self, ro_samples: int, k_max: Quantity, turns: float, p: float):
+    """
+    Generate a variable-density 2D spiral trajectory.
+
+    kr(u)  = k_max * u**p
+    phi(u) = 2*pi*turns * u**(1/p)
+    """
+    u = np.linspace(0.0, 1.0, ro_samples, dtype=self.dtype)
+    kr = k_max.m_as('1/m') * (u ** p)
+    phi = 2.0 * np.pi * turns * (u ** (1.0 / p))
+    K = kr * np.exp(1j * phi)
+    return u, K
+
+  def _enforce_hardware_limits(self, u: np.ndarray, K: np.ndarray):
+    """
+    Enforce gradient amplitude and slew-rate constraints to compute
+    the continuous time law t(u).
+
+    Returns
+    -------
+    t_final : ndarray (s)
+        Monotonic time samples corresponding to u.
+    T_ro : float
+        Total readout duration in seconds.
+    """
+    # Scanner limits
+    gamma = self.gammabar.to('Hz/T').m * 2 * np.pi       # [rad/s/T]
+    Gmax = self.Gr_max.to('T/m').m * self.safety_margin
+    Smax = self.Gr_sr.to('T/m/s').m * self.safety_margin
+
+    # Derivatives of k(u)
+    du = np.gradient(u)
+    dK_du = np.gradient(K, u, edge_order=2)
+    d2K_du2 = np.gradient(dK_du, u, edge_order=2)
+
+    # Magnitudes
+    abs_dK_du = np.abs(dK_du)
+    abs_d2K_du2 = np.abs(d2K_du2)
+
+    # Time per unit-u from amplitude and slew constraints
+    dt_du_amp = abs_dK_du / (gamma * Gmax)
+    dt_du_slew = np.sqrt(np.maximum(abs_d2K_du2, 0.0) / (gamma * Smax))
+    dt_du = np.maximum(dt_du_amp, dt_du_slew)
+
+    # Integrate over u to obtain t(u)
+    t_final = np.cumsum(0.5 * (dt_du + np.roll(dt_du, 1)) * du)
+    t_final[0] = 0.0
+    T_ro = float(t_final[-1])
+    return t_final.astype(self.dtype), T_ro
+
+  def kspace_points(self):
+    """
+    Compute the full 3D stack-of-spirals k-space trajectory using
+    ADC-based timing (independent of oversampling).
+
+    Returns
+    -------
+    points : tuple of ndarray
+        kx, ky, kz arrays of shape [ro_samples, interleaves, slices].
+    times : Quantity
+        Time array of shape [ro_samples, interleaves, slices], in ms.
     """
 
-    def __init__(self, *args,
-                 density_exponent: float = 1.0,
-                 safety_margin: float = 0.95,
-                 **kwargs):
-        """
-        Initialize the SpiralStack trajectory.
+    # k-space positioning gradients
+    ro_grad0 = Gradient(time=Quantity(0.0, 'ms'), scanner=self.scanner)
+    ro_grad0.calculate(-0.5 * self.k_bw[0].to('1/m')
+                       - 0.5 * ro_grad0.scanner.gammabar.to('1/mT/ms')
+                       * ro_grad0.strength.to('mT/m')
+                       * ro_grad0.slope.to('ms'))
 
-        Parameters
-        ----------
-        density_exponent : float, optional
-            Power-law exponent controlling radial density.
-            p > 1 increases density near the periphery (default = 1.0).
-        safety_margin : float, optional
-            Fractional margin applied to gradient and slew limits (default = 0.95).
-        """
-        super().__init__(*args, **kwargs)
-        self.ph_samples = self.check_ph_enc_lines(self.ph_samples)
-        self.nb_shots = self.ph_samples // self.lines_per_shot
-        self.min_samples_per_turn = 32
-        self.interleaves = self.ph_samples
-        self.density_exponent = float(density_exponent)
-        self.safety_margin = float(safety_margin)
-        (self.points, self.times) = self.kspace_points()
+    # k-space extent
+    k_max = 0.5 * self.k_bw[0]
 
-    def _base_spiral(self, ro_samples: int, k_max: Quantity, turns: float, p: float):
-        """
-        Generate a variable-density 2D spiral trajectory.
+    # Determine number of turns (independent of oversampling)
+    k_spa_base = (1.0 / self.FOV)[0]                       # base grid spacing
+    turns_nominal = max(1.0, float((k_max / k_spa_base).m_as('')))
+    max_turns_from_sampling = max(1.0, self.res[0] / float(self.min_samples_per_turn))
+    turns = min(turns_nominal, max_turns_from_sampling)
 
-        kr(u)  = k_max * u**p
-        phi(u) = 2*pi*turns * u**(1/p)
-        """
-        u = np.linspace(0.0, 1.0, ro_samples, dtype=self.dtype)
-        kr = k_max.m_as('1/m') * (u ** p)
-        phi = 2.0 * np.pi * turns * (u ** (1.0 / p))
-        K = kr * np.exp(1j * phi)
-        return u, K
+    # Generate base 2D spiral
+    u, K = self._base_spiral(self.res[0], k_max, turns, self.density_exponent)
 
-    def _enforce_hardware_limits(self, u: np.ndarray, K: np.ndarray):
-        """
-        Enforce gradient amplitude and slew-rate constraints to compute
-        the continuous time law t(u).
+    # Enforce gradient limits to get continuous time law
+    t_sec_cont, T_ro = self._enforce_hardware_limits(u, K)
 
-        Returns
-        -------
-        t_final : ndarray (s)
-            Monotonic time samples corresponding to u.
-        T_ro : float
-            Total readout duration in seconds.
-        """
-        # Scanner limits
-        gamma = self.gammabar.to('Hz/T').m * 2 * np.pi       # [rad/s/T]
-        Gmax = self.Gr_max.to('T/m').m * self.safety_margin
-        Smax = self.Gr_sr.to('T/m/s').m * self.safety_margin
+    # ADC-based sampling grid (fixed by receiver bandwidth)
+    dt_adc = 1.0 / self.receiver_bw.m_as('Hz')              # [s]
+    N_adc = int(np.round(T_ro / dt_adc))
+    
+    # THE FIX: Ensure ro_samples properly accounts for the oversampling factor
+    self.ro_samples = N_adc * self.oversampling
+    
+    t_adc = np.linspace(0.0, T_ro, self.ro_samples, endpoint=True)
 
-        # Derivatives of k(u)
-        du = np.gradient(u)
-        dK_du = np.gradient(K, u, edge_order=2)
-        d2K_du2 = np.gradient(dK_du, u, edge_order=2)
+    # Interpolate spiral onto uniform ADC time base
+    K_adc_real = np.interp(t_adc, t_sec_cont, np.real(K))
+    K_adc_imag = np.interp(t_adc, t_sec_cont, np.imag(K))
+    K_adc = K_adc_real + 1j * K_adc_imag
 
-        # Magnitudes
-        abs_dK_du = np.abs(dK_du)
-        abs_d2K_du2 = np.abs(d2K_du2)
+    # 3D stack dimensions
+    dt_ms = t_adc * 1e3                                    # [ms]
+    kz = np.linspace(self.kz_extent[0].m_as('1/m'),
+                     self.kz_extent[1].m_as('1/m'),
+                     self.slices)
 
-        # Time per unit-u from amplitude and slew constraints
-        dt_du_amp = abs_dK_du / (gamma * Gmax)
-        dt_du_slew = np.sqrt(np.maximum(abs_d2K_du2, 0.0) / (gamma * Smax))
-        dt_du = np.maximum(dt_du_amp, dt_du_slew)
+    # Allocate arrays using the fixed ro_samples length
+    kspace = (
+        np.zeros([self.ro_samples, self.ph_samples, self.slices], dtype=self.dtype),
+        np.zeros([self.ro_samples, self.ph_samples, self.slices], dtype=self.dtype),
+        np.zeros([self.ro_samples, self.ph_samples, self.slices], dtype=self.dtype),
+    )
+    t = np.zeros([self.ro_samples, self.ph_samples, self.slices], dtype=self.dtype)
 
-        # Integrate over u to obtain t(u)
-        t_final = np.cumsum(0.5 * (dt_du + np.roll(dt_du, 1)) * du)
-        t_final[0] = 0.0
-        T_ro = float(t_final[-1])
-        return t_final.astype(self.dtype), T_ro
+    # Interleaf rotation angles
+    theta = np.linspace(0.0, 2.0 * np.pi, self.interleaves,
+                        endpoint=False, dtype=self.dtype)
+    enc_time = Quantity(self.t_start.m_as('ms') - ro_grad0.dur.m_as('ms'), 'ms')
 
-    def kspace_points(self):
-        """
-        Compute the full 3D stack-of-spirals k-space trajectory using
-        ADC-based timing (independent of oversampling).
+    # Build shots locations and time maps
+    for ph in range(self.interleaves):
+      # Map shot structure identically to Radial/Cartesian
+      self.shots[ph // self.lines_per_shot][ph % self.lines_per_shot] = ph
 
-        Returns
-        -------
-        points : tuple of ndarray
-            kx, ky, kz arrays of shape [ro_samples, interleaves, slices].
-        times : Quantity
-            Time array of shape [ro_samples, interleaves, slices], in ms.
-        """
+      # Rotate base spiral
+      R = np.exp(1j * theta[ph])
+      K_rot = K_adc * R
+      kx_ = np.real(K_rot)
+      ky_ = np.imag(K_rot)
 
-        # k-space positioning gradients
-        ro_grad0 = Gradient(time=Quantity(0.0, 'ms'), scanner=self.scanner)
-        ro_grad0.calculate(-0.5 * self.k_bw[0].to('1/m')
-                           - 0.5 * ro_grad0.scanner.gammabar.to('1/mT/ms')
-                           * ro_grad0.strength.to('mT/m')
-                           * ro_grad0.slope.to('ms'))
+      # Fill k-space locations and time
+      kspace[0][:, ph, :] = np.tile(kx_[:, None], [1, self.slices])
+      kspace[1][:, ph, :] = np.tile(ky_[:, None], [1, self.slices])
+      t[:, ph, :] = (enc_time.m_as('ms')
+                     + ro_grad0.dur.m_as('ms')
+                     + dt_ms)[:, None]
 
-        # k-space extent
-        k_max = 0.5 * self.k_bw[0]
+    # Fill kz coordinates
+    for s in range(self.slices):
+      kspace[2][:, :, s] = kz[s]
 
-        # Determine number of turns (independent of oversampling)
-        k_spa_base = (1.0 / self.FOV)[0]                       # base grid spacing
-        turns_nominal = max(1.0, float((k_max / k_spa_base).m_as('')))
-        max_turns_from_sampling = max(1.0, self.res[0] / float(self.min_samples_per_turn))
-        turns = min(turns_nominal, max_turns_from_sampling)
+    # Echo time
+    self.echo_time = enc_time + Quantity(0.5 * T_ro * 1e3, 'ms')
 
-        # Generate base 2D spiral
-        u, K = self._base_spiral(self.res[0], k_max, turns, self.density_exponent)
-
-        # Enforce gradient limits to get continuous time law
-        t_sec_cont, T_ro = self._enforce_hardware_limits(u, K)
-
-        # ADC-based sampling grid (fixed by receiver bandwidth)
-        dt_adc = 1.0 / self.receiver_bw.m_as('Hz')              # [s]
-        N_adc = int(np.round(T_ro / dt_adc))
-        t_adc = np.linspace(0.0, T_ro, N_adc * self.oversampling, endpoint=True)
-
-        # Interpolate spiral onto uniform ADC time base
-        K_adc_real = np.interp(t_adc, t_sec_cont, np.real(K))
-        K_adc_imag = np.interp(t_adc, t_sec_cont, np.imag(K))
-        K_adc = K_adc_real + 1j * K_adc_imag
-
-        # 3D stack dimensions
-        self.ro_samples = N_adc                                # ADC defines sample count
-        dt_ms = t_adc * 1e3                                    # [ms]
-        kz = np.linspace(self.kz_extent[0].m_as('1/m'),
-                         self.kz_extent[1].m_as('1/m'),
-                         self.slices)
-
-        # Allocate arrays
-        kspace = (
-            np.zeros([N_adc * self.oversampling, self.ph_samples, self.slices], dtype=self.dtype),
-            np.zeros([N_adc * self.oversampling, self.ph_samples, self.slices], dtype=self.dtype),
-            np.zeros([N_adc * self.oversampling, self.ph_samples, self.slices], dtype=self.dtype),
-        )
-        t = np.zeros([N_adc * self.oversampling, self.ph_samples, self.slices], dtype=self.dtype)
-
-        # Interleaf rotation angles
-        theta = np.linspace(0.0, 2.0 * np.pi, self.interleaves,
-                            endpoint=False, dtype=self.dtype)
-        enc_time = Quantity(self.t_start.m_as('ms') - ro_grad0.dur.m_as('ms'), 'ms')
-
-        # Build shots locations and time maps
-        for ph in range(self.interleaves):
-            self.shots[ph // self.lines_per_shot][ph % self.lines_per_shot] = ph
-
-            # Rotate base spiral
-            R = np.exp(1j * theta[ph])
-            K_rot = K_adc * R
-            kx_ = np.real(K_rot)
-            ky_ = np.imag(K_rot)
-
-            # Fill k-space locations and time
-            kspace[0][:, ph, :] = np.tile(kx_[:, None], [1, self.slices])
-            kspace[1][:, ph, :] = np.tile(ky_[:, None], [1, self.slices])
-            t[:, ph, :] = (enc_time.m_as('ms')
-                           + ro_grad0.dur.m_as('ms')
-                           + dt_ms)[:, None]
-
-        # Fill kz coordinates
-        for s in range(self.slices):
-            kspace[2][:, :, s] = kz[s]
-
-        # Echo time
-        self.echo_time = enc_time + Quantity(0.5 * T_ro * 1e3, 'ms')
-
-        return (kspace, Quantity(t, 'ms'))
+    return (kspace, Quantity(t, 'ms'))
