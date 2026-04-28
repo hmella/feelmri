@@ -181,7 +181,6 @@ class FEMPhantom:
     # Submesh distribution
     self.distribute_mesh()
 
-
   def distribute_mesh(self):
     ''' Distribute mesh across MPI processes '''
     # Mesh partitioning
@@ -231,9 +230,68 @@ class FEMPhantom:
     # Add mesh partition 
     self.partitioning = np.array(membership).reshape(-1, 1)
 
+  def gather_to_global(self, local_point_data=None, local_cell_data=None):
+    """
+    Gathers local point/cell data dictionaries from all MPI ranks and 
+    stitches them into global arrays on Rank 0.
+    """
+    global_pd = None
+    global_cd = None
+
+    # Process Point Data
+    if local_point_data is not None:
+      global_pd = {}
+      for key, local_array in local_point_data.items():
+        # Gather all local arrays and their global indices to Rank 0
+        gathered_data = MPI_comm.gather(local_array, root=0)
+        gathered_indices = MPI_comm.gather(self.local_to_global_nodes, root=0)
+
+        if MPI_rank == 0:
+          # Initialize an empty global array. 
+          # E.g., if local_array is (N_local, 3), global is (N_global, 3)
+          shape = list(local_array.shape)
+          shape[0] = self.global_nodes.shape[0] 
+          global_array = np.zeros(shape, dtype=local_array.dtype)
+
+          # Stitch the chunks into the global array using the mapping
+          for rank_data, rank_indices in zip(gathered_data, gathered_indices):
+            global_array[rank_indices] = rank_data
+          
+          global_pd[key] = global_array
+
+    # Process Cell Data
+    if local_cell_data is not None:
+      global_cd = {}
+      for key, local_array in local_cell_data.items():
+        gathered_data = MPI_comm.gather(local_array, root=0)
+        gathered_indices = MPI_comm.gather(self.local_to_global_elems, root=0)
+
+        if MPI_rank == 0:
+          shape = list(local_array.shape)
+          shape[0] = self.global_elements.shape[0] 
+          global_array = np.zeros(shape, dtype=local_array.dtype)
+
+          for rank_data, rank_indices in zip(gathered_data, gathered_indices):
+            global_array[rank_indices] = rank_data
+          
+          global_cd[key] = global_array
+
+    # Ranks > 0 will return (None, None)
+    return global_pd, global_cd
+
   def read_data(self, fr):
     ''' Read data at frame fr '''
-    d, self.point_data, self.cell_data = self.reader.read_data(fr)
+    if MPI_rank == 0:
+        d, p_data, c_data = self.reader.read_data(fr)
+    else:
+        d, p_data, c_data = None, None, None
+        
+    d = MPI_comm.bcast(d, root=0)
+    p_data = MPI_comm.bcast(p_data, root=0)
+    c_data = MPI_comm.bcast(c_data, root=0)
+    
+    self.point_data = p_data
+    self.cell_data = c_data
 
     # Convert point and cell data to given dtype
     for key in self.point_data:
@@ -269,9 +327,7 @@ class FEMPhantom:
     np.ndarray
         The data converted to the submesh nodes.
     """
-    try:
-      self.mesh_to_submesh_nodes
-    except KeyError:
+    if not hasattr(self, 'mesh_to_submesh_nodes'):
       raise ValueError("Submesh not created. Please create a submesh first using `create_submesh`.")
 
     # Verify data shape

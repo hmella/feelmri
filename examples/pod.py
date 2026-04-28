@@ -8,7 +8,6 @@ from pint import Quantity as Q_
 
 from feelmri.IO import XDMFFile
 from feelmri.Motion import POD
-from feelmri.MPIUtilities import MPI_rank
 from feelmri.MRImaging import VelocityEncoding
 from feelmri.Parameters import ParameterHandler, PVSMParser
 from feelmri.Phantom import FEMPhantom
@@ -58,10 +57,29 @@ if __name__ == '__main__':
                     n_modes=30,
                     is_periodic=True)
 
-  # Export pod and phantom velocities to XDMF file
+  # Number of frames
   Nb_frames = phantom.Nfr if FAST_MODE==False else 1
-  file = XDMFFile(f'pod_{MPI_rank}.xdmf', nodes=phantom.local_nodes, elements={phantom.cell_type: phantom.local_elements})
+
+  # Create XDMF file to store the POD velocity for comparison with the original velocity field
+  file = XDMFFile(script_path/'pod.xdmf', nodes=phantom.global_nodes, elements={phantom.cell_type: phantom.global_elements})
+
+  # Write the POD velocity and original velocity field to the XDMF file for each frame
   for fr in range(Nb_frames):
-    t = fr * parameters.Imaging.TimeSpacing.m_as('s')
-    file.write(pointData={'pod_velocity': pod_velocity(t), 'phantom_velocity': v[phantom.local_to_global_nodes, :, fr]}, time=t)
+
+    # Current time
+    time = fr * parameters.Imaging.TimeSpacing.m_as('s')
+
+    # Pack local results into dictionaries
+    local_p_data = {
+        'pod_velocity': pod_velocity(time),
+        'phantom_velocity': v[phantom.local_to_global_nodes, :, fr].m_as('m/s')
+    }
+    
+    # Stitch to Global! (Rank 0 gets the dict, other ranks get None)
+    global_p_data, _ = phantom.gather_to_global(local_point_data=local_p_data)
+
+    # Write
+    file.write(pointData=global_p_data, time=time)
+
+  # Close the XDMF file
   file.close()
