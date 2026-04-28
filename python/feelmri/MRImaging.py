@@ -320,7 +320,7 @@ class SliceProfile:
         ax[1].set_xlabel('z coordinate [m]')
         ax[1].set_ylabel('Magnetization')
         fig.tight_layout()
-        plt.show()
+      plt.show()
 
     # Interpolator
     if self.solve_profile:
