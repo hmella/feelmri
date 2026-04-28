@@ -11,7 +11,7 @@ from feelmri.Math import ktoi
 from feelmri.MPIUtilities import MPI_print
 
 
-def CartesianRecon(K, trajectory, filter={'type': 'Tukey', 'width': 0.9, 'lift': 0.3}):
+def CartesianRecon(K, trajectory, filter_type='Tukey', filter_width=0.9, filter_lift=0.3):
   '''Reconstruct an image from Cartesian k-space data.
   Parameters
   ----------
@@ -19,8 +19,12 @@ def CartesianRecon(K, trajectory, filter={'type': 'Tukey', 'width': 0.9, 'lift':
       The k-space data to be reconstructed. Shape: (num_measurements, num_phases, num_slices, ...)
   trajectory: KSpaceTrajectory object
       The k-space trajectory object.
-  filter: dict, optional
-      The filter to be applied in k-space. The default is {'type': 'Tukey', 'width': 0.9, 'lift': 0.3}.
+  filter_type: str, optional
+      The type of filter to be applied in k-space. The default is 'Tukey'.
+  filter_width: float, optional
+      The width of the filter in k-space. The default is 0.9.
+  filter_lift: float, optional
+      The lift of the filter in k-space. The default is 0.3.
   Returns
   -------
   I: np.ndarray
@@ -46,12 +50,12 @@ def CartesianRecon(K, trajectory, filter={'type': 'Tukey', 'width': 0.9, 'lift':
     K = np.pad(K, pad_width, mode='constant')
 
   # Kspace filtering (as the scanner would do)
-  if filter['type'] == 'Tukey':
-    h_meas = Tukey(K.shape[0], width=0.9, lift=0.3)
-    h_pha  = Tukey(K.shape[1], width=0.9, lift=0.3)
-  elif filter['type'] == 'Riesz':
-    h_meas = Riesz(K.shape[0], width=0.9, lift=0.3)
-    h_pha  = Riesz(K.shape[1], width=0.9, lift=0.3)
+  if filter_type == 'Tukey':
+    h_meas = Tukey(K.shape[0], width=filter_width, lift=filter_lift)
+    h_pha  = Tukey(K.shape[1], width=filter_width, lift=filter_lift)
+  elif filter_type == 'Riesz':
+    h_meas = Riesz(K.shape[0], width=filter_width, lift=filter_lift)
+    h_pha  = Riesz(K.shape[1], width=filter_width, lift=filter_lift)
   else:
     h_meas = 1.0
     h_pha = 1.0
