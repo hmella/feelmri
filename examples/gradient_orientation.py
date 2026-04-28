@@ -62,3 +62,5 @@ if __name__ == '__main__':
 
   # Plot the sequence
   seq.plot()
+  seq.flatten() # convert all to a single block (just for visualization)
+  seq.plot()
