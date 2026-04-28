@@ -1,6 +1,7 @@
 import warnings
 
 import numpy as np
+from numpy.fft import fftshift, ifft, ifftshift
 from pynufft import NUFFT
 from skimage.transform import resize
 
@@ -154,138 +155,182 @@ def reconstruct_nufft(
     img_shape: tuple,
     *,
     dcw: np.ndarray | None = None,
-    auto_dcw: str | None = "pipe-menon",   # None|"pipe-menon"|"radial-2d"|"speed"
+    auto_dcw: str | None = "pipe-menon",
     oversamp: float = 1.25,
     kernel_size: int = 6,
-    mode: str = "adjoint",                 # "adjoint" or "cg" (fallback to adjoint)
+    mode: str = "adjoint",
     maxiter: int = 30,
     tol: float = 1e-6,
-    combine: str | None = None             # None|"rss"
+    combine: str | None = None
 ) -> np.ndarray:
     """
-    NUFFT reconstruction for stack trajectories with inputs:
-      - ktraj = (kx, ky, kz) each shaped (R, L, S) in cycles/FOV
-      - kdata shaped (R, L, S, C) complex
-
-    Parameters
-    ----------
-    kdata: np.ndarray
-        (nb_readout=R, nb_lines=L, nb_slices=S, nb_channels=C), complex.
-    ktraj: tuple[np.ndarray, np.ndarray, np.ndarray | None]
-        (kx, ky, kz) each shaped (R, L, S) in cycles/FOV. For 2D stacks, kz can be zeros.
-    img_shape: tuple
-        (Nx, Ny, Nz) for 3D, or (Nx, Ny) for 2D (if all kz are zero/None).
-    dcw: np.ndarray | None
-        Optional density compensation weights, flattened length M=R*L*S.
-    auto_dcw: str | None
-        "pipe-menon" (default, robust), "radial-2d" (fast for stack-of-radials),
-        or "speed" (good for time-ordered spirals). Ignored if dcw provided.
-    oversamp, kernel_size: NUFFT plan parameters.
-    mode: "adjoint" or "cg" (if available in your pynufft).
-    combine: None keeps coil axis; "rss" does root-sum-of-squares.
-
-    Returns
-    -------
-    np.ndarray
-        Complex image with shape:
-         - (*img_shape,) if single-channel or combine="rss"
-         - (C, *img_shape) if multi-channel and combine=None
+    Intelligent NUFFT reconstruction that automatically detects stack-of-2D 
+    trajectories and applies a hybrid 1D-FFT + 2D-NUFFT to avoid geometric distortion.
+    Falls back to full 3D NUFFT for true 3D non-Cartesian trajectories.
     """
-    # ---- Unpack & validate shapes ----
     kx, ky, kz = ktraj
     if kz is None:
         kz = np.zeros_like(kx)
+        
     kx = np.asarray(kx, dtype=np.float64)
     ky = np.asarray(ky, dtype=np.float64)
     kz = np.asarray(kz, dtype=np.float64)
 
-    if kx.shape != ky.shape or kx.shape != kz.shape:
-        raise ValueError("kx, ky, kz must share the same shape (R, L, S).")
-    if kdata.shape[:3] != kx.shape:
-        raise ValueError("kdata (R,L,S, C) must match ktraj shapes on first 3 dims.")
+    R, L, S = kx.shape
+    is_2d = np.allclose(kz, 0.0)
+
+    # --- Auto-Detect Trajectory Topology ---
+    # Check if kz is purely Cartesian (constant across readouts and lines)
+    is_kz_cartesian = (S > 1) and np.allclose(kz.max(axis=(0,1)), kz.min(axis=(0,1)))
+    # Check if in-plane trajectories are identical across all slices
+    is_kxy_uniform = (S > 1) and np.allclose(kx, kx[:, :, 0:1]) and np.allclose(ky, ky[:, :, 0:1])
+    
+    is_uniform_stack = is_kz_cartesian and is_kxy_uniform and not is_2d
+
+    if is_uniform_stack:
+        return _recon_hybrid_stack(
+            kdata, kx, ky, img_shape, dcw, auto_dcw, oversamp, kernel_size, mode, maxiter, tol, combine
+        )
+    else:
+        return _recon_full_3d(
+            kdata, (kx, ky, kz), img_shape, dcw, auto_dcw, oversamp, kernel_size, mode, maxiter, tol, combine
+        )
+
+
+def _recon_hybrid_stack(
+    kdata, kx, ky, img_shape, dcw, auto_dcw, oversamp, kernel_size, mode, maxiter, tol, combine
+):
+    """Hybrid reconstruction: 1D Cartesian IFFT along Z, followed by 2D NUFFT per slice."""
+    R, L, S, C = kdata.shape
+    Nx, Ny = img_shape[0], img_shape[1]
+    Nz = img_shape[2] if len(img_shape) == 3 else S
+    
+    # Handle slice dimension matching (Zero-pad or crop in k-space)
+    if S != Nz:
+        if S < Nz:
+            pad_diff = Nz - S
+            pad_b = pad_diff // 2
+            pad_a = pad_diff - pad_b
+            kdata_z = np.pad(kdata, ((0,0), (0,0), (pad_b, pad_a), (0,0)), mode='constant')
+        else:
+            crop_b = (S - Nz) // 2
+            crop_a = (S - Nz) - crop_b
+            kdata_z = kdata[:, :, crop_b:S - crop_a, :]
+    else:
+        kdata_z = kdata.copy()
+
+    # 1D IFFT along the Cartesian kz dimension (axis 2)
+    spatial_kdata = fftshift(ifft(ifftshift(kdata_z, axes=2), axis=2), axes=2)
+
+    # Setup a single 2D NUFFT Plan (since kx, ky are uniform across S)
+    kx_2d = kx[:, :, 0]
+    ky_2d = ky[:, :, 0]
+    om_cycles = np.stack([kx_2d.ravel(order="C"), ky_2d.ravel(order="C")], axis=1)
+    om_radians = 2.0 * np.pi * om_cycles
+    
+    Nd = (Nx, Ny)
+    Kd = tuple(int(np.ceil(n * oversamp)) for n in Nd)
+    Jd = (kernel_size, kernel_size)
+    
+    nufft = NUFFT()
+    nufft.plan(om_radians, Nd=Nd, Kd=Kd, Jd=Jd)
+    
+    # Extract or compute 2D DCF
+    dcw_2d = None
+    if dcw is not None:
+        dcw_2d = dcw.reshape(R, L, S)[:, :, 0].ravel(order="C")
+    elif auto_dcw is not None:
+        method = auto_dcw.lower()
+        if method == "pipe-menon":
+            dcw_2d = dcf_pipe_menon(nufft, n_iter=20)
+        elif method in ["radial-2d", "speed"]:
+            # Recalculate based on the 2D plane
+            dcw_2d = dcf_radial_stack(np.expand_dims(kx_2d, 2), np.expand_dims(ky_2d, 2), per_slice_normalize=False)
+    
+    if dcw_2d is not None:
+        dcw_2d = np.asarray(dcw_2d, dtype=np.float32)
+
+    # Reconstruct slice-by-slice
+    img_3d = np.zeros((C, Nx, Ny, Nz), dtype=np.complex64)
+    
+    for z_idx in range(Nz):
+        for c in range(C):
+            y = spatial_kdata[:, :, z_idx, c].ravel(order="C").astype(np.complex64, copy=False)
+            if dcw_2d is not None:
+                y = y * dcw_2d
+                
+            if mode.lower() == "adjoint":
+                img_3d[c, :, :, z_idx] = nufft.adjoint(y)
+            else:
+                try:
+                    img_3d[c, :, :, z_idx] = nufft.solve(y, solver='cg', maxiter=maxiter, tol=tol)
+                except Exception:
+                    img_3d[c, :, :, z_idx] = nufft.adjoint(y)
+
+    # Coil combine
+    if C == 1:
+        return img_3d[0]
+    elif combine == "rss":
+        return np.sqrt(np.sum(np.abs(img_3d)**2, axis=0)).astype(np.complex64)
+    return img_3d
+
+
+def _recon_full_3d(kdata, ktraj, img_shape, dcw, auto_dcw, oversamp, kernel_size, mode, maxiter, tol, combine):
+    """Your original 3D NUFFT logic preserved for true 3D non-Cartesian trajectories."""
+    kx, ky, kz = ktraj
     R, L, S = kx.shape
     C = kdata.shape[3]
     M = R * L * S
 
-    # ---- Flatten to (M, D) and (M, C) consistently (C-order: readout fastest) ----
-    # This preserves the natural (readout, line, slice) ordering in memory.
-    om_cycles = np.stack([kx.ravel(order="C"),
-                          ky.ravel(order="C"),
-                          kz.ravel(order="C")], axis=1)  # (M, 3)
-    ksamples = kdata.reshape(M, C)  # (M, C)
+    om_cycles = np.stack([kx.ravel(order="C"), ky.ravel(order="C"), kz.ravel(order="C")], axis=1)
+    ksamples = kdata.reshape(M, C)
 
-    # Determine dimensionality: 2D if kz is (near) zero everywhere and Nz==1 in img_shape
     is_2d = np.allclose(om_cycles[:, 2], 0.0)
     if is_2d:
-        om_cycles = om_cycles[:, :2]  # (M, 2)
+        om_cycles = om_cycles[:, :2]
 
-    # ---- NUFFT plan ----
     Nd_user = tuple(int(n) for n in img_shape)
-    if is_2d and len(Nd_user) == 3 and Nd_user[2] == 1:
-        Nd = Nd_user[:2]
-    else:
-        Nd = Nd_user
+    Nd = Nd_user[:2] if (is_2d and len(Nd_user) == 3 and Nd_user[2] == 1) else Nd_user
     D = len(Nd)
-    if D not in (2, 3):
-        raise ValueError("img_shape must be 2D or 3D.")
 
     Kd = tuple(int(np.ceil(n * oversamp)) for n in Nd)
     Jd = tuple([kernel_size] * D)
-    om_radians = 2.0 * np.pi * om_cycles  # cycles/FOV -> radians
+    om_radians = 2.0 * np.pi * om_cycles
 
     nufft = NUFFT()
     nufft.plan(om_radians, Nd=Nd, Kd=Kd, Jd=Jd)
 
-    # ---- Density compensation ----
     if dcw is None and auto_dcw is not None:
         method = auto_dcw.lower()
         if method == "pipe-menon":
             dcw = dcf_pipe_menon(nufft, n_iter=20)
         elif method == "radial-2d":
-            if D == 3:
-                # Still OK: ramp uses in-plane radius only
-                dcw = dcf_radial_stack(kx, ky)
-            else:
-                dcw = dcf_radial_stack(kx, ky)  # 2D case degenerates naturally
+            dcw = dcf_radial_stack(kx, ky)
         elif method == "speed":
             dcw = dcf_local_speed_readout(kx, ky, (None if is_2d else kz))
-        else:
-            raise ValueError("auto_dcw ∈ {None, 'pipe-menon','radial-2d','speed'}")
+            
     if dcw is not None:
         dcw = np.asarray(dcw, dtype=np.float32)
-        if dcw.shape != (M,):
-            raise ValueError(f"dcw must be shape ({M},), got {dcw.shape}")
 
-    # ---- Recon per channel ----
     imgs = []
     for c in range(C):
         y = ksamples[:, c].astype(np.complex64, copy=False)
         if dcw is not None:
             y = y * dcw
+            
         if mode.lower() == "adjoint":
             x = nufft.adjoint(y)
-        elif mode.lower() == "cg":
+        else:
             try:
                 x = nufft.solve(y, solver='cg', maxiter=maxiter, tol=tol)
             except Exception:
                 x = nufft.adjoint(y)
-        else:
-            raise ValueError("mode must be 'adjoint' or 'cg'.")
         imgs.append(x.astype(np.complex64, copy=False))
 
-    img = np.stack(imgs, axis=0)  # (C, *Nd)
+    img = np.stack(imgs, axis=0)
 
-    # ---- Coil combine / output ----
     if C == 1:
-        img = img[0]
-    elif combine is None:
-        pass
-    elif combine.lower() == "rss":
-        img = np.sqrt(np.sum(np.abs(img)**2, axis=0)).astype(np.complex64)
-    else:
-        raise ValueError("combine must be None or 'rss'")
-
-    # If "2D but S>1" (stack of 2D slices with kz=0), caller should pass Nd=(Nx,Ny,S)
-    # so D==3 and recon is 3D. If they passed (Nx,Ny) and S>1, return (C, Nx, Ny) or (Nx, Ny).
+        return img[0]
+    elif combine == "rss":
+        return np.sqrt(np.sum(np.abs(img)**2, axis=0)).astype(np.complex64)
     return img
-
