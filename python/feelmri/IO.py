@@ -4,15 +4,10 @@ from pathlib import Path
 
 import meshio
 import numpy as np
+from pyevtk.hl import imageToVTK
+from pyevtk.vtk import VtkGroup
 
 from feelmri.MPIUtilities import MPI_comm, MPI_print, MPI_rank
-
-try:
-  from pyevtk.hl import imageToVTK
-  from pyevtk.vtk import VtkGroup  
-except ImportError:
-  if MPI_rank == 0:
-    MPI_print("feelmri import error: pyevtk python module not available")
 
 
 class VTIFile:

@@ -1,5 +1,7 @@
 import os
 
+from skimage import data
+
 os.environ["OPENBLAS_NUM_THREADS"] = "1" # export OPENBLAS_NUM_THREADS=1
 from pathlib import Path
 
@@ -228,13 +230,18 @@ if __name__ == '__main__':
   plotter.show()
 
   # Write the velocity field to a VTI file for visualization in Paraview
+  spacing = (traj.FOV.m_as('m')/parameters.Imaging.RES).tolist()  
+  origin = -0.5*traj.FOV.m_as('m')
+  origin  = (traj.MPS_ori@origin + traj.LOC.m_as('m')).tolist()
+  direction = traj.MPS_ori.flatten().tolist()
+
   vti_file = VTIFile(script_path/'phase_contrast/velocity.pvd',
-                    origin=planning.LOC.to('m').m_as('m').tolist(),
-                    spacing=(planning.FOV.to('m') / parameters.Imaging.RES).m_as('m').tolist(),
-                    direction=planning.MPS.flatten().tolist(),
+                    origin=origin,
+                    spacing=spacing,
+                    direction=direction,
                     nbFrames=Nb_frames,
                     dt=parameters.Imaging.TimeSpacing.m_as('ms'))
-  vti_file.write(pointData={'magnitude': mag,
+  vti_file.write(cellData={'magnitude': mag,
                             'phase_v': phi_v, 
                             'phase': phi, 
                             'phase_0': phi_0})

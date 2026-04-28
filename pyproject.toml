@@ -26,6 +26,7 @@ dependencies = [
   "pint",
   "pymetis",
   "pynufft",
+  "pyevtk @ git+https://github.com/hmella/pyevtk.git"
 ]
 keywords = ["MRI", "finite-element", "simulation", "pybind11", "C++"]
 classifiers = [
