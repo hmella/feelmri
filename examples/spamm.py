@@ -7,7 +7,6 @@ import numpy as np
 from pint import Quantity as Q_
 
 from feelmri.Bloch import BlochSolver, Sequence, SequenceBlock
-from feelmri.IO import XDMFFile
 from feelmri.KSpaceTraj import CartesianStack
 from feelmri.Motion import POD
 from feelmri.MPIUtilities import MPI_print, MPI_rank, gather_data
@@ -160,13 +159,6 @@ if __name__ == '__main__':
 
     # Solve for x and y directions
     Mxy, Mz = solver.solve() 
-    # # Export magnetization and displacement for debugging
-    # file = XDMFFile('magnetization_{:d}.xdmf'.format(MPI_rank), nodes=phantom.local_nodes, elements={phantom.cell_type: phantom.local_elements})
-    # for fr in range(Mxy.shape[1]):
-    #   # Write magnetization and displacement at each frame
-    #   t = fr*parameters.Imaging.TimeSpacing.m_as('ms') + imaging.rf_pulses[0].time.m_as('ms')
-    #   file.write(pointData={'M': np.stack((np.real(Mxy[:,fr]), np.imag(Mxy[:,fr]), Mz[:,fr]), axis=1), 'displacement': pod_trajectory(t)}, time=t)
-    # file.close()
 
     # Assign the magnetization to the corresponding direction
     Mxy_spamm[..., d] = Mxy
@@ -225,12 +217,11 @@ if __name__ == '__main__':
   I = CartesianRecon(K, traj)
 
   # Show reconstruction
-  if MPI_rank == 0:
-    mx = np.abs(I[...,0,:])
-    my = np.abs(I[...,1,:])
-    mxy = np.abs(I[...,0,:] - I[...,1,:])
-    plotter = MRIPlotter(images=[mx, my, mxy], 
-                        title=['SPAMM X', 'SPAMM Y', 'O-CSPAMM'], 
-                        FOV=planning.FOV.m_as('m'))
-    # plotter.export_images('spamm_images_semi_bloch/')
-    plotter.show()
+  mx = np.abs(I[...,0,:])
+  my = np.abs(I[...,1,:])
+  mxy = np.abs(I[...,0,:] - I[...,1,:])
+  plotter = MRIPlotter(images=[mx, my, mxy], 
+                      title=['SPAMM X', 'SPAMM Y', 'O-CSPAMM'], 
+                      FOV=planning.FOV.m_as('m'))
+  # plotter.export_images('spamm_images_semi_bloch/')
+  plotter.show()

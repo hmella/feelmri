@@ -7,6 +7,7 @@ import numpy as np
 from pint import Quantity as Q_
 
 from feelmri.Bloch import BlochSolver, Sequence, SequenceBlock
+from feelmri.IO import VTIFile
 from feelmri.KSpaceTraj import CartesianStack
 from feelmri.Motion import PODVelocity
 from feelmri.MPIUtilities import MPI_print, MPI_rank, gather_data
@@ -163,16 +164,6 @@ if __name__ == '__main__':
     Mxy, Mz = solver.solve()
     Mxy_PC[..., d] = Mxy
 
-    # # Export magnetization and displacement for debugging
-    # if d == 0:
-    #   file = XDMFFile('magnetization_{:d}.xdmf'.format(MPI_rank), nodes=phantom.local_nodes, elements={phantom.cell_type: phantom.local_elements})
-    #   for fr in range(Mxy.shape[1]):
-    #     # Write magnetization and displacement at each frame
-    #     t = fr*parameters.Imaging.TimeSpacing.m_as('ms')
-    #     pod_velocity.update_timeshift(t)
-    #     file.write(pointData={'M': np.stack((np.real(Mxy[:,fr]), np.imag(Mxy[:,fr]), Mz[:,fr]), axis=1), 'displacement': pod_velocity(2.55)}, time=t)
-    #   file.close()
-
   # Generate kspace trajectory
   traj = CartesianStack(FOV = planning.FOV.to('m'),
     t_start = imaging.time_extent[1] - sp.rf.time,
@@ -227,12 +218,23 @@ if __name__ == '__main__':
   Im = CartesianRecon(K, traj)
 
   # Show reconstruction
-  if MPI_rank == 0:
-    mag = np.abs(Im[...,0,:])
-    phi_v = np.angle(Im[...,0,:] * np.conj(Im[...,1,:]))
-    phi_0 = np.angle(Im[...,1,:])
-    phi   = np.angle(Im[...,0,:])
-    plotter = MRIPlotter(images=[mag, phi_v, phi, phi_0], 
-                          title=['M', '$\\phi_v$ ', '$\\phi_v + \\phi_0$', '$\\phi_0$'], 
-                          FOV=planning.FOV.m_as('m'))
-    plotter.show()
+  mag = np.abs(Im[...,0,:])
+  phi_v = np.angle(Im[...,0,:] * np.conj(Im[...,1,:]))
+  phi_0 = np.angle(Im[...,1,:])
+  phi   = np.angle(Im[...,0,:])
+  plotter = MRIPlotter(images=[mag, phi_v, phi, phi_0], 
+                        title=['M', '$\\phi_v$ ', '$\\phi_v + \\phi_0$', '$\\phi_0$'], 
+                        FOV=planning.FOV.m_as('m'))
+  plotter.show()
+
+  # Write the velocity field to a VTI file for visualization in Paraview
+  vti_file = VTIFile(script_path/'phase_contrast/velocity.pvd',
+                    origin=planning.LOC.to('m').m_as('m').tolist(),
+                    spacing=(planning.FOV.to('m') / parameters.Imaging.RES).m_as('m').tolist(),
+                    direction=planning.MPS.flatten().tolist(),
+                    nbFrames=Nb_frames,
+                    dt=parameters.Imaging.TimeSpacing.m_as('ms'))
+  vti_file.write(pointData={'magnitude': mag,
+                            'phase_v': phi_v, 
+                            'phase': phi, 
+                            'phase_0': phi_0})

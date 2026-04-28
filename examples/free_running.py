@@ -7,7 +7,6 @@ import numpy as np
 from pint import Quantity as Q_
 
 from feelmri.Bloch import BlochSolver, Sequence, SequenceBlock
-from feelmri.IO import XDMFFile
 from feelmri.KSpaceTraj import CartesianStack
 from feelmri.Motion import POD, RespiratoryMotion
 from feelmri.MPIUtilities import MPI_print, MPI_rank, gather_data
@@ -174,9 +173,6 @@ if __name__ == '__main__':
   # Solve dummy blocks to reach the steady state
   solver.solve()
 
-  # # Create XDMF file for debugging
-  # file = XDMFFile(script_path/'magnetization_{:d}.xdmf'.format(MPI_rank), nodes=phantom.local_nodes, elements={phantom.cell_type: phantom.local_elements})
-
   # Set assembler for MRI signal evaluation using FEM
   vxsz = planning.FOV.m_as('m')/np.array(parameters.Imaging.RES)
   phantom.set_assembler(voxel_size=vxsz[0], lorder=1, horder=6, nodal_approximation=False)
@@ -220,16 +216,6 @@ if __name__ == '__main__':
       # Update reference time of POD trajectory
       pod_sum.update_timeshift(seq.blocks[-2].time_extent[1].m_as('ms'))
 
-      # # Export magnetization and displacement for debugging
-      # displacement = pod_sum(0.0)
-      # file.write(pointData={'Mx': np.real(Mxy), 
-      #                       'My': np.imag(Mxy),
-      #                       'Mz': Mz,
-      #                       'displacement': displacement},
-      #                       time=i*parameters.Imaging.TR)
-
-  # file.close()
-
   # Gather results
   K = gather_data(K)
 
@@ -237,12 +223,7 @@ if __name__ == '__main__':
   I = CartesianRecon(K, traj)
 
   # Show reconstruction
-  if MPI_rank == 0:
-    mag = np.abs(I[...,0,:])
-    phi = np.angle(I[...,0,:])
-    plotter = MRIPlotter(images=[mag, phi], title=['Magnitude', 'Phase'], FOV=planning.FOV.m_as('m'))
-    # plotter.export_images('free_running/im')
-    plotter.show()
-
-  #   plotter = MRIPlotter(images=[np.abs(K[...,0,:])], title=['k-space'], FOV=planning.FOV.m_as('m'))
-  #   plotter.show()
+  mag = np.abs(I[...,0,:])
+  phi = np.angle(I[...,0,:])
+  plotter = MRIPlotter(images=[mag, phi], title=['Magnitude', 'Phase'], FOV=planning.FOV.m_as('m'))
+  plotter.show()

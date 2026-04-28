@@ -201,12 +201,11 @@ if __name__ == '__main__':
   I = CartesianRecon(K, traj)
 
   # Show reconstruction
-  if MPI_rank == 0:
-    mag = np.abs(I[...,0,:])
-    phi = np.angle(I[...,0,:])
-    plotter = MRIPlotter(images=[mag, phi], title=['Magnitude', 'Phase'], FOV=planning.FOV.m_as('m'))
-    # plotter.export_images('free_running/im')
-    plotter.show()
+  mag = np.abs(I[...,0,:])
+  phi = np.angle(I[...,0,:])
+  plotter = MRIPlotter(images=[mag, phi], title=['Magnitude', 'Phase'], FOV=planning.FOV.m_as('m'))
+  # plotter.export_images('free_running/im')
+  plotter.show()
 
   #   plotter = MRIPlotter(images=[np.abs(K[...,0,:])], title=['k-space'], FOV=planning.FOV.m_as('m'))
   #   plotter.show()

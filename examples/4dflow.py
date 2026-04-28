@@ -273,6 +273,6 @@ if __name__ == '__main__':
   phi_vx = f * np.angle(Im[...,0,:] * np.conj(Im[...,3,:])) * mask
   phi_vy = f * np.angle(Im[...,1,:] * np.conj(Im[...,3,:])) * mask
   phi_vz = f * np.angle(Im[...,2,:] * np.conj(Im[...,3,:])) * mask
-  if MPI_rank == 0:
-    plotter = MRIPlotter(images=[m, phi_vx, phi_vy, phi_vz, phi_ref], title=['Magnitude', '$\\phi_{vx}$ ', '$\\phi_{vy}$', '$\\phi_{vz}$', '$\\phi_{ref}$'], FOV=planning.FOV.m_as('m'), swap_axes=[0, 2])
-    plotter.show()
+
+  plotter = MRIPlotter(images=[m, phi_vx, phi_vy, phi_vz, phi_ref], title=['Magnitude', '$\\phi_{vx}$ ', '$\\phi_{vy}$', '$\\phi_{vz}$', '$\\phi_{ref}$'], FOV=planning.FOV.m_as('m'), swap_axes=[0, 2])
+  plotter.show()
