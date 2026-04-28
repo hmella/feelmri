@@ -77,7 +77,7 @@ It can handle complex physical phenomena governed by partial differential equati
 
 ### 1️⃣ System Dependencies
 
-You’ll need some basic system libraries and build tools. On Ubuntu/Debian:
+You will need some basic system libraries and build tools. On Ubuntu/Debian:
 
 ```bash
 apt-get update && apt-get install -y --no-install-recommends \
@@ -90,14 +90,10 @@ apt-get update && apt-get install -y --no-install-recommends \
     ninja-build \
     git \
     libopenmpi-dev \
-    screen \
-    nano \
     libblas-dev \
     liblapack-dev \
     ccache
 ```
-
-These dependencies can also be installed via ```pip`` by setting up the variable ```INSTALL_SYSTEM_DEPS``` as described below.
 
 ### 2️⃣ Clone the Repository
 
@@ -111,11 +107,6 @@ cd feelmri
 ```bash
 pip install .
 ```
-
-System dependencies can also be installed by setting the ```cmake``` argument ```INSTALL_SYSTEM_DEPS``` as:
-```bash
-CMAKE_ARGS="-DINSTALL_SYSTEM_DEPS=ON" pip install .
-``` 
 
 Verify installation ✅:
 
