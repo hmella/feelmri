@@ -379,7 +379,10 @@ class RadialStack(Trajectory):
         t[:,:,s] = t[:,:,0]
 
       # Calculate echo time
-      self.echo_time = (enc_time + ro_grad0.dur + 0.5*self.lines_per_shot*ro_grad.dur).to('ms')
+      if self.full_spoke:
+        self.echo_time = (enc_time + ro_grad0.dur + 0.5*self.lines_per_shot*ro_grad.dur).to('ms')
+      else:
+        self.echo_time = (enc_time + ro_grad0.dur + 0.5*self.lines_per_shot*ro_grad.dur - 0.5*ro_grad.dur).to('ms')
 
       return (kspace, Quantity(t, 'ms'))
 
