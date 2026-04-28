@@ -220,7 +220,7 @@ if __name__ == '__main__':
   K = gather_data(K)
 
   # Image reconstruction
-  I = CartesianRecon(K, traj)
+  I = CartesianRecon(K, traj, filter_type='Riesz')
 
   # Show reconstruction
   mag = np.abs(I[...,0,:])
