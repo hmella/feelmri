@@ -17,56 +17,30 @@ else()
 endif()
 
 # =========================================================
-# Dependency detection and optional installation
+# Dependency Detection
 # =========================================================
-option(INSTALL_SYSTEM_DEPS "Automatically install required system packages (Linux only)" OFF)
+message(STATUS "Checking for required system dependencies...")
 
-if(UNIX AND NOT APPLE)
-    message(STATUS "Checking for essential system dependencies...")
-
-    find_program(APT_EXEC apt-get)
-    if(NOT APT_EXEC)
-        message(WARNING "apt-get not found; please install dependencies manually if missing.")
-    else()
-        if(INSTALL_SYSTEM_DEPS)
-            message(STATUS "Installing missing system dependencies with apt-get (requires sudo)...")
-
-            # Only run apt-get update once per build directory creation
-            if(NOT APT_UPDATED)
-                execute_process(COMMAND sudo ${APT_EXEC} update RESULT_VARIABLE UPDATE_RESULT)
-                if(UPDATE_RESULT EQUAL 0)
-                    set(APT_UPDATED TRUE CACHE INTERNAL "Apt update has been run")
-                endif()
-            endif()
-
-            execute_process(
-                COMMAND sudo ${APT_EXEC} install -y --no-install-recommends
-                    build-essential
-                    python3
-                    python3-dev
-                    python3-pip
-                    python3-tk
-                    cmake
-                    ninja-build
-                    git
-                    libopenmpi-dev
-                    libblas-dev
-                    liblapack-dev
-                    screen
-                    nano
-                    ccache
-                RESULT_VARIABLE APT_RESULT
-            )
-            if(NOT APT_RESULT EQUAL 0)
-                message(FATAL_ERROR "System dependency installation failed. Please install manually.")
-            endif()
-        else()
-            message(STATUS "System dependencies will not be installed automatically.")
-            message(STATUS "To enable auto-install, rerun with: cmake -DINSTALL_SYSTEM_DEPS=ON ..")
-        endif()
-    endif()
+# Core C++ Mathematical & Parallel Libraries
+find_package(MPI)
+if(MPI_FOUND)
+    message(STATUS "✅ Found MPI")
 endif()
 
+find_package(BLAS REQUIRED)
+if(BLAS_FOUND)
+    message(STATUS "✅ Found BLAS")
+endif()
+
+find_package(LAPACK REQUIRED)
+if(LAPACK_FOUND)
+    message(STATUS "✅ Found LAPACK")
+endif()
+
+
+# Python Integration
+find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
+find_package(pybind11 CONFIG REQUIRED)
 
 # ------------------------------------------------------------
 # General build configuration
@@ -117,17 +91,8 @@ endif()
 
 
 # ------------------------------------------------------------
-# Dependencies
-# ------------------------------------------------------------
-find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
-find_package(pybind11 CONFIG REQUIRED)
-
-# ------------------------------------------------------------
 # FEniCS Basix (C++) automatic compilation via FetchContent
 # ------------------------------------------------------------
-find_package(BLAS REQUIRED)
-find_package(LAPACK REQUIRED)
-
 # Check if basix is already installed on the system
 find_package(basix QUIET)
 
