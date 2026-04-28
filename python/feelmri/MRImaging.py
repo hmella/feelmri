@@ -1,5 +1,11 @@
-import warnings
+"""
+MRI encoding and slice-profile simulation utilities.
 
+:class:`SliceProfile` simulates the selective excitation of a slice using
+the Bloch equations. :class:`VelocityEncoding` and :class:`PositionEncoding`
+compute the phase imparted by bipolar or position-encoding gradients onto
+moving spins, for use in phase-contrast and tagged MRI simulations.
+"""
 import matplotlib.pyplot as plt
 import numpy as np
 from pint import Quantity
@@ -11,392 +17,428 @@ from feelmri.MRObjects import RF, Gradient, Scanner
 
 
 class Bloch:
-  def __init__(self, gamma=42.58, 
-               z0=0.0, 
-               z=0.0, 
-               eval_gradient=None, 
-               B1e=None, 
-               small_angle=False):
-    self.gamma = gamma
-    self.z0 = z0
-    self.z = z
-    self.eval_gradient = eval_gradient
-    self.B1e = B1e
-    self.small_angle = small_angle
-    self.equation = self.bloch_small if self.small_angle else self.bloch
+    """Bloch ODE right-hand side for single-isochromat slice-profile integration.
 
-  def __call__(self, t, M):
-    return self.equation(t, M)
+    Used internally by :class:`SliceProfile` as the callable passed to
+    :class:`scipy.integrate.RK45`.
 
-  def bloch(self, t, M):
-    # Frequency offset
-    dw = self.gamma*self.eval_gradient(t)*(self.z - self.z0)
+    Parameters
+    ----------
+    gamma : float, optional
+        Gyromagnetic ratio (rad/mT/ms). Default is 42.58.
+    z0 : float, optional
+        Slice-center position (m). Default is 0.0.
+    z : float, optional
+        Current isochromat position along the slice-select axis (m).
+        Default is 0.0.
+    eval_gradient : callable, optional
+        Function of time returning the slice-selection gradient (mT/m).
+    B1e : callable, optional
+        Function of time returning the complex B1 field (mT).
+    small_angle : bool, optional
+        If True, use the small-angle Bloch approximation (Mz ≈ 1).
+        Default is False.
+    """
 
-    # Bloch equations
-    dMxdt = dw*M[1] - self.gamma*np.imag(self.B1e(t))*M[2]
-    dMydt = -dw*M[0] + self.gamma*np.real(self.B1e(t))*M[2] 
-    dMzdt = self.gamma*np.imag(self.B1e(t))*M[0] - self.gamma*np.real(self.B1e(t))*M[1]
+    def __init__(self, gamma=42.58,
+                 z0=0.0,
+                 z=0.0,
+                 eval_gradient=None,
+                 B1e=None,
+                 small_angle=False):
+        self.gamma = gamma
+        self.z0 = z0
+        self.z = z
+        self.eval_gradient = eval_gradient
+        self.B1e = B1e
+        self.small_angle = small_angle
+        self.equation = self.bloch_small if self.small_angle else self.bloch
 
-    return np.array([dMxdt, dMydt, dMzdt]).reshape((3,))
+    def __call__(self, t, M):
+        return self.equation(t, M)
 
-  def bloch_small(self, t, M):
-    # Frequency offset
-    dw = self.gamma*self.eval_gradient(t)*(self.z - self.z0)
+    def bloch(self, t, M):
+        # Frequency offset
+        dw = self.gamma * self.eval_gradient(t) * (self.z - self.z0)
 
-    # Bloch equations
-    dMxdt = dw*M[1] - self.gamma*np.imag(self.B1e(t))*M[2]
-    dMydt = self.gamma*np.real(self.B1e(t))*M[2] - dw*M[0]
-    dMzdt = -self.gamma*np.real(self.B1e(t))*M[1]*0.0
+        # Bloch equations
+        dMxdt = dw * M[1] - self.gamma * np.imag(self.B1e(t)) * M[2]
+        dMydt = -dw * M[0] + self.gamma * np.real(self.B1e(t)) * M[2]
+        dMzdt = self.gamma * np.imag(self.B1e(t)) * M[0] - self.gamma * np.real(self.B1e(t)) * M[1]
 
-    return np.array([dMxdt, dMydt, dMzdt]).reshape((3,))
+        return np.array([dMxdt, dMydt, dMzdt]).reshape((3,))
+
+    def bloch_small(self, t, M):
+        # Frequency offset
+        dw = self.gamma * self.eval_gradient(t) * (self.z - self.z0)
+
+        # Bloch equations
+        dMxdt = dw * M[1] - self.gamma * np.imag(self.B1e(t)) * M[2]
+        dMydt = self.gamma * np.real(self.B1e(t)) * M[2] - dw * M[0]
+        dMzdt = -self.gamma * np.real(self.B1e(t)) * M[1] * 0.0
+
+        return np.array([dMxdt, dMydt, dMzdt]).reshape((3,))
 
 
 class SliceProfile:
-  """
-  A class to simulate the slice profile of an MRI pulse sequence using the Bloch equations.
+    """Simulate the selective excitation profile of an MRI slice.
 
-  Attributes:
-    z0 (float): Initial position of the slice center (default is 0.0).
-    delta_z (float): Slice thickness (default is 0.008).
-    gammabar (float): Gyromagnetic ratio in MHz/T (default is 42.58).
-    Gz (float): Gradient strength in T/m (default is 1.0).
-    RFShape (str): Shape of the RF pulse ('sinc', 'apodized_sinc', 'hard') (default is 'sinc').
-    NbLobes[0] (int): Number of left lobes for the sinc pulse (default is 2).
-    NbLobes[1] (int): Number of right lobes for the sinc pulse (default is 2).
-    alpha (float): Apodization factor for the apodized sinc pulse (default is 0.46 for a Hamming window. Use 0.5 for a Hanning window).
-    flip_angle (float): Flip angle in radians (default is np.deg2rad(10.0)).
-    dt (float): Time step for the simulation (default is 1e-4).
-    profile_samples (int): Number of points in the slice profile (default is 150).
-    plot (bool): Whether to plot the results (default is False).
-    small_angle (bool): Whether to use the small angle approximation (default is False).
-    refocusing_area_frac (float): Fraction of the refocusing gradient area (default is 0.5).
+    Computes the slice selection gradient waveforms and optionally solves the
+    Bloch equations isochromat-by-isochromat to obtain the complex transverse
+    magnetization profile. The resulting profile interpolator can be queried
+    at arbitrary z-positions for signal weighting.
 
-  Methods:
-    bloch(t, M):
-      Computes the derivatives of the magnetization vector M at time t using the Bloch equations.
-
-    ss_gradient(t):
-      Computes the slice selection gradient at time t.
-
-    _rf_sinc(t):
-      Computes the sinc RF pulse at time t.
-
-    _unit_sinc(t):
-      Computes the apodized sinc RF pulse at time t.
-
-    _unit_hard(t):
-      Computes the hard RF pulse at time t.
-
-    B1e_norm(t):
-      Computes the normalized B1 field at time t.
-
-    calculate(y0=np.array([0,0,1]).reshape((3,))):
-      Calculates the slice profile by solving the Bloch equations.
-  """
-  def __init__(self, z0=Quantity(0.0,'m'), delta_z=Quantity(0.008,'m'), bandwidth='maximum', rf=RF(), dt=Quantity(1e-4,'ms'), profile_samples=150, plot=False, small_angle=False, refocusing_area_frac=1, scanner=Scanner(), solve_profile=False, dtype=np.float32):
-    self.z0 = z0
-    self.delta_z = delta_z
-    self.rf = rf
-    self.profile_samples = profile_samples
-    self.plot = plot
-    self.dt = dt.to('ms')
-    self.small_angle = small_angle
-    self.refocusing_area_frac = refocusing_area_frac
-    self.scanner = scanner
-    self.solve_profile = solve_profile
-    self.bandwidth = self._check_bandwidth(bandwidth)
-    self.dtype = dtype
-    self.interp_profile = self.calculate()
-
-  def _check_bandwidth(self, bandwidth):
+    Parameters
+    ----------
+    z0 : Quantity, optional
+        Slice-center position (m). Default is 0 m.
+    delta_z : Quantity, optional
+        Nominal slice thickness (m). Default is 0.008 m.
+    bandwidth : Quantity or str, optional
+        RF pulse bandwidth (Hz). ``'maximum'`` uses the largest bandwidth
+        achievable with the scanner gradient and slice thickness constraints.
+        Default is ``'maximum'``.
+    rf : RF, optional
+        RF pulse object defining the pulse shape and duration.
+    dt : Quantity, optional
+        Integration time step for the Bloch solver (ms). Default is 1e-4 ms.
+    profile_samples : int, optional
+        Number of z-positions at which to evaluate the profile. Default is 150.
+    plot : bool, optional
+        If True, plot the RF, gradient waveforms, and magnetization profile
+        after calculation. Default is False.
+    small_angle : bool, optional
+        If True, use the small-angle Bloch approximation. Default is False.
+    refocusing_area_frac : float, optional
+        Fraction of the slice-selection gradient area used for the rephasing
+        lobe. Default is 1 (full rephase).
+    scanner : Scanner, optional
+        Scanner hardware definition. Default is a standard 1.5 T scanner.
+    solve_profile : bool, optional
+        If True, solve the Bloch equations and compute the profile interpolator.
+        If False, skip the Bloch solve (profile interpolator is None).
+        Default is False.
+    dtype : np.dtype, optional
+        Floating-point precision. Default is ``np.float32``.
     """
-    Check the bandwidth of the RF pulse.
+    def __init__(self, z0=Quantity(0.0, 'm'), delta_z=Quantity(0.008, 'm'), bandwidth='maximum',
+                 rf=RF(), dt=Quantity(1e-4, 'ms'), profile_samples=150, plot=False,
+                 small_angle=False, refocusing_area_frac=1, scanner=Scanner(),
+                 solve_profile=False, dtype=np.float32):
+        self.z0 = z0
+        self.delta_z = delta_z
+        self.rf = rf
+        self.profile_samples = profile_samples
+        self.plot = plot
+        self.dt = dt.to('ms')
+        self.small_angle = small_angle
+        self.refocusing_area_frac = refocusing_area_frac
+        self.scanner = scanner
+        self.solve_profile = solve_profile
+        self.bandwidth = self._check_bandwidth(bandwidth)
+        self.dtype = dtype
+        self.interp_profile = self.calculate()
 
-    Raises:
-    ValueError: If the bandwidth is less than the minimum required.
-    """
-    max_bw = self.scanner.gammabar.to('Hz/T')*self.scanner.gradient_strength.to('T/m')*self.delta_z.to('m')
-    if bandwidth == 'maximum':
-      return max_bw
-    elif bandwidth > max_bw:
-      raise ValueError('Bandwidth is greater than the maximum allowed by the slice selection gradient and desired slice thickness')
-    else:
-      return bandwidth
+    def _check_bandwidth(self, bandwidth):
+        """Validate and return the effective RF bandwidth.
 
-  def calculate(self, y0=np.array([0,0,1], dtype=np.float32).reshape((3,))):
-    """
-    Calculate the slice profile for MRI imaging.
+        Raises
+        ------
+        ValueError
+            If the requested bandwidth exceeds the maximum achievable with
+            the current gradient strength and slice thickness.
+        """
+        max_bw = self.scanner.gammabar.to('Hz/T') * self.scanner.gradient_strength.to('T/m') * self.delta_z.to('m')
+        if bandwidth == 'maximum':
+            return max_bw
+        elif bandwidth > max_bw:
+            raise ValueError('Bandwidth is greater than the maximum allowed by the slice selection gradient and desired slice thickness')
+        else:
+            return bandwidth
 
-    Parameters:
-    -----------
-    y0: np.ndarray, optional
-      Initial magnetization vector. Default is np.array([0,0,1]).reshape((3,)).
+    def calculate(self, y0=np.array([0, 0, 1], dtype=np.float32).reshape((3,))):
+        """Compute the slice-selection profile by solving the Bloch equations.
 
-    Returns:
-    --------
-    interp_profile: scipy.interpolate.interp1d
-      Interpolated profile of the slice selection.
+        Parameters
+        ----------
+        y0 : np.ndarray, optional
+            Initial magnetization vector ``[Mx, My, Mz]``.
+            Default is ``[0, 0, 1]`` (thermal equilibrium).
 
-    Notes:
-    ------
-    This function calculates the slice profile by solving the Bloch equations using the Runge-Kutta method.
-    It also plots the B1 field, gradient waveforms, and magnetization components if plotting is enabled.
-    """
+        Returns
+        -------
+        scipy.interpolate.interp1d or None
+            Complex (Mx + j My) interpolator as a function of z-position (m),
+            or None when ``solve_profile`` is False.
+        """
 
-    # Calculate gradient amplitude needed for the desired slice thickness and bandwidth
-    Gz = Quantity(np.min([self.bandwidth.m_as('Hz')/self.scanner.gammabar.m_as('Hz/T')/self.delta_z.m_as('m'), self.scanner.gradient_strength.m_as('T/m')]),'T/m')
+        # Calculate gradient amplitude needed for the desired slice thickness and bandwidth
+        Gz = Quantity(
+            np.min([
+                self.bandwidth.m_as('Hz') / self.scanner.gammabar.m_as('Hz/T') / self.delta_z.m_as('m'),
+                self.scanner.gradient_strength.m_as('T/m'),
+            ]),
+            'T/m',
+        )
 
-    # RF pulse durations based on required bandwidth
-    half1 = ((self.rf.NbLobes[0]+1)/self.bandwidth).to('ms')
-    half2 = ((self.rf.NbLobes[1]+1)/self.bandwidth).to('ms')
-    rf_ss = RF(scanner=self.scanner, 
-               NbLobes=self.rf.NbLobes, 
-               alpha=self.rf.alpha, 
-               shape=self.rf.shape, 
-               flip_angle=self.rf.flip_angle, 
-               dur=half1+half2, 
-               ref=half1,
-               time=self.rf.time,
-               nb_samples=self.rf.nb_samples,
-               phase_offset=self.rf.phase_offset,
-               frequency_offset=self.rf.frequency_offset)
+        # RF pulse durations based on required bandwidth
+        half1 = ((self.rf.NbLobes[0] + 1) / self.bandwidth).to('ms')
+        half2 = ((self.rf.NbLobes[1] + 1) / self.bandwidth).to('ms')
+        rf_ss = RF(
+            scanner=self.scanner,
+            NbLobes=self.rf.NbLobes,
+            alpha=self.rf.alpha,
+            shape=self.rf.shape,
+            flip_angle=self.rf.flip_angle,
+            dur=half1 + half2,
+            ref=half1,
+            time=self.rf.time,
+            nb_samples=self.rf.nb_samples,
+            phase_offset=self.rf.phase_offset,
+            frequency_offset=self.rf.frequency_offset,
+        )
 
-    # t = np.linspace((self.rf.ref - self.rf.half1).m_as('ms'), (self.rf.ref + self.rf.half2).m_as('ms'), 100)
-    # plt.plot(t, np.real(self.rf(t)), label='RF real')
-    # plt.plot(t, np.imag(self.rf(t)), label='RF imag')
-    # plt.xlabel('Time [ms]')
-    # plt.ylabel('RF [mT]')
-    # plt.legend()
-    # plt.show()
+        # Create slice selection gradient objects
+        dephasing = Gradient(
+            strength=Gz.to('mT/m'),
+            scanner=self.scanner,
+            lenc=(half1 + half2).to('ms'),
+            time=rf_ss.time.to('ms'),
+            axis=2,
+        )
+        rephasing = Gradient(
+            scanner=self.scanner,
+            time=dephasing.timings[-1].to('ms'),
+            axis=2,
+        )
 
-    # t = np.linspace((rf_ss.ref - rf_ss.half1).m_as('ms'), (rf_ss.ref + half2).m_as('ms'), 100)
-    # plt.plot(t, np.real(rf_ss(t)), label='RF real')
-    # plt.plot(t, np.imag(rf_ss(t)), label='RF imag')
-    # plt.xlabel('Time [ms]')
-    # plt.ylabel('RF [mT]')
-    # plt.legend()
-    # plt.show()
+        # Change rf start time to match the gradients
+        rf_ss.change_time(rf_ss.time + dephasing.slope + 0.5 * dephasing.lenc)
+        self.rf = rf_ss
+        self.dephasing = dephasing
+        self.rephasing = rephasing
 
-    # # Calculate area needed for dephasing condition
-    # area  = 1.0/(self.delta_z * self.Gss.scanner.gammabar) # Ec. 16.5 in Brown's book
-    # slope = self._Gz/self.Gss.Gr_sr_
-    # dur   = (area - 0.5*slope*self._Gz)/self._Gz
+        # Match area lobe of the second gradient
+        half_area = dephasing.area(t0=rf_ss.time).to('mT*ms/m')
+        rephasing.match_area(-half_area * self.refocusing_area_frac)
 
-    # Create slice selection gradient objects
-    dephasing = Gradient(strength=Gz.to('mT/m'), 
-                         scanner=self.scanner, 
-                         lenc=(half1 + half2).to('ms'), 
-                         time=rf_ss.time.to('ms'), 
-                         axis=2)
-    rephasing = Gradient(scanner=self.scanner, 
-                         time=dephasing.timings[-1].to('ms'),
-                         axis=2)
+        def ss_gradient(t):
+            return dephasing(t) + rephasing(t)
 
-    # Change rf start time to match the gradients
-    rf_ss.change_time(rf_ss.time + dephasing.slope + 0.5*dephasing.lenc)
-    self.rf = rf_ss
-    self.dephasing = dephasing
-    self.rephasing = rephasing
+        # Integration bounds
+        t0 = dephasing.timings[0].to('ms')
+        t_bound = rephasing.timings[-1].to('ms')
 
-    # Match area lobe of the second gradient
-    half_area = dephasing.area(t0=rf_ss.time).to('mT*ms/m')
-    rephasing.match_area(-half_area * self.refocusing_area_frac)
+        # Slice positions
+        z_min = self.z0 - 2 * self.delta_z
+        z_max = self.z0 + 2 * self.delta_z
+        z_arr = np.linspace(z_min.m_as('m'), z_max.m_as('m'), self.profile_samples)
 
-    def ss_gradient(t):
-      return dephasing(t) + rephasing(t)
+        if self.solve_profile:
+            # Bloch equation
+            bloch = Bloch(
+                gamma=self.scanner.gamma.m_as('rad/mT/ms'),
+                z0=self.z0.m_as('m'),
+                eval_gradient=ss_gradient,
+                B1e=rf_ss,
+                small_angle=self.small_angle,
+            )
 
-    # Integration bounds
-    t0 = dephasing.timings[0].to('ms')
-    t_bound = rephasing.timings[-1].to('ms')
+            # Solve loop
+            M = np.zeros([3, len(z_arr)])
+            for (i, z) in enumerate(z_arr):
 
-    # Slice positions
-    z_min = self.z0 - 2*self.delta_z
-    z_max = self.z0 + 2*self.delta_z
-    z_arr = np.linspace(z_min.m_as('m'), z_max.m_as('m'), self.profile_samples)
+                # Solve
+                bloch.z = z
+                solver = RK45(
+                    bloch, t0.m, y0, t_bound.m,
+                    vectorized=False,
+                    first_step=self.dt.m_as('ms'),
+                    max_step=100 * self.dt.m_as('ms'),
+                )
 
-    if self.solve_profile:
-      # Bloch equation
-      bloch = Bloch(gamma=self.scanner.gamma.m_as('rad/mT/ms'), z0=self.z0.m_as('m'), eval_gradient=ss_gradient, B1e=rf_ss, small_angle=self.small_angle)
+                # Collect data
+                t  = [t0.m, ]
+                B1 = [rf_ss(t0.m), ]
+                while solver.status not in ['finished', 'failed']:
+                    # Get solution step state
+                    solver.step()
+                    t.append(solver.t)
+                    B1.append(rf_ss(t[-1]))
 
-      # Solve loop
-      M = np.zeros([3, len(z_arr)])
-      for (i, z) in enumerate(z_arr):
+                M[:, i] = solver.y
+            t  = np.array(t)
+            B1 = np.array(B1)
+        else:
+            # Use time bounds to define RF object
+            nb_steps = int((t_bound - t0).m_as('ms') / self.dt.m_as('ms')) + 1
+            t = np.linspace(t0.m_as('ms'), t_bound.m_as('ms'), nb_steps, endpoint=True)
+            B1 = rf_ss(t)
 
-        # Solve
-        bloch.z = z
-        solver = RK45(bloch, t0.m, y0, t_bound.m, vectorized=False, first_step=self.dt.m_as('ms'), max_step=100*self.dt.m_as('ms'))
+        if self.plot and MPI_rank == 0:
+            plt.rcParams.update({'font.size': 16})
 
-        # collect data
-        t  = [t0.m,]
-        B1 = [rf_ss(t0.m),]
-        while solver.status not in ['finished','failed']:
-          # get solution step state
-          solver.step()
-          t.append(solver.t)
-          B1.append(rf_ss(t[-1]))
+            # Plot RF and slice selection gradients
+            fig, ax = plt.subplots(2, 1, figsize=(12, 4))
+            ax[0].plot(t, np.real(B1))
+            ax[0].plot(t, np.imag(B1))
+            ax[0].set_xlim([t0.m, t_bound.m])
+            ax[0].legend(['B1_real', 'B1_imag'])
+            ax[0].set_ylabel('RF [mT]')
+            ax[0].set_xticklabels([])
 
-        M[:,i] = solver.y
-      t  = np.array(t)
-      B1 = np.array(B1)
-    else:
-      # Use time bounds to define RF object
-      nb_steps = int((t_bound - t0).m_as('ms') / self.dt.m_as('ms')) + 1
-      t = np.linspace(t0.m_as('ms'), t_bound.m_as('ms'), nb_steps, endpoint=True)
-      B1 = rf_ss(t)
+            ax[1].plot(dephasing.timings.m_as('ms'), dephasing.amplitudes.m_as('mT/m'))
+            ax[1].plot(rephasing.timings.m_as('ms'), rephasing.amplitudes.m_as('mT/m'))
+            ax[1].set_xlim([t0.m, t_bound.m])
+            ax[1].set_xlabel('Time [{:%s}]'.format(rephasing.timings.units))
+            ax[1].set_ylabel('G [{:%s}]'.format(rephasing.amplitudes.units))
+            ax[1].legend(['Dephasing', 'Rephasing'])
+            fig.tight_layout()
 
-    if self.plot and MPI_rank==0:
-      # plt.rcParams['text.usetex'] = True
-      plt.rcParams.update({'font.size': 16})
-      
-      # Plot RF and slice selection gradients
-      fig, ax = plt.subplots(2, 1, figsize=(12, 4))
-      ax[0].plot(t, np.real(B1))
-      ax[0].plot(t, np.imag(B1))
-      ax[0].set_xlim([t0.m, t_bound.m])
-      ax[0].legend(['B1_real','B1_imag'])
-      ax[0].set_ylabel('RF [mT]')
-      ax[0].set_xticklabels([])
+            if self.solve_profile:
+                # Plot slice profiles
+                fig, ax = plt.subplots(1, 2, figsize=(12, 4))
+                ax[0].plot(z_arr, M[0, :])
+                ax[0].plot(z_arr, M[1, :])
+                ax[0].plot(z_arr, np.abs(M[0, :] + 1j * M[1, :]))
+                ax[0].legend(['$M_x$', '$M_y$', '$M_{xy}$'])
+                ax[0].vlines(
+                    x=[self.z0.m - 0.5 * self.delta_z.m, self.z0.m + 0.5 * self.delta_z.m],
+                    ymin=0, ymax=M[1, :].max(), colors='r', linestyles='dashed',
+                )
+                ax[0].set_xlabel('z coordinate [m]')
+                ax[0].set_ylabel('Magnetization')
 
-      ax[1].plot(dephasing.timings.m_as('ms'), dephasing.amplitudes.m_as('mT/m'))
-      ax[1].plot(rephasing.timings.m_as('ms'), rephasing.amplitudes.m_as('mT/m'))
-      ax[1].set_xlim([t0.m, t_bound.m])
-      ax[1].set_xlabel('Time [{:%s}]'.format(rephasing.timings.units))
-      ax[1].set_ylabel('G [{:%s}]'.format(rephasing.amplitudes.units))
-      ax[1].legend(['Dephasing','Rephasing'])
-      fig.tight_layout()
+                ax[1].plot(z_arr, M[2, :])
+                ax[1].legend(['$M_z$'])
+                ax[1].set_xlabel('z coordinate [m]')
+                ax[1].set_ylabel('Magnetization')
+                fig.tight_layout()
+            plt.show()
 
-      if self.solve_profile:
-        # Plot slice profiles
-        fig, ax = plt.subplots(1, 2, figsize=(12, 4))
-        ax[0].plot(z_arr, M[0,:])
-        ax[0].plot(z_arr, M[1,:])
-        ax[0].plot(z_arr, np.abs(M[0,:] + 1j*M[1,:]))
-        ax[0].legend(['$M_x$','$M_y$','$M_{xy}$'])
-        ax[0].vlines(x=[self.z0.m - 0.5*self.delta_z.m, self.z0.m + 0.5*self.delta_z.m], ymin=0, ymax=M[1,:].max(), colors='r', linestyles='dashed')
-        ax[0].set_xlabel('z coordinate [m]')
-        ax[0].set_ylabel('Magnetization')
+        # Interpolator
+        if self.solve_profile:
+            p = M[0, :].astype(self.dtype) + 1j * M[1, :].astype(self.dtype)
+            interp_profile = interp1d(z_arr.astype(self.dtype), p, kind='linear', bounds_error=False, fill_value=0.0)
+        else:
+            interp_profile = None
 
-        ax[1].plot(z_arr, M[2,:])
-        ax[1].legend(['$M_z$'])
-        ax[1].set_xlabel('z coordinate [m]')
-        ax[1].set_ylabel('Magnetization')
-        fig.tight_layout()
-      plt.show()
-
-    # Interpolator
-    if self.solve_profile:
-      p = M[0,:].astype(self.dtype) + 1j*M[1,:].astype(self.dtype)
-      interp_profile = interp1d(z_arr.astype(self.dtype), p, kind='linear', bounds_error=False, fill_value=0.0)
-    else:
-      interp_profile = None
-
-    return interp_profile
+        return interp_profile
 
 
 class VelocityEncoding:
-  def __init__(self, VENC: Quantity, directions: list, dtype=np.float32, normalize_dirs: bool = False):
+    """Phase-contrast velocity encoding for MRI signal simulation.
+
+    Computes the velocity-induced phase accumulated by spins after a pair of
+    bipolar gradient lobes, for one or more encoding directions.
+
+    Parameters
+    ----------
+    VENC : Quantity
+        Velocity encoding value(s) (m/s). A scalar is broadcast to match the
+        number of directions; a 1-D array must have the same length as
+        ``directions``.
+    directions : np.ndarray
+        2-D array of shape ``(N, 3)`` giving the encoding direction vectors.
+    dtype : np.dtype, optional
+        Floating-point precision. Default is ``np.float32``.
+    normalize_dirs : bool, optional
+        If True, normalize each direction to unit length. Default is False.
     """
-    Initializes the MRImaging object with VENC and directions.
 
-    Parameters:
-      VENC (float or list of floats): The velocity encoding (VENC) value(s). If a single float is provided, it will be broadcasted to match the number of directions. If a list is provided, its length must match the number of directions.
-      directions (numpy.ndarray): A 2D array representing the directions. The number of rows should match the number of VENC values.
+    def __init__(self, VENC: Quantity, directions: list, dtype=np.float32, normalize_dirs: bool = False):
+        if isinstance(VENC.m, float):
+            self.VENC = (np.ones(directions.shape[0]) * VENC).astype(dtype)
+        elif len(VENC) == directions.shape[0]:
+            self.VENC = (np.array(VENC)).astype(dtype)
+        else:
+            raise ValueError('VENC and directions must have the same length')
+        self.directions = directions.astype(dtype)
+        self.nb_directions = directions.shape[0]
+        self.normalize_dirs = normalize_dirs
+        if self.normalize_dirs:
+            self.normalize_directions()
+        self.dtype = dtype
 
-    Raises:
-      ValueError: If the length of VENC does not match the number of directions.
-    """
-    if isinstance(VENC.m, float):
-      self.VENC = (np.ones(directions.shape[0])*VENC).astype(dtype)
-    elif len(VENC) == directions.shape[0]:
-      self.VENC = (np.array(VENC)).astype(dtype)
-    else:
-      raise ValueError('VENC and directions must have the same length')
-    self.directions = directions.astype(dtype)
-    self.nb_directions = directions.shape[0]
-    self.normalize_dirs = normalize_dirs
-    if self.normalize_dirs:
-      self.normalize_directions()
-    self.dtype = dtype
+    def normalize_directions(self):
+        """Normalize each direction vector to unit length in place."""
+        for i in range(self.nb_directions):
+            norm = np.linalg.norm(self.directions[i, :], 2)
+            if norm != 0:
+                self.directions[i, :] /= norm
 
-  def normalize_directions(self):
-    """
-    Normalize the directions vector.
+    def encode(self, velocity, delta_phi=0.0):
+        """Compute the velocity-induced phase for each encoding direction.
 
-    This method normalizes the `directions` attribute of the object by dividing it by its L2 norm (Euclidean norm). This ensures that the `directions` vector has a unit length.
+        Parameters
+        ----------
+        velocity : np.ndarray
+            Velocity array of shape ``(N, 3)`` in m/s.
+        delta_phi : float, optional
+            Additional constant phase offset (rad). Default is 0.0.
 
-    Returns:
-      None
-    """
-    for i in range(self.nb_directions):
-      norm = np.linalg.norm(self.directions[i,:], 2)
-      if norm != 0:
-        self.directions[i,:] /= norm
-
-  def encode(self, velocity, delta_phi = 0.0):
-    """
-    Encodes the given velocity using the phase contrast MRI method.
-
-    Parameters:
-    velocity (numpy.ndarray): A numpy array representing the velocity vector.
-
-    Returns:
-    numpy.ndarray: The encoded velocity as a numpy array.
-    """
-    phi_v = np.zeros([velocity.shape[0], self.nb_directions], dtype=self.dtype)
-    for i in range(self.nb_directions):
-      phi_v[:,i] = np.pi * np.dot(velocity, self.directions[i,:].T) / self.VENC[i] + delta_phi
-    return  phi_v
+        Returns
+        -------
+        np.ndarray
+            Phase array of shape ``(N, nb_directions)`` in radians.
+        """
+        phi_v = np.zeros([velocity.shape[0], self.nb_directions], dtype=self.dtype)
+        for i in range(self.nb_directions):
+            phi_v[:, i] = np.pi * np.dot(velocity, self.directions[i, :].T) / self.VENC[i] + delta_phi
+        return phi_v
 
 
 class PositionEncoding:
-  def __init__(self, ke, directions, dtype=np.float32):
+    """Position (displacement tagging) encoding for MRI signal simulation.
+
+    Computes the displacement-induced phase for one or more encoding
+    directions, as used in DENSE or other tagged MRI techniques.
+
+    Parameters
+    ----------
+    ke : float or list of float
+        Encoding spatial frequency (1/m). A scalar is broadcast to all
+        directions; a list must match the length of ``directions``.
+    directions : np.ndarray
+        2-D array of shape ``(N, 3)`` giving the encoding direction vectors.
+        Directions are always normalized to unit length.
+    dtype : np.dtype, optional
+        Floating-point precision. Default is ``np.float32``.
     """
-    Initializes the MRImaging object with VENC and directions.
 
-    Parameters:
-      ke (float or list of floats): The position encoding (ke) value(s). If a single float is provided, it will be broadcasted to match the number of directions. If a list is provided, its length must match the number of directions.
-      directions (numpy.ndarray): A 2D array representing the directions. The number of rows should match 
-                    the number of VENC values.
+    def __init__(self, ke, directions, dtype=np.float32):
+        if isinstance(ke, float):
+            self.ke = (np.ones(directions.shape[0]) * ke).astype(dtype)
+        elif len(ke) == directions.shape[0]:
+            self.ke = np.array(ke).astype(dtype)
+        else:
+            raise ValueError('ke and directions must have the same length')
+        self.directions = directions
+        self.nb_directions = directions.shape[0]
+        self.normalize_directions()
+        self.dtype = dtype
 
-    Raises:
-      ValueError: If the length of VENC does not match the number of directions.
-    """
-    if isinstance(ke, float):
-      self.ke = (np.ones(directions.shape[0])*ke).astype(dtype)
-    elif len(ke) == directions.shape[0]:
-      self.ke = np.array(ke).astype(dtype)
-    else:
-      raise ValueError('ke and directions must have the same length')
-    self.directions = directions
-    self.nb_directions = directions.shape[0]
-    self.normalize_directions()
-    self.dtype = dtype
+    def normalize_directions(self):
+        """Normalize each direction vector to unit length in place."""
+        for i in range(self.nb_directions):
+            norm = np.linalg.norm(self.directions[i, :], 2)
+            if norm != 0:
+                self.directions[i, :] /= norm
 
-  def normalize_directions(self):
-    """
-    Normalize the directions vector.
+    def encode(self, displacement):
+        """Compute the displacement-induced phase for each encoding direction.
 
-    This method normalizes the `directions` attribute of the object by dividing it by its L2 norm (Euclidean norm). This ensures that the `directions` vector has a unit length.
+        Parameters
+        ----------
+        displacement : np.ndarray
+            Displacement array of shape ``(N, 3)`` in meters.
 
-    Returns:
-      None
-    """
-    for i in range(self.nb_directions):
-      norm = np.linalg.norm(self.directions[i,:], 2)
-      if norm != 0:
-        self.directions[i,:] /= norm
-
-  def encode(self, displacement):
-    """
-    Encodes the given velocity using the phase contrast MRI method.
-
-    Parameters:
-    velocity (numpy.ndarray): A numpy array representing the velocity vector.
-
-    Returns:
-    numpy.ndarray: The encoded velocity as a numpy array.
-    """
-    phi_x = np.zeros([displacement.shape[0], self.nb_directions])
-    for i in range(self.nb_directions):
-      phi_x[:,i] = np.dot(displacement, self.directions[i,:].T) * self.ke[i]
-    return phi_x
+        Returns
+        -------
+        np.ndarray
+            Phase array of shape ``(N, nb_directions)`` in radians.
+        """
+        phi_x = np.zeros([displacement.shape[0], self.nb_directions])
+        for i in range(self.nb_directions):
+            phi_x[:, i] = np.dot(displacement, self.directions[i, :].T) * self.ke[i]
+        return phi_x
