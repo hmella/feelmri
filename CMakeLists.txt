@@ -89,7 +89,6 @@ else()
     message(WARNING "⚠️ No supported CPU tuning flags found — using generic tuning.")
 endif()
 
-
 # ------------------------------------------------------------
 # FEniCS Basix (C++) automatic compilation via FetchContent
 # ------------------------------------------------------------
