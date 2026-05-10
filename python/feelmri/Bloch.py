@@ -503,10 +503,6 @@ class BlochSolver:
         # Solve the Bloch equations for each block
         for i, block in enumerate(blocks):
 
-            # Update POD trajectory time shift
-            if self.pod_trajectory is not None:
-                self.pod_trajectory.update_timeshift(block.time_extent[0].m_as('ms'))
-
             # Discrete time points and time intervals
             discrete_times = block.discrete_times.m_as('ms')
             dt = np.diff(discrete_times, prepend=0)
@@ -522,10 +518,33 @@ class BlochSolver:
 
             # Indicator array
             regime_idx = np.abs(rf_pulses) != 0.0
+            
+            # Pre-compute the POD modes and weights for this block's timeframe
+            has_traj = self.pod_trajectory is not None
+            if has_traj:
+                self.pod_trajectory.update_timeshift(block.time_extent[0].m_as('ms'))
+                
+                # Get the continuous weights for this block's time points
+                weights = self.pod_trajectory.get_weights(discrete_times - self.pod_trajectory.timeshift)
+                
+                # Get the static modes mapped to the original local nodes
+                modes = self.pod_trajectory.get_modes(nb_nodes)
+                modes_x = np.ascontiguousarray(modes[:, 0, :])
+                modes_y = np.ascontiguousarray(modes[:, 1, :])
+                modes_z = np.ascontiguousarray(modes[:, 2, :])
+                
+                # Format weights securely for PyBind11
+                total_modes = modes_x.shape[1]
+                weights = np.ascontiguousarray(weights.reshape(-1, total_modes), dtype=np.float32)
+            else:
+                # Dummies
+                weights = np.empty((0, 0), dtype=np.float32)
+                modes_x = np.empty((0, 0), dtype=np.float32)
+                modes_y = np.empty((0, 0), dtype=np.float32)
+                modes_z = np.empty((0, 0), dtype=np.float32)
 
             # Solve
             if block._spoiler is True:
-                # Build multi-isochromats quickly via vectorization
                 K = 25
                 elem_size = self.phantom.global_elem_size.min()
                 (x_big, T1_big, T2_big,
@@ -537,15 +556,22 @@ class BlochSolver:
                     K=K,
                     pos_jitter=elem_size
                 )
+                
+                # CRITICAL FIX: Expand modes to match the duplicated nodes in x_big!
+                if has_traj:
+                    m_x_big = np.ascontiguousarray(np.repeat(modes_x, K, axis=0))
+                    m_y_big = np.ascontiguousarray(np.repeat(modes_y, K, axis=0))
+                    m_z_big = np.ascontiguousarray(np.repeat(modes_z, K, axis=0))
+                else:
+                    m_x_big, m_y_big, m_z_big = modes_x, modes_y, modes_z
 
                 # Solve for the expanded mesh
                 Mxy_hist, Mz_hist = solve_mri(
                     x_big, T1_big, T2_big, deltaB_big, self.M0, gamma,
                     rf_pulses, gradients, dt, regime_idx, Mxy_big, Mz_big,
-                    self.pod_trajectory
+                    m_x_big, m_y_big, m_z_big, weights, has_traj
                 )
 
-                # Collapse back to the FE resolution using only the final time step
                 Mxy_, Mz_ = collapse_isochromats(
                     Mxy_hist[:, -1],
                     Mz_hist[:, -1],
@@ -553,17 +579,16 @@ class BlochSolver:
                     mode="mean"
                 )
 
-                # Reshape to keep consistency with solve_mri's usual 2D return format
-                # so the downstream assignment Mxy[:, i] = Mxy_[:, -1] still works.
                 Mxy_ = Mxy_.reshape(-1, 1)
                 Mz_ = Mz_.reshape(-1, 1)
 
             else:
+                # Solve normally
                 Mxy_, Mz_ = solve_mri(
                     x, T1, T2, self.delta_B, self.M0, gamma,
                     rf_pulses, gradients, dt, regime_idx,
                     self.initial_Mxy, self.initial_Mz,
-                    self.pod_trajectory
+                    modes_x, modes_y, modes_z, weights, has_traj
                 )
 
             # Update magnetizations

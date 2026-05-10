@@ -168,6 +168,37 @@ class FEMPhantom:
 
         return mesh, reader, Nfr
 
+    def _prepare_pod_data(self, kspace_times, pod):
+        """Helper to extract and format POD data for zero-copy C++ execution."""
+        has_traj = pod is not None
+        
+        if has_traj:
+            # Flatten time and find unique timestamps to avoid redundant evaluations
+            t_flat = kspace_times.flatten()
+            unique_times, inv_indices = np.unique(t_flat, return_inverse=True)
+            unique_weights = pod.get_weights(unique_times)
+            weights = unique_weights[inv_indices] 
+            
+            # Extract static modes
+            modes = pod.get_modes(self.local_nodes.shape[0])
+            modes_x = np.ascontiguousarray(modes[:, 0, :])
+            modes_y = np.ascontiguousarray(modes[:, 1, :])
+            modes_z = np.ascontiguousarray(modes[:, 2, :])
+            
+            # Force 2D C-contiguous layout for PyBind11
+            total_modes = modes_x.shape[1]
+            weights = np.ascontiguousarray(weights.reshape(-1, total_modes), dtype=np.float32)
+        else:
+            # Empty dummies
+            weights = np.empty((0, 0), dtype=np.float32)
+            modes_x = np.empty((0, 0), dtype=np.float32)
+            modes_y = np.empty((0, 0), dtype=np.float32)
+            modes_z = np.empty((0, 0), dtype=np.float32)
+
+        t_array_cpp = np.ascontiguousarray(kspace_times, dtype=np.float32)
+        
+        return t_array_cpp, modes_x, modes_y, modes_z, weights, has_traj
+
     def bounding_box(self):
         """Compute the axis-aligned bounding box of the global mesh.
 
@@ -690,19 +721,19 @@ class FEMPhantom:
             Complex k-space signal summed over all assembler groups.
         """
         # Create help to call the correct function
-        eval_helper = []
+        if isinstance(pod, list):
+            raise NotImplementedError("Lists of trajectories must be combined using PODSum before evaluation.")
+            
+        t_cpp, m_x, m_y, m_z, w, has_traj = self._prepare_pod_data(kspace_times, pod)
 
-        # Use enumerate to safely get the index and the object
+        eval_helper = []
         for i, a in enumerate(self.assembler):
             if i == 0 and self.nodal_approximation__:
                 eval_helper.append(a.signal_nodal)
             else:
                 eval_helper.append(a.signal)
 
-        if isinstance(pod, list):
-            return sum([signal(kspace_points, kspace_times, p) for (signal, p) in zip(eval_helper, pod)])
-        else:
-            return sum([signal(kspace_points, kspace_times, pod) for signal in eval_helper])
+        return sum([signal(kspace_points, t_cpp, m_x, m_y, m_z, w, has_traj) for signal in eval_helper])
 
     def signal(self, kspace_points, kspace_times, pod=None):
         """Compute the k-space signal using full Gauss integration.
@@ -723,32 +754,9 @@ class FEMPhantom:
         """
         # Added isinstance check to prevent crashes when passing precomputed lists
         if isinstance(pod, list):
-            return sum([a.signal(kspace_points, kspace_times, p) for (a, p) in zip(self.assembler, pod)])
-        else:
-            return sum([a.signal(kspace_points, kspace_times, pod) for a in self.assembler])
-
-    def signal_full(self, kspace_points, kspace_times, pod=None):
-        """Compute the k-space signal using full magnetization integration.
-
-        Parameters
-        ----------
-        kspace_points : np.ndarray
-            K-space sample coordinates.
-        kspace_times : np.ndarray
-            Acquisition times.
-        pod : POD, list of POD, or None
-            Motion trajectory.
-
-        Returns
-        -------
-        np.ndarray
-            Complex k-space signal.
-        """
-        # Added isinstance check to prevent crashes when passing precomputed lists
-        if isinstance(pod, list):
-            return sum([a.signal_full(kspace_points, kspace_times, p) for (a, p) in zip(self.assembler, pod)])
-        else:
-            return sum([a.signal_full(kspace_points, kspace_times, pod) for a in self.assembler])
+            raise NotImplementedError("Lists of trajectories must be combined using PODSum before evaluation.")
+        t_cpp, m_x, m_y, m_z, w, has_traj = self._prepare_pod_data(kspace_times, pod)
+        return sum([a.signal(kspace_points, t_cpp, m_x, m_y, m_z, w, has_traj) for a in self.assembler])
 
     def signal_nodal(self, kspace_points, kspace_times, pod=None):
         """Compute the k-space signal using ultra-fast nodal mass matrix integration.
@@ -768,9 +776,9 @@ class FEMPhantom:
             Complex k-space signal.
         """
         if isinstance(pod, list):
-            return sum([a.signal_nodal(kspace_points, kspace_times, p) for (a, p) in zip(self.assembler, pod)])
-        else:
-            return sum([a.signal_nodal(kspace_points, kspace_times, pod) for a in self.assembler])
+            raise NotImplementedError("Lists of trajectories must be combined using PODSum before evaluation.")
+        t_cpp, m_x, m_y, m_z, w, has_traj = self._prepare_pod_data(kspace_times, pod)
+        return sum([a.signal_nodal(kspace_points, t_cpp, m_x, m_y, m_z, w, has_traj) for a in self.assembler])
 
     def signal_sum(self, kspace_points, kspace_times, pod=None):
         """Compute the k-space signal by summing nodal contributions.
@@ -789,7 +797,8 @@ class FEMPhantom:
         np.ndarray
             Complex k-space signal.
         """
+
         if isinstance(pod, list):
-            return sum([a.signal_sum(kspace_points, kspace_times, p) for (a, p) in zip(self.assembler, pod)])
-        else:
-            return sum([a.signal_sum(kspace_points, kspace_times, pod) for a in self.assembler])
+            raise NotImplementedError("Lists of trajectories must be combined using PODSum before evaluation.")
+        t_cpp, m_x, m_y, m_z, w, has_traj = self._prepare_pod_data(kspace_times, pod)
+        return sum([a.signal_sum(kspace_points, t_cpp, m_x, m_y, m_z, w, has_traj) for a in self.assembler])
