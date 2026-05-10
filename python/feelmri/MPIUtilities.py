@@ -49,6 +49,3 @@ def MPI_print(*args, **kwargs):
     """
     if MPI_rank == 0:
         print(*args, **kwargs)
-
-    # Synchronize all processes
-    MPI_comm.Barrier()
