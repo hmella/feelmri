@@ -10,9 +10,9 @@
  */
 #pragma once
 
+#include <pybind11/eigen.h> // REQUIRED for zero-copy memory views
 #include <pybind11/eigen/tensor.h>
 #include <pybind11/pybind11.h>
-#include <pybind11/eigen.h>
 #include <pybind11/stl.h>
 #include <Eigen/Dense>
 
@@ -61,18 +61,18 @@ using Magnetization = std::pair<
  */
 template <typename T>
 Magnetization<T> solve_mri(
-    const Matrix<T, Dynamic, 3, RowMajor> &r0,
-    const Matrix<T, Dynamic, 1> &T1,
-    const Matrix<T, Dynamic, 1> &T2,
-    const Matrix<T, Dynamic, 1> &delta_B,
+    Eigen::Ref<const Matrix<T, Dynamic, 3, RowMajor>> r0,
+    Eigen::Ref<const Matrix<T, Dynamic, 1>> T1,
+    Eigen::Ref<const Matrix<T, Dynamic, 1>> T2,
+    Eigen::Ref<const Matrix<T, Dynamic, 1>> delta_B,
     const T &M0,
     const T &gamma,
-    const Matrix<std::complex<T>, Dynamic, 1> &rf_all,
-    const Matrix<T, Dynamic, 3> &G_all,
-    const Matrix<T, Dynamic, 1> &dt,
-    const Matrix<bool, Dynamic, 1> &regime_idx,
-    const Matrix<std::complex<T>, Dynamic, 1> &Mxy_initial,
-    const Matrix<T, Dynamic, 1> &Mz_initial,
+    Eigen::Ref<const Matrix<std::complex<T>, Dynamic, 1>> rf_all,
+    Eigen::Ref<const Matrix<T, Dynamic, 3>> G_all,
+    Eigen::Ref<const Matrix<T, Dynamic, 1>> dt,
+    Eigen::Ref<const Matrix<bool, Dynamic, 1>> regime_idx,
+    Eigen::Ref<const Matrix<std::complex<T>, Dynamic, 1>> Mxy_initial,
+    Eigen::Ref<const Matrix<T, Dynamic, 1>> Mz_initial,
     const py::function &pod_trajectory
 );
 
@@ -102,50 +102,17 @@ Magnetization<T> solve_mri(
  */
 template <typename T>
 Magnetization<T> solve_mri(
-    const Matrix<T, Dynamic, 3, RowMajor> &r0,
-    const Matrix<T, Dynamic, 1> &T1,
-    const Matrix<T, Dynamic, 1> &T2,
-    const Matrix<T, Dynamic, 1> &delta_B,
+    Eigen::Ref<const Matrix<T, Dynamic, 3, RowMajor>> r0,
+    Eigen::Ref<const Matrix<T, Dynamic, 1>> T1,
+    Eigen::Ref<const Matrix<T, Dynamic, 1>> T2,
+    Eigen::Ref<const Matrix<T, Dynamic, 1>> delta_B,
     const T &M0,
     const T &gamma,
-    const Matrix<std::complex<T>, Dynamic, 1> &rf_all,
-    const Matrix<T, Dynamic, 3> &G_all,
-    const Matrix<T, Dynamic, 1> &dt,
-    const Matrix<bool, Dynamic, 1> &regime_idx,
-    const Matrix<std::complex<T>, Dynamic, 1> &Mxy_initial,
-    const Matrix<T, Dynamic, 1> &Mz_initial,
+    Eigen::Ref<const Matrix<std::complex<T>, Dynamic, 1>> rf_all,
+    Eigen::Ref<const Matrix<T, Dynamic, 3>> G_all,
+    Eigen::Ref<const Matrix<T, Dynamic, 1>> dt,
+    Eigen::Ref<const Matrix<bool, Dynamic, 1>> regime_idx,
+    Eigen::Ref<const Matrix<std::complex<T>, Dynamic, 1>> Mxy_initial,
+    Eigen::Ref<const Matrix<T, Dynamic, 1>> Mz_initial,
     const py::none &pod_trajectory
 );
-
-PYBIND11_MODULE(BlochSimulator, m) {
-  // Define function overloads
-  // Overload for the case with pod_trajectory
-  m.def("solve_mri", py::overload_cast<
-    const Matrix<float, Dynamic, 3, RowMajor> & ,
-    const Matrix<float, Dynamic, 1> & ,
-    const Matrix<float, Dynamic, 1> & ,
-    const Matrix<float, Dynamic, 1> & ,
-    const float & ,
-    const float & ,
-    const Matrix<std::complex<float>, Dynamic, 1> &,
-    const Matrix<float, Dynamic, 3> & ,
-    const Matrix<float, Dynamic, 1> & ,
-    const Matrix<bool, Dynamic, 1> & ,
-    const Matrix<std::complex<float>, Dynamic, 1> & ,
-    const Matrix<float, Dynamic, 1> & ,
-    const py::function &>(&solve_mri<float>));
-  m.def("solve_mri", py::overload_cast<
-    const Matrix<float, Dynamic, 3, RowMajor> & ,
-    const Matrix<float, Dynamic, 1> & ,
-    const Matrix<float, Dynamic, 1> & ,
-    const Matrix<float, Dynamic, 1> & ,
-    const float & ,
-    const float & ,
-    const Matrix<std::complex<float>, Dynamic, 1> &,
-    const Matrix<float, Dynamic, 3> & ,
-    const Matrix<float, Dynamic, 1> & ,
-    const Matrix<bool, Dynamic, 1> & ,
-    const Matrix<std::complex<float>, Dynamic, 1> & ,
-    const Matrix<float, Dynamic, 1> & ,
-    const py::none &>(&solve_mri<float>));
-}
