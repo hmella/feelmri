@@ -173,6 +173,20 @@ class RespiratoryMotion:
         """
         self.timeshift = timeshift
 
+    def get_modes(self, n_nodes: int) -> np.ndarray:
+        """Return the global direction vector cast as a 1-mode displacement matrix."""
+        # Output shape: (N_nodes, 3 components, 1 mode)
+        modes = np.zeros((n_nodes, 3, 1), dtype=np.float32)
+        modes[:, :, 0] = self.direction  # Broadcasts the (1, 3) vector to all nodes
+        return modes
+
+    def get_weights(self, t_array: np.ndarray) -> np.ndarray:
+        """Evaluate the motion amplitude for all time points."""
+        t_eff = self._fold_time(t_array + self.timeshift)
+        weights = self.interpolator(t_eff).astype(np.float32)
+        # Output shape: (N_times, 1 mode)
+        return weights.reshape(-1, 1)
+
 
 class POD:
     """Proper Orthogonal Decomposition trajectory for spatially-varying motion.
@@ -395,6 +409,18 @@ class POD:
         """
         self.timeshift = timeshift
 
+    def get_modes(self, n_nodes: int) -> np.ndarray:
+        """Return the pre-calculated static POD modes."""
+        if self._modes.shape[0] != n_nodes:
+            raise ValueError(f"POD mesh size ({self._modes.shape[0]}) does not match assembler ({n_nodes}).")
+        # Output shape: (N_nodes, 3 components, M_modes)
+        return self._modes
+
+    def get_weights(self, t_array: np.ndarray) -> np.ndarray:
+        """Evaluate the spline interpolator for all time points simultaneously."""
+        t_eff = self._fold_time(t_array + self.timeshift)
+        # scipy's PPoly natively returns (N_times, M_modes) when evaluated with an array
+        return self._pp_batch(t_eff).astype(np.float32)
 
 class PODVelocity(POD):
     """POD trajectory for velocity fields.
@@ -438,6 +464,13 @@ class PODVelocity(POD):
 
         return tensordot_modes_weights(self._modes, self._weights)
 
+    def get_weights(self, t_array: np.ndarray) -> np.ndarray:
+        """Evaluate velocity weights (integrated displacement scaled by t_ro)."""
+        t_eff = self._fold_time(t_array + self.timeshift)
+        weights = self._pp_batch(t_eff).astype(np.float32)
+        # Scale by readout time to convert displacement modes to instantaneous velocity
+        weights *= t_array[:, np.newaxis]
+        return weights
 
 class PODSum:
     """Sum of two trajectory objects evaluated at the same time point.
@@ -485,3 +518,17 @@ class PODSum:
         self.pod1.update_timeshift(timeshift)
         self.pod2.update_timeshift(timeshift)
         self.timeshift = timeshift
+
+    def get_modes(self, n_nodes: int) -> np.ndarray:
+        """Concatenate the modes of both constituent trajectories."""
+        m1 = self.pod1.get_modes(n_nodes)
+        m2 = self.pod2.get_modes(n_nodes)
+        # Combine along the 'modes' axis
+        return np.concatenate([m1, m2], axis=2)
+
+    def get_weights(self, t_array: np.ndarray) -> np.ndarray:
+        """Concatenate the weights of both constituent trajectories."""
+        w1 = self.pod1.get_weights(t_array)
+        w2 = self.pod2.get_weights(t_array)
+        # Combine along the 'modes' axis
+        return np.concatenate([w1, w2], axis=1)
