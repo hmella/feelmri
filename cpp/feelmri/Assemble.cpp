@@ -222,37 +222,32 @@ Eigen::SparseMatrix<T> basixMassAssemble(
     const std::size_t total_triplets = static_cast<std::size_t>(nb_elems) * nb_nodes_e * nb_nodes_e;
     std::vector<TripletType> coefficients(total_triplets);
 
-    // Multithread the assembly loop
-    #pragma omp parallel
+    // Assembly loop
+    Eigen::Matrix<T, Eigen::Dynamic, 3> elem_nodes(nb_nodes_e, 3);
+    Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic> Me(nb_dofs, nb_dofs);
+
+    for (int e = 0; e < nb_elems; ++e)
     {
-        // Thread-local buffers avoid heap allocations inside the hot loop
-        Eigen::Matrix<T, Eigen::Dynamic, 3> elem_nodes(nb_nodes_e, 3);
-        Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic> Me(nb_dofs, nb_dofs);
+        const auto elem = elems.row(e);
 
-        #pragma omp for
-        for (int e = 0; e < nb_elems; ++e)
+        for (int i = 0; i < nb_nodes_e; ++i)
+            elem_nodes.row(i) = nodes.row(elem(i));
+
+        // Populate thread-local Me
+        basixLocalMassAssemble<T>(Me, elem_nodes, wts, tab, nb_dofs, nq);
+
+        // Compute precise offset for lock-free parallel insertion
+        const std::size_t offset = static_cast<std::size_t>(e) * nb_nodes_e * nb_nodes_e;
+        std::size_t idx = 0;
+
+        for (int i = 0; i < nb_nodes_e; ++i)
         {
-            const auto elem = elems.row(e);
-
-            for (int i = 0; i < nb_nodes_e; ++i)
-                elem_nodes.row(i) = nodes.row(elem(i));
-
-            // Populate thread-local Me
-            basixLocalMassAssemble<T>(Me, elem_nodes, wts, tab, nb_dofs, nq);
-
-            // Compute precise offset for lock-free parallel insertion
-            const std::size_t offset = static_cast<std::size_t>(e) * nb_nodes_e * nb_nodes_e;
-            std::size_t idx = 0;
-
-            for (int i = 0; i < nb_nodes_e; ++i)
+            for (int j = 0; j < nb_nodes_e; ++j)
             {
-                for (int j = 0; j < nb_nodes_e; ++j)
-                {
-                    coefficients[offset + idx++] = TripletType(elem(i), elem(j), Me(i, j));
-                }
+                coefficients[offset + idx++] = TripletType(elem(i), elem(j), Me(i, j));
             }
         }
-    } // implicit OpenMP barrier sync
+    }
 
     // Build sparse matrix
     M.setFromTriplets(coefficients.begin(), coefficients.end());
