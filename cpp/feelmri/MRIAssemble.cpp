@@ -4,8 +4,9 @@
 #include <FEUtils.h>
 #include <Eigen/Sparse>
 #include <pybind11/pybind11.h>
+#include <pybind11/numpy.h>
 #include <pybind11/complex.h>
-#include <pybind11/eigen.h>
+#include <pybind11/eigen.h> // REQUIRED for PyBind11 to seamlessly cast Eigen types
 #include <pybind11/stl.h>
 
 // Alias for convenience to avoid typing pybind11:: constantly
@@ -24,10 +25,12 @@ public:
     using Tensor3 = Eigen::Tensor<T, 3>; 
     using Tensor4CR = Eigen::Tensor<C, 4, Eigen::RowMajor>;
 
-    // Constructor initializes the mesh topology, nodes, and computes quadrature rules
+    // Constructor initializes the mesh topology, nodes, and computes quadrature rules.
+    // Passed arguments as standard const references for clean C++ 
+    // signatures, avoiding PyBind11 specific memory wrappers.
     SignalAssembler(
-        const Eigen::MatrixXi &elems,
-        const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic> &nodes,
+        const Eigen::MatrixXi& elems,
+        const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& nodes,
         const std::string& meshio_type,
         int quadrature_degree)
       : elems_(elems) // Store element connectivity
@@ -93,10 +96,10 @@ public:
         S_global_.makeCompressed(); 
     }
 
-    // Stores and interpolates static MRI tissue parameters (T2 relaxation, B0 off-resonance)
+    // Stores and interpolates static MRI tissue parameters (T2 relaxation, B0 off-resonance).
     void set_static_fields(
-        const Eigen::Array<T, Eigen::Dynamic, 1> &T2,
-        const Eigen::Array<T, Eigen::Dynamic, 1> &phi_dB0)
+        const Eigen::Array<T, Eigen::Dynamic, 1>& T2,
+        const Eigen::Array<T, Eigen::Dynamic, 1>& phi_dB0)
     {
         // Precompute inverse T2 for faster exponential calculations later
         Eigen::Array<T, Eigen::Dynamic, 1> inv_T2 = T2.inverse();
@@ -131,15 +134,15 @@ public:
         }
     }
 
-    // Updates transverse magnetization strictly at the nodes (used for fast nodal sums)
-    void update_magnetization(const Eigen::Matrix<C, Eigen::Dynamic, Eigen::Dynamic> &Mxy)
+    // Updates transverse magnetization strictly at the nodes (used for fast nodal sums).
+    void update_magnetization(const Eigen::Matrix<C, Eigen::Dynamic, Eigen::Dynamic>& Mxy)
     {
         nv_ = (int)Mxy.cols(); // Number of receiving coils / isochromats
         f_Mxy_nodes_ = Mxy; 
     }
 
-    // Updates and interpolates transverse magnetization to all quadrature points
-    void update_full_magnetization(const Eigen::Matrix<C, Eigen::Dynamic, Eigen::Dynamic> &Mxy)
+    // Updates and interpolates transverse magnetization to all quadrature points.
+    void update_full_magnetization(const Eigen::Matrix<C, Eigen::Dynamic, Eigen::Dynamic>& Mxy)
     {
         nv_ = (int)Mxy.cols();
         const int nne = elems_.cols();
@@ -160,7 +163,7 @@ public:
         }
     }
 
-    // Pre-multiplies magnetization by a mass matrix (M) for Galerkin-style nodal integration
+    // Pre-multiplies magnetization by a mass matrix (M) for Galerkin-style nodal integration.
     void update_nodal_magnetization(
         const Eigen::SparseMatrix<T>& M, 
         const Eigen::Matrix<C, Eigen::Dynamic, Eigen::Dynamic>& Mxy)
@@ -186,9 +189,18 @@ public:
     // =========================================================================
     // FAST NODAL INTEGRATION SIGNAL GENERATOR (SUM OF NODAL VALUES)
     // =========================================================================   
-    Tensor4CR signal_sum(const std::vector<Tensor3> &kloc, 
-                         const Tensor3 &t, 
-                         const py::object &pod_trajectory = py::none())
+    // Reverted py::array_t manual mappings to standard Eigen::Tensor and
+    // const reference parameters, keeping the pure C++ nature of the functions intact.
+    // Replaced the Python callable `pod_trajectory` with pre-computed `modes` 
+    // and `weights` matrices to entirely eliminate the Global Interpreter Lock (GIL) and allow AVX2 math.
+    Tensor4CR signal_sum(
+        const std::vector<Tensor3> &kloc, 
+        const Tensor3 &t,
+        const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& modes_x,
+        const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& modes_y,
+        const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& modes_z,
+        const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& weights,
+        bool has_traj)
     {
         const C i1(T(0), T(1));
         const T two_pi  = T(2) * T(M_PI);
@@ -204,11 +216,6 @@ public:
         Eigen::RowVector<C, Eigen::Dynamic> s(nv_);
         
         T t_old = T(-1); // Tracks previous time step to avoid redundant calculations
-        
-        // Check if a Python trajectory object was passed
-        const bool has_traj = !pod_trajectory.is_none();
-        py::function pod_func;
-        if (has_traj) pod_func = pod_trajectory.cast<py::function>();
 
         // Cache-blocking parameters to ensure arrays fit in CPU L1/L2 cache
         const int BLOCK_SIZE = 8192;
@@ -237,25 +244,17 @@ public:
             // Optimization flag: Only update mesh/relaxation if time has changed
             const bool update_time = (tij != t_old);
 
-            // Update node positions by calling the Python POD trajectory function
+            // Update node positions by executing a highly-optimized matrix-vector multiplication
             if (has_traj && update_time) 
             {
-                // Call Python function, cast result to a contiguous NumPy array mapped to C++
-                auto arr = pod_func(tij).template cast<py::array_t<T, py::array::c_style>>();
-                // Case 1: Nodal displacement array (N_nodes x 3)
-                if (arr.ndim() == 2 && arr.shape(0) == nb_nodes_ && arr.shape(1) == 3) {
-                    Eigen::Map<const Eigen::Matrix<T, Eigen::Dynamic, 3, Eigen::RowMajor>> nodes_disp(arr.data(), nb_nodes_, 3);
-                    f_dyn_nodes_x0_ = f_nodes_x0_ + nodes_disp.col(0).array();
-                    f_dyn_nodes_x1_ = f_nodes_x1_ + nodes_disp.col(1).array();
-                    f_dyn_nodes_x2_ = f_nodes_x2_ + nodes_disp.col(2).array();
-                }
-                // Case 2: Global displacement vector (1 x 3 or just 3)
-                else if ((arr.ndim() == 2 && arr.shape(0) == 1 && arr.shape(1) == 3) || (arr.ndim() == 1 && arr.shape(0) == 3)) {
-                    const T* t_data = arr.data();
-                    f_dyn_nodes_x0_ = f_nodes_x0_ + t_data[0];
-                    f_dyn_nodes_x1_ = f_nodes_x1_ + t_data[1];
-                    f_dyn_nodes_x2_ = f_nodes_x2_ + t_data[2];
-                }
+                // Extract the pre-computed weights vector for this specific 
+                // time frame (M_modes x 1) and multiply by static modes (N_nodes x M_modes).
+                // The `.noalias()` flag instructs Eigen to skip temporary allocation and 
+                // unroll the math directly into CPU AVX2/FMA vector instructions.
+                auto w = weights.row(row).transpose(); 
+                f_dyn_nodes_x0_ = f_nodes_x0_ + (modes_x * w).array();
+                f_dyn_nodes_x1_ = f_nodes_x1_ + (modes_y * w).array();
+                f_dyn_nodes_x2_ = f_nodes_x2_ + (modes_z * w).array();
             }
 
             s.setZero(); // Reset signal accumulator for this k-space point
@@ -297,13 +296,19 @@ public:
     // =========================================================================
     // FAST NODAL INTEGRATION SIGNAL GENERATOR (MASS MATRIX)
     // =========================================================================
-    Tensor4CR signal_nodal(const std::vector<Tensor3> &kloc, 
-                           const Tensor3 &t, 
-                           const py::object &pod_trajectory = py::none())
+    // Cleaned up signatures to native Eigen types while keeping the
+    // AVX2 Modes-Weights multiplication architecture.
+    Tensor4CR signal_nodal(
+        const std::vector<Tensor3> &kloc, 
+        const Tensor3 &t,
+        const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& modes_x,
+        const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& modes_y,
+        const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& modes_z,
+        const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& weights,
+        bool has_traj)
     {
         // This function is structurally identical to signal_sum, except it integrates 
         // using the pre-computed mass-matrix projection (f_M_Mxy_nodes_) instead of raw Mxy.
-
         const C i1(T(0), T(1));
         const T two_pi  = T(2) * T(M_PI);
 
@@ -316,10 +321,6 @@ public:
         Eigen::RowVector<C, Eigen::Dynamic> s(nv_);
         
         T t_old = T(-1);
-        
-        const bool has_traj = !pod_trajectory.is_none();
-        py::function pod_func;
-        if (has_traj) pod_func = pod_trajectory.cast<py::function>();
 
         const int BLOCK_SIZE = 8192;
         Eigen::Array<T, Eigen::Dynamic, 1> phase_block(BLOCK_SIZE);
@@ -344,22 +345,13 @@ public:
 
             const bool update_time = (tij != t_old);
 
-            // Fetch and apply dynamic trajectory positions (requires Python GIL)
+            // Fetch and apply dynamic trajectory positions (AVX2 optimized)
             if (has_traj && update_time) 
             {
-                auto arr = pod_func(tij).template cast<py::array_t<T, py::array::c_style>>();
-                if (arr.ndim() == 2 && arr.shape(0) == nb_nodes_ && arr.shape(1) == 3) {
-                    Eigen::Map<const Eigen::Matrix<T, Eigen::Dynamic, 3, Eigen::RowMajor>> nodes_disp(arr.data(), nb_nodes_, 3);
-                    f_dyn_nodes_x0_ = f_nodes_x0_ + nodes_disp.col(0).array();
-                    f_dyn_nodes_x1_ = f_nodes_x1_ + nodes_disp.col(1).array();
-                    f_dyn_nodes_x2_ = f_nodes_x2_ + nodes_disp.col(2).array();
-                }
-                else if ((arr.ndim() == 2 && arr.shape(0) == 1 && arr.shape(1) == 3) || (arr.ndim() == 1 && arr.shape(0) == 3)) {
-                    const T* t_data = arr.data();
-                    f_dyn_nodes_x0_ = f_nodes_x0_ + t_data[0];
-                    f_dyn_nodes_x1_ = f_nodes_x1_ + t_data[1];
-                    f_dyn_nodes_x2_ = f_nodes_x2_ + t_data[2];
-                }
+                auto w = weights.row(row).transpose(); 
+                f_dyn_nodes_x0_ = f_nodes_x0_ + (modes_x * w).array();
+                f_dyn_nodes_x1_ = f_nodes_x1_ + (modes_y * w).array();
+                f_dyn_nodes_x2_ = f_nodes_x2_ + (modes_z * w).array();
             }
 
             s.setZero();
@@ -396,18 +388,34 @@ public:
     // =========================================================================
     // STANDARD QUADRATURE INTEGRATION SIGNAL GENERATOR (FULL)
     // =========================================================================
-    Tensor4CR signal_full(const std::vector<Tensor3> &kloc, const Tensor3 &t,
-                          const py::object &pod_trajectory = py::none())
+    // Reverted to pure Eigen::Tensor signatures for broad compatibility.
+    Tensor4CR signal_full(
+        const std::vector<Tensor3> &kloc, 
+        const Tensor3 &t,
+        const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& modes_x,
+        const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& modes_y,
+        const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& modes_z,
+        const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& weights,
+        bool has_traj)
     {
-        return signal(kloc, t, pod_trajectory); // Logic is identical to signal(), wrapped for compatibility
+        return signal(kloc, t, modes_x, modes_y, modes_z, weights, has_traj); // Logic is identical to signal(), wrapped for compatibility
     }
 
     // =========================================================================
     // STANDARD QUADRATURE INTEGRATION SIGNAL GENERATOR
     // =========================================================================
     // This evaluates the signal purely at Quadrature Points (highest accuracy, but slower)
-    Tensor4CR signal(const std::vector<Tensor3> &kloc, const Tensor3 &t, 
-                     const py::object &pod_trajectory = py::none())
+    // Reverted to native C++ Eigen::Tensors.
+    // Includes an explicit sparse-dense matrix multiplication step to project the fast
+    // nodal displacements onto the exact quadrature evaluation points.
+    Tensor4CR signal(
+        const std::vector<Tensor3> &kloc, 
+        const Tensor3 &t,
+        const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& modes_x,
+        const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& modes_y,
+        const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& modes_z,
+        const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& weights,
+        bool has_traj)
     {
         const C i1(T(0), T(1));
         const T two_pi  = T(2) * T(M_PI);
@@ -422,13 +430,6 @@ public:
         
         T t_old = T(-1);
         
-        const bool has_traj = !pod_trajectory.is_none();
-        py::function pod_func;
-        if (has_traj) pod_func = pod_trajectory.cast<py::function>();
-
-        // Pre-allocate temporary matrix for mapping nodal displacements to quadrature points
-        Eigen::Matrix<T, Eigen::Dynamic, 3, Eigen::ColMajor> dq_global(total_q_, 3);
-
         const int BLOCK_SIZE = 8192;
         Eigen::Array<T, Eigen::Dynamic, 1> phase_block(BLOCK_SIZE);
         Eigen::Matrix<C, Eigen::Dynamic, 1> fourier_block(BLOCK_SIZE);
@@ -454,25 +455,19 @@ public:
 
             if (has_traj && update_time) 
             {
-                auto arr = pod_func(tij).template cast<py::array_t<T, py::array::c_style>>();
-                // Map from Node displacements to Quadrature Point displacements
-                if (arr.ndim() == 2 && arr.shape(0) == nb_nodes_ && arr.shape(1) == 3) {
-                    Eigen::Map<const Eigen::Matrix<T, Eigen::Dynamic, 3, Eigen::RowMajor>> nodes_disp(arr.data(), nb_nodes_, 3);
-                    // Matrix multiply: Projection Matrix (Q x N) * Nodal Disp (N x 3) = Quad Disp (Q x 3)
-                    dq_global.noalias() = S_global_ * nodes_disp;
-                    f_dyn_xq0_ = f_xq0_ + dq_global.col(0).array();
-                    f_dyn_xq1_ = f_xq1_ + dq_global.col(1).array();
-                    f_dyn_xq2_ = f_xq2_ + dq_global.col(2).array();
-                }
-                // Global flat displacement applies universally to all quadrature points
-                else if ((arr.ndim() == 2 && arr.shape(0) == 1 && arr.shape(1) == 3) || (arr.ndim() == 1 && arr.shape(0) == 3)) {
-                    const T* t_data = arr.data();
-                    for (int q = 0; q < total_q_; ++q) {
-                        f_dyn_xq0_.data()[q] = f_xq0_.data()[q] + t_data[0];
-                        f_dyn_xq1_.data()[q] = f_xq1_.data()[q] + t_data[1];
-                        f_dyn_xq2_.data()[q] = f_xq2_.data()[q] + t_data[2];
-                    }
-                }
+                auto w = weights.row(row).transpose(); 
+                
+                // 1. Compute nodal displacements using the fast AVX2 GEMV
+                Eigen::Matrix<T, Eigen::Dynamic, 1> disp_x = modes_x * w;
+                Eigen::Matrix<T, Eigen::Dynamic, 1> disp_y = modes_y * w;
+                Eigen::Matrix<T, Eigen::Dynamic, 1> disp_z = modes_z * w;
+
+                // 2. Map from Node displacements to Quadrature Point displacements
+                // Matrix multiply: Projection Matrix (Q x N) * Nodal Disp (N x 3) = Quad Disp (Q x 3)
+                // This updates the quadrature point coordinates for the integration loop natively in C++.
+                f_dyn_xq0_ = f_xq0_ + (S_global_ * disp_x).array();
+                f_dyn_xq1_ = f_xq1_ + (S_global_ * disp_y).array();
+                f_dyn_xq2_ = f_xq2_ + (S_global_ * disp_z).array();
             }
 
             s.setZero();
@@ -547,6 +542,7 @@ PYBIND11_MODULE(MRIAssemble, m)
     // Bind the core Signal Assembler routines to Python space
     py::class_<Assembler>(m, "SignalAssembler")
         // Expose Constructor arguments
+        // Reverted standard const references for signature binding.
         .def(py::init<const Eigen::MatrixXi&,
                       const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>&,
                       const std::string&,
@@ -575,26 +571,28 @@ PYBIND11_MODULE(MRIAssemble, m)
         .def("estimate_element_sizes", &Assembler::estimate_element_sizes,
              "Returns the characteristic 3D length of each element based on its Jacobian volume.")
 
-        // Expose signal integration methods, linking kwargs and default args (py::none)
+        // Expose signal integration methods, mapped to the new mode/weight signatures.
         .def("signal_sum", &Assembler::signal_sum,
-             py::arg("kloc"), 
-             py::arg("t"),
-             py::arg("traj") = py::none(),
-             "Simulate MRI k-space signal with optional moving mesh trajectory.")
+             py::arg("kloc"), py::arg("t"),
+             py::arg("modes_x"), py::arg("modes_y"), py::arg("modes_z"), 
+             py::arg("weights"), py::arg("has_traj"),
+             "Simulate MRI k-space signal summing over nodes with pre-computed POD fields.")
 
         .def("signal_full", &Assembler::signal_full,
-             py::arg("kloc"), 
-             py::arg("t"),
-             py::arg("traj") = py::none(),
-             "Simulate MRI k-space signal with optional moving mesh trajectory.")
+             py::arg("kloc"), py::arg("t"),
+             py::arg("modes_x"), py::arg("modes_y"), py::arg("modes_z"), 
+             py::arg("weights"), py::arg("has_traj"),
+             "Simulate MRI k-space signal over quadrature points with pre-computed POD fields.")
 
         .def("signal", &Assembler::signal,
-             py::arg("kloc"), 
-             py::arg("t"),
-             py::arg("traj") = py::none(),
-             "Simulate MRI k-space signal with optional moving mesh trajectory.")
+             py::arg("kloc"), py::arg("t"),
+             py::arg("modes_x"), py::arg("modes_y"), py::arg("modes_z"), 
+             py::arg("weights"), py::arg("has_traj"),
+             "Simulate MRI k-space signal over quadrature points with pre-computed POD fields.")
 
         .def("signal_nodal", &Assembler::signal_nodal,
-             py::arg("kloc"), py::arg("t"), py::arg("traj") = py::none(),
+             py::arg("kloc"), py::arg("t"),
+             py::arg("modes_x"), py::arg("modes_y"), py::arg("modes_z"), 
+             py::arg("weights"), py::arg("has_traj"),
              "Simulate MRI k-space signal using ultra-fast nodal mass matrix integration.");
 }
