@@ -1,0 +1,67 @@
+# Pulseq sequence file
+# Created by PyPulseq
+
+[VERSION]
+major 1
+minor 4
+revision 2
+
+[DEFINITIONS]
+AdcRasterTime 1e-07 
+BlockDurationRaster 1e-05 
+FOV 0.32 0.24 0.008 
+GradientRasterTime 1e-05 
+Name epi 
+RadiofrequencyRasterTime 1e-06 
+TotalDuration 0.00248 
+
+# Format of blocks:
+# NUM DUR RF  GX  GY  GZ  ADC  EXT
+[BLOCKS]
+1 113   1   0   0   0  0  0
+2  22   0   1   0   0  0  0
+3 113   2   0   0   0  0  0
+
+# Format of RF events:
+# id amplitude mag_id phase_id time_shape_id delay freq phase
+# ..        Hz   ....     ....          ....    us   Hz   rad
+[RF]
+1          250 1 2 3 100 0 0
+2          250 1 4 3 100 0 0
+
+# Format of trapezoid gradients:
+# id amplitude rise flat fall delay
+# ..      Hz/m   us   us   us    us
+[TRAP]
+ 1       510000 110    0 110   0
+
+# Sequence Shapes
+[SHAPES]
+
+shape_id 1
+num_samples 2
+1
+1
+
+shape_id 2
+num_samples 2
+0
+0
+
+shape_id 3
+num_samples 2
+0
+1000
+
+shape_id 4
+num_samples 2
+0.5
+0.5
+
+
+[SIGNATURE]
+# This is the hash of the Pulseq file, calculated right before the [SIGNATURE] section was added
+# It can be reproduced/verified with md5sum if the file trimmed to the position right above [SIGNATURE]
+# The new line character preceding [SIGNATURE] BELONGS to the signature (and needs to be stripped away for recalculating/verification)
+Type md5
+Hash 8aa290bce71276c88fed4feb1086f33e
