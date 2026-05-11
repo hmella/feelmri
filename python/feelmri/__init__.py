@@ -27,6 +27,16 @@ from feelmri.KSpaceTraj import CartesianStack, RadialStack, SpiralStack, Traject
 # Finite element phantom
 from feelmri.Phantom import FEMPhantom
 
+# Pulseq adapter and end-to-end simulator
+from feelmri.PulseqAdapter import (
+    PulseqImport,
+    ReadoutWindow,
+    as_signal_inputs,
+    import_pulseq,
+    kspace_trajectory,
+    read_seq_feelmri,
+)
+
 # Motion models
 from feelmri.Motion import POD, PODSum, PODVelocity, RespiratoryMotion
 
@@ -74,6 +84,11 @@ __all__ = [
     "Trajectory", "CartesianStack", "RadialStack", "SpiralStack",
     # Phantom
     "FEMPhantom",
+    # Pulseq adapter / simulator
+    "PulseqImport", "ReadoutWindow",
+    "import_pulseq", "read_seq_feelmri", "kspace_trajectory",
+    "as_signal_inputs",
+    "SimulationResult", "simulate_pulseq",
     # Motion
     "RespiratoryMotion", "POD", "PODVelocity", "PODSum",
     # Reconstruction

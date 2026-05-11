@@ -1,0 +1,36 @@
+# Pulseq sequence file
+# Hand-authored fixture for the FEelMRI PulseqAdapter ROTATIONS extension test.
+# A single 90 deg rotation about z is applied to a single trapezoid on Gx.
+# After parsing, the resulting Gx amplitude is expected to be 0 and Gy to
+# carry the original amplitude.
+
+[VERSION]
+major 1
+minor 4
+revision 2
+
+[DEFINITIONS]
+AdcRasterTime 1e-07
+BlockDurationRaster 1e-05
+GradientRasterTime 1e-05
+RadiofrequencyRasterTime 1e-06
+TotalDuration 0.0012
+
+# Format of blocks:
+# NUM DUR RF  GX  GY  GZ  ADC  EXT
+[BLOCKS]
+  1 120   0   1   0   0  0  1
+
+# Format of trapezoid gradients:
+# id amplitude(Hz/m) rise(us) flat(us) fall(us) delay(us)
+[TRAP]
+ 1 1000000 100 1000 100 0
+
+# Each line: id  type_id  ref  next_id
+[EXTENSIONS]
+ 1 1 1 0
+
+# Rotation matrix (row-major) for a 90 deg rotation about z.
+# Each line: id  R11 R12 R13 R21 R22 R23 R31 R32 R33
+extension ROTATIONS 1
+1 0 -1 0 1 0 0 0 0 1
