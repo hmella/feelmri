@@ -96,20 +96,20 @@ jobs:
           7z x examples/phantoms/phantoms_compressed.zip -oexamples/phantoms/
 
       # ------------------------------------------------------------
-      # Run tests with coverage
+      # Enable coverage collection in subprocesses (mpirun, examples)
       # ------------------------------------------------------------
-      - name: Run tests (serial + parallel) with coverage
+      - name: Enable subprocess coverage
+        run: |
+          python -c "import sysconfig, pathlib; \
+          pathlib.Path(sysconfig.get_paths()['purelib'], 'coverage_subprocess.pth').write_text('import coverage; coverage.process_startup()\n')"
+
+      # ------------------------------------------------------------
+      # Run the full test suite with coverage
+      # ------------------------------------------------------------
+      - name: Run tests with coverage
         run: |
           coverage erase
-
-          echo "Running serial examples..."
-          pytest tests/test_examples_run.py
-
-          echo "Running parallel examples..."
-          pytest tests/test_parallel.py
-
-          echo "Running import tests..."
-          pytest tests/test_imports.py
+          coverage run --rcfile=.coveragerc -m pytest tests/
 
       # ------------------------------------------------------------
       # Combine coverage and generate XML
