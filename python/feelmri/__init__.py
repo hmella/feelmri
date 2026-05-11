@@ -16,6 +16,8 @@ from feelmri.Bloch import (
     SequenceBlock,
     collapse_isochromats,
     create_multi_isochromats,
+    plot_isochromat_voxel,
+    spoiling_residual,
 )
 
 # Slice profile and encoding
@@ -78,6 +80,7 @@ __all__ = [
     # Bloch simulation
     "ADC", "SequenceBlock", "Sequence", "BlochSolver",
     "create_multi_isochromats", "collapse_isochromats",
+    "plot_isochromat_voxel", "spoiling_residual",
     # Slice profile and encoding
     "SliceProfile", "VelocityEncoding", "PositionEncoding",
     # k-space trajectories
