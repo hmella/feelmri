@@ -13,6 +13,11 @@ import pytest
 
 EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "examples"
 
+# Example scripts run their own internal pipeline via subprocess with
+# a 180 s per-script budget. They intentionally exceed the new global
+# 30 s pytest-timeout default; apply a 240 s per-test override.
+pytestmark = pytest.mark.timeout(240)
+
 
 @pytest.mark.parametrize("script", [
     "4dflow.py",
