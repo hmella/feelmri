@@ -39,6 +39,14 @@ classifiers = [
 [project.urls]
 Homepage = "https://github.com/hmella/feelmri"
 
+[project.optional-dependencies]
+dev = [
+  "pytest>=7.0",
+  "pytest-cov",
+  "pytest-timeout",
+  "coverage",
+]
+
 [tool.scikit-build]
 wheel.packages = ["python/feelmri"]
 cmake.minimum-version = "3.18"

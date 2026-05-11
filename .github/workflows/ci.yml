@@ -77,7 +77,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install git+https://github.com/hmella/pyevtk.git
-          pip install -e .[dev] pytest pytest-cov coverage codecov
+          pip install -e .[dev] pytest pytest-cov pytest-timeout coverage codecov
 
       # ------------------------------------------------------------
       # Verify MPI installation
