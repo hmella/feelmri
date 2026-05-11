@@ -85,7 +85,7 @@ class Trajectory:
         self.k_spa = 1.0 / (self.oversampling_arr * FOV)
         self.kx_extent = (
             (np.array([0, self.ro_samples - 1]) - self.ro_samples // 2) * self.k_spa[0]
-            + float((self.res[0] % 2 != 0)) * self.k_spa[0]
+            # + float((self.res[0] % 2 != 0)) * self.k_spa[0]
         )
         self.ky_extent = (np.array([0, self.ph_samples - 1]) - self.ph_samples // 2) * self.k_spa[1]
         self.kz_extent = (np.array([0, self.slices - 1]) - self.slices // 2) * self.k_spa[2]
@@ -103,6 +103,9 @@ class Trajectory:
     def plot_trajectory(self, figsize=(12, 5), tight_layout=True, export_to=None):
         """Show k-space points and time map."""
         if MPI_rank == 0:
+            # plt.rcParams['text.usetex'] = True
+            # plt.rcParams.update({'font.size': 16})
+
             fig, ax = plt.subplots(1, 2, figsize=figsize)
             for shot in self.shots:
                 kxx = np.concatenate((np.array([0]), self.points[0][:,shot,0].flatten('F')))
@@ -202,6 +205,7 @@ class CartesianStack(Trajectory):
 
         if self.plot_seq:
             if MPI_rank == 0:
+                # plt.rcParams['text.usetex'] = True
                 plt.rcParams.update({'font.size': 16})
 
                 fig, ax = plt.subplots(2, 1, figsize=(8, 4))
@@ -397,6 +401,7 @@ class RadialStack(Trajectory):
 
         if self.plot_seq:
             if MPI_rank == 0:
+                # plt.rcParams['text.usetex'] = True
                 plt.rcParams.update({'font.size': 16})
 
                 fig, ax = plt.subplots(2, 1, figsize=(8, 4))
@@ -454,7 +459,11 @@ class RadialStack(Trajectory):
         dt = np.linspace(0.0, ro_grad.lenc.m_as('ms'), self.ro_samples)
 
         # kspace locations
-        kx = np.linspace(0, self.kx_extent[1].m_as('1/m'), self.ro_samples)
+        if self.full_spoke:
+            kx = np.linspace(self.kx_extent[0], self.kx_extent[1], self.ro_samples)
+        else:
+            kx = np.linspace(0, self.kx_extent[1].m_as('1/m'), self.ro_samples)
+
         ky = np.zeros(kx.shape)
         kz = np.linspace(self.kz_extent[0].m_as('1/m'), self.kz_extent[1].m_as('1/m'), self.slices)
 
@@ -467,6 +476,7 @@ class RadialStack(Trajectory):
         # Build shots locations
         for ph in range(self.ph_samples):
             self.shots[ph // self.lines_per_shot][ph % self.lines_per_shot] = ph
+            # self.shots[ph % self.nb_shots][ph // self.nb_shots] = ph
 
         if self.full_spoke:
             # Full-spoke golden-angle radial sampling
@@ -558,10 +568,8 @@ class SpiralStack(Trajectory):
         """
         super().__init__(*args, **kwargs)
 
-        # Explicitly verify phase encoding lines and re-initialize shots array
         self.ph_samples = self.check_ph_enc_lines(self.ph_samples)
         self.nb_shots = self.ph_samples // self.lines_per_shot
-        self.shots = [[None, ] * self.lines_per_shot for _ in range(self.nb_shots)]
 
         self.min_samples_per_turn = 32
         self.interleaves = self.ph_samples
@@ -658,8 +666,7 @@ class SpiralStack(Trajectory):
         # ADC-based sampling grid (fixed by receiver bandwidth)
         dt_adc = 1.0 / self.receiver_bw.m_as('Hz')              # [s]
         N_adc = int(np.round(T_ro / dt_adc))
-        self.ro_samples = N_adc * self.oversampling
-        t_adc = np.linspace(0.0, T_ro, self.ro_samples, endpoint=True)
+        t_adc = np.linspace(0.0, T_ro, N_adc * self.oversampling, endpoint=True)
 
         # Interpolate spiral onto uniform ADC time base
         K_adc_real = np.interp(t_adc, t_sec_cont, np.real(K))
@@ -667,7 +674,8 @@ class SpiralStack(Trajectory):
         K_adc = K_adc_real + 1j * K_adc_imag
 
         # 3D stack dimensions
-        dt_ms = t_adc * 1e3                                     # [ms]
+        self.ro_samples = N_adc                      # ADC defines sample count
+        dt_ms = t_adc * 1e3                          # [ms]
         kz = np.linspace(
             self.kz_extent[0].m_as('1/m'),
             self.kz_extent[1].m_as('1/m'),
@@ -676,11 +684,11 @@ class SpiralStack(Trajectory):
 
         # Allocate arrays using the fixed ro_samples length
         kspace = (
-            np.zeros([self.ro_samples, self.ph_samples, self.slices], dtype=self.dtype),
-            np.zeros([self.ro_samples, self.ph_samples, self.slices], dtype=self.dtype),
-            np.zeros([self.ro_samples, self.ph_samples, self.slices], dtype=self.dtype),
+            np.zeros([N_adc * self.oversampling, self.ph_samples, self.slices], dtype=self.dtype),
+            np.zeros([N_adc * self.oversampling, self.ph_samples, self.slices], dtype=self.dtype),
+            np.zeros([N_adc * self.oversampling, self.ph_samples, self.slices], dtype=self.dtype),
         )
-        t = np.zeros([self.ro_samples, self.ph_samples, self.slices], dtype=self.dtype)
+        t = np.zeros([N_adc * self.oversampling, self.ph_samples, self.slices], dtype=self.dtype)
 
         # Interleaf rotation angles
         theta = np.linspace(0.0, 2.0 * np.pi, self.interleaves, endpoint=False, dtype=self.dtype)
