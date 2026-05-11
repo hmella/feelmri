@@ -674,7 +674,14 @@ class SpiralStack(Trajectory):
         K_adc = K_adc_real + 1j * K_adc_imag
 
         # 3D stack dimensions
-        self.ro_samples = N_adc                      # ADC defines sample count
+        # ro_samples counts the *oversampled* ADC samples actually
+        # written into the kspace arrays below (N_adc * oversampling
+        # rows). Keep it consistent with Trajectory.__init__'s
+        # convention (where ro_samples already folds in oversampling)
+        # so that external callers allocating K = zeros([ro_samples,
+        # ph, sl, ...]) see the same readout extent that
+        # mri_signal returns.
+        self.ro_samples = N_adc * self.oversampling
         dt_ms = t_adc * 1e3                          # [ms]
         kz = np.linspace(
             self.kz_extent[0].m_as('1/m'),
