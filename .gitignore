@@ -17,3 +17,5 @@ meshes/*.msh
 *.pdf
 *.xml
 .coverage*
+*old*
+*new*
