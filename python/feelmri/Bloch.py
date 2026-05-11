@@ -42,10 +42,18 @@ class ADC:
     times : np.ndarray
         1-D array of absolute ADC sampling times inside the parent
         :class:`SequenceBlock` (ms).
+    freq_offset : Quantity, optional
+        Frequency offset applied to the ADC samples (Hz). Default 0 Hz.
+    phase_offset : Quantity, optional
+        Phase offset applied to the ADC samples (rad). Default 0 rad.
     """
 
-    def __init__(self, times: np.ndarray):
+    def __init__(self, times: np.ndarray,
+                 freq_offset: Quantity = Quantity(0.0, 'Hz'),
+                 phase_offset: Quantity = Quantity(0.0, 'rad')):
         self.times = Quantity(times, 'ms')
+        self.freq_offset = freq_offset.to('Hz')
+        self.phase_offset = phase_offset.to('rad')
 
 
 class SequenceBlock:
@@ -117,7 +125,7 @@ class SequenceBlock:
         p_gr = np.sum([g(t) for g in self.P_gradients], axis=0)
         s_gr = np.sum([g(t) for g in self.S_gradients], axis=0)
         if self.adc is not None:
-            adc_mask = np.isclose(t, self.adc.times.m_as('ms'), rtol=1e-9, atol=1e-12)
+            adc_mask = np.isin(t, self.adc.times.m_as('ms'))
         else:
             adc_mask = np.zeros_like(t, dtype=bool)
 
@@ -282,6 +290,18 @@ class Sequence:
         self.dur = self.time_extent[1] - self.time_extent[0]
         self.non_empty = [~block.empty for block in self.blocks if block is not None]
 
+    def copy(self):
+        return copy.deepcopy(self)
+
+    def __len__(self):
+        return len(self.blocks)
+
+    def __repr__(self):
+        return f"Sequence(blocks={self.blocks})"
+
+    def __str__(self):
+        return f"Sequence with {len(self.blocks)} blocks."
+
     def add_block(self, block: SequenceBlock | Quantity, dt: Quantity = Quantity(10, 'ms')):
         # Add a block to the sequence
         if isinstance(block, SequenceBlock):
@@ -302,6 +322,25 @@ class Sequence:
                 self.time_extent = self._get_extent()
                 self.dur = self.time_extent[1] - self.time_extent[0]
                 self.non_empty.append(not block.empty)
+        elif isinstance(block, Sequence):
+            # Append a nested Sequence. All child blocks receive the SAME
+            # shift = parent_end - child_start, computed once so that the
+            # child sequence's internal relative offsets are preserved.
+            sequence = block
+            seq_extent = sequence._get_extent()
+            shift = self.time_extent[-1].to('ms') - seq_extent[0].to('ms')
+
+            shifted = []
+            for child in sequence.blocks:
+                new_child = child.copy()
+                new_child.change_time(shift)
+                shifted.append(new_child)
+
+            self.blocks = list(self.blocks) + shifted
+            self.Nb_blocks = len(self.blocks)
+            self.time_extent = self._get_extent()
+            self.dur = self.time_extent[1] - self.time_extent[0]
+            self.non_empty.extend(not c.empty for c in shifted)
         else:
             warnings.warn("Only SequenceBlock or Quantity instances can be added to the sequence.")
 
@@ -453,7 +492,10 @@ class BlochSolver:
                  pod_trajectory: POD | None = None,
                  initial_Mxy: np.ndarray | float = 0.0,
                  initial_Mz: np.ndarray | float = None,
-                 perfect_spoiling: bool = True):
+                 perfect_spoiling: bool = True,
+                 isochromat_K: int = 25,
+                 isochromat_distribution: str = 'sobol',
+                 isochromat_seed: int | None = 0):
         ones = np.ones((phantom.local_nodes.shape[0], 1), dtype=np.float32)
         self.sequence = sequence
         self.scanner = scanner
@@ -466,6 +508,15 @@ class BlochSolver:
         self.initial_Mz = initial_Mz * ones if initial_Mz is not None else M0 * ones
         self.pod_trajectory = pod_trajectory
         self.perfect_spoiling = perfect_spoiling
+        # Multi-isochromat dephasing controls for blocks with _spoiler=True.
+        # K          -- number of isochromats per local FE node.
+        # distribution -- 'uniform' (Monte-Carlo, ~1/sqrt(K) residual) or
+        #                 'sobol'/'halton' (QMC, ~(log K)^d / K residual).
+        # seed       -- reproducibility for both samplers; default 0 makes
+        #                 spoiler results deterministic across runs.
+        self.isochromat_K = int(isochromat_K)
+        self.isochromat_distribution = str(isochromat_distribution).lower()
+        self.isochromat_seed = isochromat_seed
 
     def solve(self, start: int = 0, end: int = None):
         # Current machine time
@@ -545,7 +596,7 @@ class BlochSolver:
 
             # Solve
             if block._spoiler is True:
-                K = 25
+                K = self.isochromat_K
                 elem_size = self.phantom.global_elem_size.min()
                 (x_big, T1_big, T2_big,
                  deltaB_big, Mxy_big, Mz_big) = create_multi_isochromats(
@@ -554,7 +605,9 @@ class BlochSolver:
                     self.initial_Mxy,
                     self.initial_Mz,
                     K=K,
-                    pos_jitter=elem_size
+                    pos_jitter=elem_size,
+                    distribution=self.isochromat_distribution,
+                    seed=self.isochromat_seed,
                 )
                 
                 # CRITICAL FIX: Expand modes to match the duplicated nodes in x_big!
@@ -571,6 +624,25 @@ class BlochSolver:
                     rf_pulses, gradients, dt, regime_idx, Mxy_big, Mz_big,
                     m_x_big, m_y_big, m_z_big, weights, has_traj
                 )
+
+                # # Plot isochromat dephasing
+                # if MPI_rank == 0:
+                #     idx = 0 # Index of the node to visualize
+                #     plot_multi_isochromat_dephasing(
+                #         idx,
+                #         x_big,
+                #         Mxy_big,
+                #         Mxy_hist,
+                #         K,
+                #         x_original=x,
+                #         elem_radius=elem_size,
+                #         t_index=-1,
+                #         show_positions=True,
+                #         title_prefix="Isochromat Dephasing"
+                #         )
+                    
+                #     plot_isochromat_voxel(x_big, R=elem_size, alpha=0.7, s=8,
+                #           title=None, show=True, export_to=None)
 
                 Mxy_, Mz_ = collapse_isochromats(
                     Mxy_hist[:, -1],
@@ -618,24 +690,121 @@ class BlochSolver:
         return Mxy[:, store_indices], Mz[:, store_indices]
 
 
-def create_multi_isochromats(x, T1, T2, delta_B, Mxy0, Mz0, K=100, pos_jitter=0.2e-3):
-    # np.repeat duplicates each row K times sequentially
-    x_big      = np.repeat(x, K, axis=0)
-    T1_big     = np.repeat(T1, K, axis=0)
-    T2_big     = np.repeat(T2, K, axis=0)
-    deltaB_big = np.repeat(delta_B, K, axis=0)
-    Mxy_big    = np.repeat(Mxy0, K, axis=0)
-    Mz_big     = np.repeat(Mz0, K, axis=0)
+def _draw_in_sphere_offsets(M, R, distribution='uniform', seed=None):
+  """Draw ``M`` offset vectors uniformly distributed inside a 3-sphere of radius ``R``.
 
-    # Generate jitter for all sub-isochromats at once and add to positions
-    N, dim = x.shape
-    radius = pos_jitter * 0.5
+  Three samplers are supported. All three use the same inverse-CDF
+  mapping from the unit cube to the sphere — ``r = R * u^(1/3)``,
+  ``cos(theta) = 1 - 2v``, ``phi = 2*pi*w`` — and differ only in how
+  ``(u, v, w) in [0, 1)^3`` is drawn:
 
-    # Ensure the jitter matches the precision of the input mesh (e.g., float32)
-    jitter = (radius * np.random.randn(N * K, dim)).astype(x.dtype)
-    x_big += jitter
+  * ``'uniform'`` — i.i.d. ``Uniform([0, 1])`` via
+    ``numpy.random.default_rng(seed)``. Monte-Carlo residual rate
+    :math:`\\rho \\sim K^{-1/2}`.
+  * ``'sobol'`` — :class:`scipy.stats.qmc.Sobol`, a low-discrepancy
+    sequence. Quasi-Monte-Carlo residual rate
+    :math:`\\rho = \\mathcal O((\\log K)^d / K)`.
+  * ``'halton'`` — :class:`scipy.stats.qmc.Halton`, same QMC class as
+    Sobol; cheaper to seed but empirically slightly weaker in 3-D
+    due to higher-prime axis correlations.
 
-    return x_big, T1_big, T2_big, deltaB_big, Mxy_big, Mz_big
+  Parameters
+  ----------
+  M : int
+      Number of points to draw.
+  R : float
+      Sphere radius (m, but the function is unit-agnostic).
+  distribution : {'uniform', 'sobol', 'halton'}
+  seed : int or None
+      Forwarded to the underlying RNG / QMC engine. ``None`` retains
+      the pre-refactor non-deterministic behaviour.
+
+  Returns
+  -------
+  np.ndarray
+      Float32 C-contiguous array of shape ``(M, 3)``.
+  """
+  dist = str(distribution).lower()
+  if dist == 'uniform':
+    rng = np.random.default_rng(seed)
+    u = rng.uniform(0.0, 1.0, size=M)
+    v = rng.uniform(0.0, 1.0, size=M)
+    w = rng.uniform(0.0, 1.0, size=M)
+  elif dist in ('sobol', 'halton'):
+    from scipy.stats.qmc import Halton, Sobol
+    M_int = int(M)
+    if dist == 'sobol':
+      # Sobol's (t, m, s)-net balance properties hold exactly when n
+      # is a power of 2. Generate the smallest 2**m >= M and slice
+      # rather than calling random(M) — strictly higher-quality, and
+      # avoids the scipy UserWarning about non-power-of-2 sample counts.
+      qmc = Sobol(d=3, seed=seed)
+      m_exp = int(np.ceil(np.log2(max(M_int, 1))))
+      pts = qmc.random_base2(m_exp)[:M_int]
+    else:
+      qmc = Halton(d=3, seed=seed)
+      pts = qmc.random(M_int)
+    u, v, w = pts[:, 0], pts[:, 1], pts[:, 2]
+  else:
+    raise ValueError(
+      f"unknown distribution {distribution!r}; expected one of "
+      f"'uniform', 'sobol', 'halton'"
+    )
+  radius = R * np.cbrt(u)
+  cos_theta = 1.0 - 2.0 * v
+  sin_theta = np.sqrt(np.maximum(0.0, 1.0 - cos_theta * cos_theta))
+  phi = 2.0 * np.pi * w
+  out = np.empty((int(M), 3), dtype=np.float32)
+  out[:, 0] = (radius * sin_theta * np.cos(phi)).astype(np.float32)
+  out[:, 1] = (radius * sin_theta * np.sin(phi)).astype(np.float32)
+  out[:, 2] = (radius * cos_theta).astype(np.float32)
+  return out
+
+
+def create_multi_isochromats(x, T1, T2, delta_B, Mxy0, Mz0,
+                             K=100, pos_jitter=0.2e-3,
+                             distribution='uniform', seed=None):
+  """Replicate every node K times and offset by an in-sphere jitter.
+
+  Every input array is repeated K times along axis 0 with
+  :func:`numpy.repeat` (so node ``n`` produces the contiguous range
+  ``[n*K : (n+1)*K]``). The positions ``x_big`` are then perturbed by
+  in-sphere offsets drawn from ``distribution`` with radius
+  ``pos_jitter``.
+
+  Parameters
+  ----------
+  x : np.ndarray
+      Node positions of shape ``(N, 3)``.
+  T1, T2, delta_B, Mxy0, Mz0 : np.ndarray
+      Nodal arrays repeated K times along axis 0.
+  K : int, optional
+      Number of isochromats per node. Default 100.
+  pos_jitter : float, optional
+      Radius of the in-sphere offset (m). Default 0.2 mm.
+  distribution : {'uniform', 'sobol', 'halton'}, optional
+      Sampler for the offsets — see :func:`_draw_in_sphere_offsets`.
+      Default ``'uniform'`` preserves the pre-refactor behaviour.
+  seed : int or None, optional
+      RNG / QMC seed forwarded to the sampler. ``None`` is
+      non-deterministic; ``BlochSolver`` defaults to ``0`` so the
+      spoiler is reproducible.
+  """
+  x_big      = np.repeat(x, K, axis=0)
+  T1_big     = np.repeat(T1, K, axis=0)
+  T2_big     = np.repeat(T2, K, axis=0)
+  deltaB_big = np.repeat(delta_B, K, axis=0)
+  Mxy_big    = np.repeat(Mxy0, K, axis=0)
+  Mz_big     = np.repeat(Mz0, K, axis=0)
+
+  N = x.shape[0]
+  jitter = _draw_in_sphere_offsets(N * K, pos_jitter,
+                                   distribution=distribution, seed=seed)
+  if x.shape[1] == 2:
+    jitter = jitter[:, :2]
+  x_big = x_big + jitter.astype(x_big.dtype, copy=False)
+
+  return x_big, T1_big, T2_big, deltaB_big, Mxy_big, Mz_big
 
 
 def collapse_isochromats(Mxy_big, Mz_big, K, mode="mean"):
@@ -664,6 +833,142 @@ def collapse_isochromats(Mxy_big, Mz_big, K, mode="mean"):
         Mz_out  = np.sum(Mz_reshaped, axis=1)
 
     return Mxy_out, Mz_out
+
+
+def plot_isochromat_voxel(positions, *, R=None, ax=None,
+                          color='steelblue', alpha=0.7, s=8,
+                          title=None, show=True, export_to=None):
+  """3-D scatter of K isochromat positions inside a voxel.
+
+  Parameters
+  ----------
+  positions : np.ndarray
+      Array of shape ``(K, 3)`` with the isochromat coordinates (m).
+  R : float, optional
+      Voxel radius. When supplied, a translucent reference sphere of
+      that radius is drawn at the origin for spatial context.
+  ax : matplotlib 3-D axis, optional
+      Pre-existing axes to draw into. When ``None``, a fresh figure
+      is created.
+  color : str, optional
+      Scatter colour.
+  alpha : float, optional
+      Scatter alpha.
+  s : int or float, optional
+      Scatter marker size.
+  title : str, optional
+      Axes title.
+  show : bool, optional
+      Call ``plt.show()`` after rendering. Default True.
+  export_to : str or path-like, optional
+      When supplied, save the figure to this path before showing.
+
+  Notes
+  -----
+  Rank-0 guarded: on non-zero MPI ranks the function is a no-op and
+  returns ``None`` to mirror the convention used by
+  :meth:`SequenceBlock.plot` and :meth:`Sequence.plot`.
+  """
+  if MPI_rank != 0:
+    MPI_comm.Barrier()
+    return None
+
+  positions = np.asarray(positions)
+  if positions.ndim != 2 or positions.shape[1] != 3:
+    raise ValueError(f'positions must have shape (K, 3); got {positions.shape}')
+
+  from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 (registers 3D proj)
+  if ax is None:
+    fig = plt.figure(figsize=(6, 6))
+    ax = fig.add_subplot(111, projection='3d')
+  else:
+    fig = ax.figure
+
+  ax.scatter(positions[:, 0], positions[:, 1], positions[:, 2],
+             c=color, s=s, alpha=alpha, depthshade=True,
+             label=f'K = {positions.shape[0]}')
+
+  if R is not None and R > 0:
+    n = 24
+    u, v = np.meshgrid(
+      np.linspace(0.0, 2.0 * np.pi, n),
+      np.linspace(0.0, np.pi, n // 2 + 1),
+    )
+    xs = R * np.sin(v) * np.cos(u)
+    ys = R * np.sin(v) * np.sin(u)
+    zs = R * np.cos(v)
+    ax.plot_wireframe(xs, ys, zs, color='gray', linewidth=0.3, alpha=0.4)
+
+  ax.set_xlabel('x (m)')
+  ax.set_ylabel('y (m)')
+  ax.set_zlabel('z (m)')
+  ax.set_title(title or f'Isochromat voxel scatter (K = {positions.shape[0]})')
+  ax.legend(loc='upper right')
+  try:
+    ax.set_aspect('equal')
+  except (NotImplementedError, ValueError):
+    pass
+
+  if export_to is not None:
+    fig.savefig(export_to, bbox_inches='tight')
+  if show:
+    plt.show()
+
+  MPI_comm.Barrier()
+  return ax
+
+
+def spoiling_residual(K, k_sp, voxel_size, *,
+                      distribution='sobol', seed=0, n_trials=1):
+  """Numerical residual of the K-isochromat spoiling sum.
+
+  Computes
+
+  .. math::
+
+     \\rho(K) \\;=\\; \\left|
+       \\frac{1}{K}\\sum_{k=1}^{K}
+         \\exp\\big(\\,i\\, 2\\pi\\, \\vec k_{\\rm sp}\\cdot \\vec r_k\\big)
+     \\right|
+
+  where :math:`\\vec r_k` are K isochromat offsets drawn from
+  ``distribution`` inside a sphere of radius ``voxel_size`` (m).
+  Useful for sizing ``BlochSolver.isochromat_K`` before launching a
+  real simulation.
+
+  Parameters
+  ----------
+  K : int
+      Number of isochromats.
+  k_sp : array-like of shape (3,)
+      Spoiler wavenumber :math:`\\vec k_{\\rm sp} = \\gamma/(2\\pi) \\cdot \\int_0^T G(t)\\, dt`
+      in 1/m. The phase per isochromat is :math:`2\\pi \\vec k_{\\rm sp}\\cdot\\vec r_k`.
+  voxel_size : float
+      Sphere radius for the isochromat draw (m).
+  distribution : {'uniform', 'sobol', 'halton'}
+      Sampler — see :func:`_draw_in_sphere_offsets`.
+  seed : int or None
+      Base seed; trial ``t`` uses ``seed + t``.
+  n_trials : int
+      Independent repeats for mean/std estimation.
+
+  Returns
+  -------
+  (mean, std) : tuple of float
+      Mean and sample standard deviation of :math:`\\rho(K)` across
+      ``n_trials`` independent draws.
+  """
+  k_sp = np.asarray(k_sp, dtype=np.float64).reshape(3)
+  rhos = np.empty(int(n_trials), dtype=np.float64)
+  for t in range(int(n_trials)):
+    s = None if seed is None else int(seed) + t
+    r = _draw_in_sphere_offsets(int(K), float(voxel_size),
+                                distribution=distribution, seed=s)
+    phase = 2.0 * np.pi * (r.astype(np.float64) @ k_sp)
+    rhos[t] = np.abs(np.mean(np.exp(1j * phase)))
+  if n_trials == 1:
+    return float(rhos[0]), 0.0
+  return float(rhos.mean()), float(rhos.std(ddof=0))
 
 
 def plot_multi_isochromat_dephasing(
