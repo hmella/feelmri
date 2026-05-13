@@ -41,8 +41,6 @@ from pint import Quantity
 import numpy as np
 import matplotlib.pyplot as plt
 
-from scipy.integrate import cumulative_trapezoid
-
 from feelmri.Bloch import ADC as feelmriADC
 from feelmri.Bloch import Sequence as feelmriSequence
 from feelmri.Bloch import SequenceBlock
@@ -120,10 +118,10 @@ def read_version(io) -> Version:
             "Loading older Pulseq %s; some code may not function as expected",
             pulseq_version,
         )
-    elif pulseq_version >= Version(1, 5, 0):
+    elif pulseq_version >= Version(1, 6, 0):
         logger.warning(
-            "Pulseq %s not yet supported by this Python translation. "
-            "This mirrors the Julia warning about versions >= 1.5.0.",
+            "Pulseq %s not yet supported by this Python translation "
+            "(supported range is [1.2.0, 1.6.0)).",
             pulseq_version,
         )
 
@@ -245,11 +243,19 @@ def read_events(io, scale: List[float],
         id val1 val2 ... valN
     where the number of values matches len(scale).
     Values are multiplied element-wise by 'scale'.
+
+    A ``np.nan`` entry in ``scale`` marks a string column (used in
+    Pulseq v1.5 for the trailing ``use`` flag on RF rows). When the
+    sentinel is present, ``data`` is returned as a mixed-type list of
+    length ``len(scale)`` instead of a ``np.ndarray``; numeric columns
+    are still scaled, the string column is kept as the raw token.
     """
     if event_library is None:
         event_library = {}
 
     n_vals = len(scale)
+    scale_arr = np.array(scale, dtype=float)
+    has_str_col = bool(np.any(np.isnan(scale_arr)))
 
     while True:
         line = io.readline()
@@ -262,8 +268,18 @@ def read_events(io, scale: List[float],
             # Julia breaks when the scanf result count != EventLength
             break
         eid = int(float(parts[0]))
-        raw_vals = np.array([float(p) for p in parts[1:]], dtype=float)
-        data = np.array(scale, dtype=float) * raw_vals
+
+        if has_str_col:
+            data: List[Any] = []
+            for col, s in enumerate(scale_arr):
+                token = parts[1 + col]
+                if np.isnan(s):
+                    data.append(token)
+                else:
+                    data.append(float(s) * float(token))
+        else:
+            raw_vals = np.array([float(p) for p in parts[1:]], dtype=float)
+            data = scale_arr * raw_vals
 
         entry: Dict[str, Any] = {"data": data}
         if type_ != -1:
@@ -521,8 +537,16 @@ class RF:
     """RF event."""
     waveform: np.ndarray  # complex RF samples
     T: Union[float, np.ndarray]  # total duration or per-sample durations
-    df: float                # frequency offset
+    df: float                # frequency offset (Hz)
     delay: float = 0.0
+    # v1.5 additions. ``use`` is the canonical functional label
+    # ('excitation' | 'refocusing' | 'inversion' | 'saturation' |
+    #  'preparation' | 'other' | 'undefined'). ``freq_ppm`` and
+    # ``phase_ppm`` are PPM offsets parsed for round-trip fidelity
+    # but not yet consumed by BlochSolver.
+    use: str = "undefined"
+    freq_ppm: float = 0.0
+    phase_ppm: float = 0.0
 
 
 @dataclass
@@ -531,8 +555,11 @@ class ADC:
     num: int
     T: float
     delay: float
-    df: float = 0.0
-    phase: float = 0.0
+    df: float = 0.0       # frequency offset (Hz)
+    phase: float = 0.0    # phase offset (rad)
+    # v1.5 additions, parsed for round-trip fidelity but not yet consumed.
+    freq_ppm: float = 0.0
+    phase_ppm: float = 0.0
 
 
 @dataclass
@@ -545,13 +572,13 @@ class Trigger:
 
 @dataclass
 class LabelSet:
-    label: int
+    label: str   # e.g. 'SET', 'LIN', 'SLC', 'NAV', 'REF', ...
     value: int
 
 
 @dataclass
 class LabelInc:
-    label: int
+    label: str
     value: int
 
 
@@ -753,12 +780,33 @@ def fix_first_last_grads(seq: PulseqSequence) -> None:
 # Reading Grad / RF / ADC for a block
 # ---------------------------------------------------------------------------
 
+# Map the single-character v1.5 RF 'use' code to its full name. Mirrors
+# pypulseq/Sequence/sequence.py:rf_from_lib_data. Anything else (or
+# missing) falls through to 'undefined'.
+_USE_CODE_TO_STR: Dict[str, str] = {
+    "e": "excitation",
+    "r": "refocusing",
+    "i": "inversion",
+    "s": "saturation",
+    "p": "preparation",
+    "o": "other",
+    "u": "undefined",
+}
+
+
 def read_Grad(grad_library: Dict[int, Dict[str, Any]],
               shape_library: Dict[int, Tuple[int, np.ndarray]],
               dt_gr: float,
-              idx: int) -> Grad:
+              idx: int,
+              pulseq_version: Version = Version(1, 4, 0)) -> Grad:
     """
     Construct a Grad object from gradient and shape libraries.
+
+    Arbitrary-gradient rows have a version-dependent column layout:
+    v1.4 has 4 columns ``(amp, amp_id, time_id, delay)``; v1.5 inserts
+    ``first`` and ``last`` boundary samples to yield 6 columns
+    ``(amp, amp_id, time_id, first, last, delay)``. Trapezoidal rows
+    are unchanged.
     """
     if not grad_library or idx == 0:
         return Grad(0.0, 0.0)
@@ -769,18 +817,34 @@ def read_Grad(grad_library: Dict[int, Dict[str, Any]],
 
     if gtype == ord("t") or gtype == "t":
         # trapezoidal gradient: (1)amplitude (2)rise (3)flat (4)fall (5)delay
+        assert len(data) == 5, (
+            f"[Grad id {idx}] expected 5 trapezoid columns, got {len(data)}"
+        )
         g_A, g_rise, g_T, g_fall, g_delay = map(float, data)
         return Grad(g_A, g_T, g_rise, g_fall, g_delay)
 
     if gtype == ord("g") or gtype == "g":
-        # arbitrary gradient waveform:
-        # (1)amplitude (2)amp_shape_id (3)time_shape_id (4)delay
-        amplitude = float(data[0])
-        amp_shape_id = int(math.floor(data[1]))
-        time_shape_id = int(math.floor(data[2]))
-        delay = float(data[3])
+        if pulseq_version >= Version(1, 5, 0):
+            assert len(data) == 6, (
+                f"[Grad id {idx}] v1.5 expects 6 arbitrary-grad columns, got {len(data)}"
+            )
+            amplitude = float(data[0])
+            amp_shape_id = int(math.floor(float(data[1])))
+            time_shape_id = int(math.floor(float(data[2])))
+            first_val = float(data[3])
+            last_val = float(data[4])
+            delay = float(data[5])
+        else:
+            assert len(data) == 4, (
+                f"[Grad id {idx}] v1.4 expects 4 arbitrary-grad columns, got {len(data)}"
+            )
+            amplitude = float(data[0])
+            amp_shape_id = int(math.floor(float(data[1])))
+            time_shape_id = int(math.floor(float(data[2])))
+            first_val = 0.0
+            last_val = 0.0
+            delay = float(data[3])
 
-        # amplitude waveform
         num_samp, amp_data = shape_library[amp_shape_id]
         gA = amplitude * decompress_shape(num_samp, amp_data)
         Nrf = gA.size - 1
@@ -788,12 +852,16 @@ def read_Grad(grad_library: Dict[int, Dict[str, Any]],
         if time_shape_id <= 0:
             # no time waveform (uniform raster); v1.5.0 uses time_shape_id=-1 for half-raster.
             gT = Nrf * dt_gr
-            return Grad(gA, gT, dt_gr / 2.0, dt_gr / 2.0, delay)
+            g = Grad(gA, gT, dt_gr / 2.0, dt_gr / 2.0, delay)
         else:
             num_t, t_data = shape_library[time_shape_id]
             gt = decompress_shape(num_t, t_data)
             gT = np.diff(gt) * dt_gr
-            return Grad(gA, gT, 0.0, 0.0, delay)
+            g = Grad(gA, gT, 0.0, 0.0, delay)
+
+        g.first = first_val
+        g.last = last_val
+        return g
 
     # fallback
     return Grad(0.0, 0.0)
@@ -802,24 +870,50 @@ def read_Grad(grad_library: Dict[int, Dict[str, Any]],
 def read_RF(rf_library: Dict[int, Dict[str, Any]],
             shape_library: Dict[int, Tuple[int, np.ndarray]],
             dt_rf: float,
-            idx: int) -> RF:
+            idx: int,
+            pulseq_version: Version = Version(1, 4, 0)) -> RF:
     """
     Construct an RF object from libraries.
+
+    Column layout is version-dependent:
+      * v1.4: 7 columns ``(amp, mag_id, ph_id, time_id, delay, freq, phase)``.
+      * v1.5: 11 columns ``(amp, mag_id, ph_id, time_id, center, delay,
+        freq_ppm, phase_ppm, freq, phase, use)``. The final column is a
+        single character functional label.
     """
     if not rf_library or idx == 0:
         return RF(np.zeros(1, dtype=complex), 0.0, 0.0, 0.0)
 
     data = rf_library[idx]["data"]
-    # (1)amplitude (2)mag_id (3)phase_id (4)time_shape_id (5)delay (6)freq (7)phase
     amplitude = float(data[0])
-    mag_id = int(math.floor(data[1]))
-    phase_id = int(math.floor(data[2]))
-    time_shape_id = int(math.floor(data[3]))
-    # v1.5.0 introduces time_shape_id=-1 for half-raster RF; treat it like the
-    # uniform-raster case (time_shape_id == 0).
-    delay = float(data[4]) + (dt_rf / 2.0 if time_shape_id <= 0 else 0.0)
-    freq = float(data[5])
-    phase = float(data[6])
+    mag_id = int(math.floor(float(data[1])))
+    phase_id = int(math.floor(float(data[2])))
+    time_shape_id = int(math.floor(float(data[3])))
+
+    if pulseq_version >= Version(1, 5, 0):
+        assert len(data) == 11, (
+            f"[RF id {idx}] v1.5 expects 11 columns, got {len(data)}"
+        )
+        # data[4] is 'center'; we keep the raw delay column (5).
+        # v1.5 introduces time_shape_id=-1 for half-raster RF; treat it
+        # like the uniform-raster case (time_shape_id == 0).
+        delay = float(data[5]) + (dt_rf / 2.0 if time_shape_id <= 0 else 0.0)
+        freq_ppm = float(data[6])
+        phase_ppm = float(data[7])
+        freq = float(data[8])
+        phase = float(data[9])
+        use_code = str(data[10]).strip().lower()[:1] or "u"
+        use_label = _USE_CODE_TO_STR.get(use_code, "undefined")
+    else:
+        assert len(data) == 7, (
+            f"[RF id {idx}] v1.4 expects 7 columns, got {len(data)}"
+        )
+        delay = float(data[4]) + (dt_rf / 2.0 if time_shape_id <= 0 else 0.0)
+        freq = float(data[5])
+        phase = float(data[6])
+        freq_ppm = 0.0
+        phase_ppm = 0.0
+        use_label = "undefined"
 
     if amplitude != 0.0 and mag_id != 0:
         num_mag, mag_data = shape_library[mag_id]
@@ -844,26 +938,48 @@ def read_RF(rf_library: Dict[int, Dict[str, Any]],
         rft = decompress_shape(num_t, t_data)
         rfT = np.diff(rft) * dt_rf
 
-    return RF(rfAphi, rfT, freq, delay)
+    return RF(rfAphi, rfT, freq, delay,
+              use=use_label, freq_ppm=freq_ppm, phase_ppm=phase_ppm)
 
 
-def read_ADC(adc_library: Dict[int, Dict[str, Any]], idx: int) -> ADC:
+def read_ADC(adc_library: Dict[int, Dict[str, Any]], idx: int,
+             pulseq_version: Version = Version(1, 4, 0)) -> ADC:
     """
     Construct an ADC object from library.
+
+    v1.4: 5 columns ``(num, dwell, delay, freq, phase)``.
+    v1.5: 8 columns ``(num, dwell, delay, freq_ppm, phase_ppm, freq,
+    phase, phase_id)``.
     """
     if not adc_library or idx == 0:
-        # default ADC-off
         return ADC(0, 0.0, 0.0, 0.0, 0.0)
 
     data = adc_library[idx]["data"]
-    # (1)num (2)dwell (3)delay (4)freq (5)phase
-    num = int(math.floor(data[0]))
-    dwell = float(data[1])
-    delay = float(data[2]) + dwell / 2.0
-    freq = float(data[3])
-    phase = float(data[4])
+    if pulseq_version >= Version(1, 5, 0):
+        assert len(data) == 8, (
+            f"[ADC id {idx}] v1.5 expects 8 columns, got {len(data)}"
+        )
+        num = int(math.floor(float(data[0])))
+        dwell = float(data[1])
+        delay = float(data[2]) + dwell / 2.0
+        freq_ppm = float(data[3])
+        phase_ppm = float(data[4])
+        freq = float(data[5])
+        phase = float(data[6])
+    else:
+        assert len(data) == 5, (
+            f"[ADC id {idx}] v1.4 expects 5 columns, got {len(data)}"
+        )
+        num = int(math.floor(float(data[0])))
+        dwell = float(data[1])
+        delay = float(data[2]) + dwell / 2.0
+        freq = float(data[3])
+        phase = float(data[4])
+        freq_ppm = 0.0
+        phase_ppm = 0.0
     T = (num - 1) * dwell
-    return ADC(num, T, delay, freq, phase)
+    return ADC(num, T, delay, freq, phase,
+               freq_ppm=freq_ppm, phase_ppm=phase_ppm)
 
 
 # ---------------------------------------------------------------------------
@@ -898,11 +1014,14 @@ def read_extension(extension_library: Dict[int, Dict[str, Any]],
         ext_type_name = extension_type[type_id]["data"]
 
         if ext_type_name == "LABELSET":
-            lab, val = labelset_library[ref]["data"]
-            result.append(LabelSet(lab, val))
+            # read_labels stored [val_int, val_str]; the canonical
+            # Pulseq spec attaches the integer value to a named label,
+            # so swap the order here when constructing the dataclass.
+            val, lab = labelset_library[ref]["data"]
+            result.append(LabelSet(str(lab), int(val)))
         elif ext_type_name == "LABELINC":
-            lab, val = labelinc_library[ref]["data"]
-            result.append(LabelInc(lab, val))
+            val, lab = labelinc_library[ref]["data"]
+            result.append(LabelInc(str(lab), int(val)))
         elif ext_type_name == "TRIGGERS":
             ch, mode, rise, fall = trigger_library[ref]["data"]
             result.append(Trigger(ch, mode, rise, fall))
@@ -974,7 +1093,17 @@ def read_seq(filename: str) -> PulseqSequence:
                     io, defs["BlockDurationRaster"], pulseq_version
                 )
             elif section == "[RF]":
-                if pulseq_version >= Version(1, 4, 0):
+                if pulseq_version >= Version(1, 5, 0):
+                    # v1.5: amp, mag_id, ph_id, time_id, center, delay,
+                    #       freq_ppm, phase_ppm, freq, phase, use
+                    # The trailing 'use' column is a single character; the
+                    # ``np.nan`` sentinel keeps it as a raw string token.
+                    rf_library = read_events(
+                        io,
+                        [1.0 / GAMMA, 1.0, 1.0, 1.0, 1e-6, 1e-6,
+                         1.0, 1.0, 1.0, 1.0, np.nan],
+                    )
+                elif pulseq_version >= Version(1, 4, 0):
                     rf_library = read_events(
                         io, [1.0 / GAMMA, 1.0, 1.0, 1.0, 1e-6, 1.0, 1.0]
                     )
@@ -983,7 +1112,15 @@ def read_seq(filename: str) -> PulseqSequence:
                         io, [1.0 / GAMMA, 1.0, 1.0, 1e-6, 1.0, 1.0]
                     )
             elif section == "[GRADIENTS]":
-                if pulseq_version >= Version(1, 4, 0):
+                if pulseq_version >= Version(1, 5, 0):
+                    # v1.5: amp, amp_id, time_id, first, last, delay
+                    grad_library = read_events(
+                        io,
+                        [1.0 / GAMMA, 1.0, 1.0,
+                         1.0 / GAMMA, 1.0 / GAMMA, 1e-6],
+                        type_=ord("g"), event_library=grad_library
+                    )
+                elif pulseq_version >= Version(1, 4, 0):
                     grad_library = read_events(
                         io, [1.0 / GAMMA, 1.0, 1.0, 1e-6],
                         type_=ord("g"), event_library=grad_library
@@ -999,7 +1136,16 @@ def read_seq(filename: str) -> PulseqSequence:
                     type_=ord("t"), event_library=grad_library
                 )
             elif section == "[ADC]":
-                adc_library = read_events(io, [1.0, 1e-9, 1e-6, 1.0, 1.0])
+                if pulseq_version >= Version(1, 5, 0):
+                    # v1.5: num, dwell, delay, freq_ppm, phase_ppm,
+                    #       freq, phase, phase_id
+                    adc_library = read_events(
+                        io, [1.0, 1e-9, 1e-6, 1.0, 1.0, 1.0, 1.0, 1.0]
+                    )
+                else:
+                    adc_library = read_events(
+                        io, [1.0, 1e-9, 1e-6, 1.0, 1.0]
+                    )
             elif section == "[DELAYS]":
                 if pulseq_version >= Version(1, 4, 0):
                     raise RuntimeError(
@@ -1104,12 +1250,16 @@ def read_seq(filename: str) -> PulseqSequence:
             continue
         idelay, irf, ix, iy, iz, iadc, iext = block_events[i]
 
-        gx = read_Grad(grad_library, shape_library, grad_raster_time, ix)
-        gy = read_Grad(grad_library, shape_library, grad_raster_time, iy)
-        gz = read_Grad(grad_library, shape_library, grad_raster_time, iz)
+        gx = read_Grad(grad_library, shape_library, grad_raster_time, ix,
+                       pulseq_version=pulseq_version)
+        gy = read_Grad(grad_library, shape_library, grad_raster_time, iy,
+                       pulseq_version=pulseq_version)
+        gz = read_Grad(grad_library, shape_library, grad_raster_time, iz,
+                       pulseq_version=pulseq_version)
 
-        rf = read_RF(rf_library, shape_library, rf_raster_time, irf)
-        adc = read_ADC(adc_library, iadc)
+        rf = read_RF(rf_library, shape_library, rf_raster_time, irf,
+                     pulseq_version=pulseq_version)
+        adc = read_ADC(adc_library, iadc, pulseq_version=pulseq_version)
 
         # block duration: max of blockDurations[i] and event durations
         d_list = [
@@ -1141,14 +1291,21 @@ def read_seq(filename: str) -> PulseqSequence:
 
         seq.add_block(gx, gy, gz, rf, adc, D, ext_list)
 
-    # Add first and last points for gradients
-    fix_first_last_grads(seq)
+    # Add first and last points for gradients. v1.5 files already carry
+    # these boundary samples on every arbitrary gradient row, so the
+    # in-house recomputation is skipped — the file is authoritative.
+    if pulseq_version < Version(1, 5, 0):
+        fix_first_last_grads(seq)
 
     # Final details
     seq.DEF.update(defs)
     seq.DEF["FileName"] = os.path.basename(filename)
     seq.DEF["PulseqVersion"] = pulseq_version
     seq.DEF["signature"] = signature
+    # Absolute path retained so downstream helpers (e.g. kspace_trajectory,
+    # import_pulseq) can re-open the file via pypulseq when they need the
+    # v1.5 k-space-calculation API.
+    seq.DEF["__pulseq_path__"] = os.path.abspath(filename)
 
     # Guessing recon dimensions (approximate mirrors of Julia logic)
     # Nx
@@ -1274,6 +1431,7 @@ def _convert_rf(rf: "RF", scanner: Scanner) -> Optional[feelmriRF]:
     waveform=Quantity(waveform, 'T').to('mT'),
     frequency_offset=Quantity(float(rf.df), 'Hz'),
     phase_offset=Quantity(0.0, 'rad'),
+    use=str(getattr(rf, 'use', 'undefined')),
   )
 
 
@@ -1305,107 +1463,60 @@ def _convert_adc(adc: "ADC") -> Optional[feelmriADC]:
 # K-space trajectory extraction
 # ---------------------------------------------------------------------------
 
-def _sample_grad_seconds(g: "Grad", tt: np.ndarray) -> np.ndarray:
-  """Sample a parsed Grad on a block-local time grid (seconds), in T/m."""
-  is_shaped = isinstance(g.A, np.ndarray)
-  if is_shaped:
-    if g.A.size == 0 or not np.any(np.abs(g.A) > 0.0):
-      return np.zeros_like(tt)
-    timings_s, amps_Tm = _shaped_waveform_seconds(g)
-  else:
-    if float(g.A) == 0.0:
-      return np.zeros_like(tt)
-    timings_s, amps_Tm = _trap_waveform_seconds(g)
-  return np.interp(tt, timings_s, amps_Tm, left=0.0, right=0.0)
+def _calculate_kspace_via_pypulseq(
+    filename,
+) -> Tuple[np.ndarray, np.ndarray]:
+  """Read ``filename`` with pypulseq and return the ADC-sample trajectory.
 
+  Returns
+  -------
+  k_traj_adc : np.ndarray, shape ``(3, N_adc)``
+      Gradient-moment-integrated k-space at every ADC sample, in 1/m.
+  t_adc : np.ndarray, shape ``(N_adc,)``
+      Absolute sequence times of those samples, in **seconds**.
 
-def _walk_kspace(pulseq_seq: "PulseqSequence",
-                 emit_indices: Optional[set] = None
-                 ) -> Tuple[List[Dict[str, np.ndarray]], np.ndarray]:
-  """Walk the sequence integrating k(t) = γ ∫₀ᵗ G(t') dt' continuously.
-
-  Returns:
-    per_block_samples — list of length len(pulseq_seq); element i is
-      ``{'kx': ..., 'ky': ..., 'kz': ..., 'times': ...}`` with ADC
-      samples for block i, or empty arrays if block i has no ADC or its
-      index is not in ``emit_indices`` (when provided).
-    block_start_times_s — ndarray of shape (n_blocks,) with absolute
-      block start times in seconds.
-
-  k accumulates across blocks (no reset on RF excitation); callers that
-  need flat arrays simply concatenate the per-block samples.
+  pypulseq's ``Sequence.calculate_kspace`` is authoritative for v1.5
+  semantics: it resets k=0 at every RF pulse tagged
+  ``use ∈ {'excitation', 'undefined'}`` and applies the spin-echo
+  reflection ``k → −2 k_at_pulse − k`` at ``use == 'refocusing'``.
+  Re-implementing this locally would force us to duplicate the
+  use-label bookkeeping that pypulseq already encodes correctly.
   """
-  n_blocks = len(pulseq_seq)
-  per_block: List[Dict[str, np.ndarray]] = []
-  block_start = np.zeros(n_blocks, dtype=float)
-
-  t_block_start = 0.0
-  k = np.zeros(3, dtype=float)
-  dt_grad = float(pulseq_seq.DEF.get('GradientRasterTime', 1e-5))
-  empty = np.array([], dtype=float)
-
-  for i in range(n_blocks):
-    block_start[i] = t_block_start
-    block_dur = float(pulseq_seq.DUR[i])
-    gx, gy, gz = pulseq_seq.GR[i]
-    adc = pulseq_seq.ADC[i]
-
-    if block_dur <= 0.0:
-      per_block.append({'kx': empty, 'ky': empty, 'kz': empty, 'times': empty})
-      continue
-
-    n_steps = max(int(round(block_dur / dt_grad)), 1)
-    tt = np.linspace(0.0, block_dur, n_steps + 1)
-    amp_x = _sample_grad_seconds(gx, tt)
-    amp_y = _sample_grad_seconds(gy, tt)
-    amp_z = _sample_grad_seconds(gz, tt)
-    kx_block = k[0] + GAMMA * cumulative_trapezoid(amp_x, tt, initial=0.0)
-    ky_block = k[1] + GAMMA * cumulative_trapezoid(amp_y, tt, initial=0.0)
-    kz_block = k[2] + GAMMA * cumulative_trapezoid(amp_z, tt, initial=0.0)
-
-    samples = {'kx': empty, 'ky': empty, 'kz': empty, 'times': empty}
-    has_adc = int(adc.num) > 0
-    is_emitted = emit_indices is None or i in emit_indices
-    if has_adc and is_emitted:
-      n = int(adc.num)
-      delay_s = float(adc.delay)
-      T = float(adc.T)
-      if n == 1:
-        adc_local = np.array([delay_s], dtype=float)
-      else:
-        dwell = T / (n - 1)
-        adc_local = delay_s + np.arange(n, dtype=float) * dwell
-      samples = {
-        'kx': np.interp(adc_local, tt, kx_block),
-        'ky': np.interp(adc_local, tt, ky_block),
-        'kz': np.interp(adc_local, tt, kz_block),
-        'times': (t_block_start + adc_local) * 1e3,
-      }
-    per_block.append(samples)
-
-    k = np.array([kx_block[-1], ky_block[-1], kz_block[-1]])
-    t_block_start += block_dur
-
-  return per_block, block_start
+  import pypulseq as pp  # runtime dep; see plan §6
+  pp_seq = pp.Sequence()
+  pp_seq.read(str(filename), detect_rf_use=False)
+  k_traj_adc, _k_full, _t_exc, _t_ref, t_adc = pp_seq.calculate_kspace()
+  return (
+      np.asarray(k_traj_adc, dtype=float),
+      np.asarray(t_adc, dtype=float),
+  )
 
 
 def kspace_trajectory(pulseq_seq: "PulseqSequence") -> Dict[str, np.ndarray]:
   """Compute the flat k-space trajectory across all ADC samples.
 
   Returns a dict with arrays ``kx, ky, kz`` (1/m) and ``times`` (ms)
-  of shape ``(N_total_adc_samples,)`` in sequence order, ready for
-  ``feelmri.Phantom.FEMPhantom.signal()``.
+  of shape ``(N_total_adc_samples,)`` in sequence order. The function
+  re-opens the underlying .seq file via pypulseq using the path stored
+  on ``pulseq_seq.DEF['__pulseq_path__']`` (set by :func:`read_seq`).
+
+  Sequences with zero ADC blocks short-circuit to empty arrays —
+  pypulseq can fail on synthetic extensions in test fixtures, and there
+  is no trajectory to compute anyway.
   """
-  per_block, _ = _walk_kspace(pulseq_seq)
-  empty = np.array([], dtype=float)
-  out = {'kx': [], 'ky': [], 'kz': [], 'times': []}
-  for s in per_block:
-    if s['times'].size > 0:
-      for key in out:
-        out[key].append(s[key])
-  if not out['times']:
-    return {key: empty for key in out}
-  return {key: np.concatenate(arrs) for key, arrs in out.items()}
+  filename = pulseq_seq.DEF.get('__pulseq_path__')
+  has_adc = any(int(a.num) > 0 for a in pulseq_seq.ADC)
+  if filename is None or not has_adc:
+    empty = np.array([], dtype=float)
+    return {'kx': empty, 'ky': empty, 'kz': empty, 'times': empty}
+
+  k_traj_adc, t_adc = _calculate_kspace_via_pypulseq(filename)
+  return {
+    'kx': k_traj_adc[0],
+    'ky': k_traj_adc[1],
+    'kz': k_traj_adc[2],
+    'times': t_adc * 1e3,
+  }
 
 
 def as_signal_inputs(traj: Dict[str, np.ndarray],
@@ -1459,6 +1570,60 @@ def as_signal_inputs(traj: Dict[str, np.ndarray],
   return points, times
 
 
+def kspace_to_signal_inputs(
+    pp_seq,
+    shape: Optional[Tuple[int, int, int]] = None,
+) -> Tuple[Tuple[np.ndarray, np.ndarray, np.ndarray], np.ndarray]:
+  """Convert ``pp.Sequence.calculate_kspace`` output into the rank-3
+  float32 tensors expected by ``feelmri.Phantom.FEMPhantom.mri_signal``.
+
+  This is the explicit bridge between pypulseq's k-space helper and
+  FEelMRI's signal assembler. It calls
+  ``pp_seq.calculate_kspace()`` internally, takes the ADC samples
+  (``k_traj_adc`` shape ``(3, N)`` in 1/m, ``t_adc`` shape ``(N,)`` in
+  seconds), and returns them reshaped, cast to float32, made
+  C-contiguous, with times converted to ms — the unit FEelMRI's
+  ``mri_signal`` expects (see ``examples/phase_contrast.py:212`` and
+  related call sites, all of which pass ``traj.times.m_as('ms')``).
+
+  Parameters
+  ----------
+  pp_seq : pypulseq.Sequence
+      A pypulseq Sequence on which ``calculate_kspace`` will be called.
+      Pre-populated (built in Python) or freshly read from a .seq file.
+  shape : (nb_meas, nb_lines, nb_kz), optional
+      Rank-3 output shape. When ``None`` (default) the helper uses
+      ``(N, 1, 1)``. The product must equal ``N`` (total ADC samples).
+
+  Returns
+  -------
+  (kspace_points, kspace_times) : tuple
+      ``kspace_points`` is a 3-tuple of C-contiguous rank-3 float32
+      arrays for (kx, ky, kz) in 1/m. ``kspace_times`` is a single
+      C-contiguous rank-3 float32 array in **ms**.
+  """
+  k_traj_adc, _k_full, _t_exc, _t_ref, t_adc = pp_seq.calculate_kspace()
+  k_traj_adc = np.asarray(k_traj_adc, dtype=float)
+  t_adc = np.asarray(t_adc, dtype=float)
+  n = int(t_adc.size)
+  if shape is None:
+    shape = (n, 1, 1)
+  shape = tuple(int(d) for d in shape)
+  if int(np.prod(shape)) != n:
+    raise ValueError(
+      f'requested shape {shape} (prod={int(np.prod(shape))}) does not '
+      f'match N={n} ADC samples'
+    )
+  points = tuple(
+    np.ascontiguousarray(k_traj_adc[axis].reshape(shape), dtype=np.float32)
+    for axis in range(3)
+  )
+  times = np.ascontiguousarray(
+    (t_adc * 1e3).reshape(shape), dtype=np.float32
+  )
+  return points, times
+
+
 # ---------------------------------------------------------------------------
 # Partitioned import: dual-path workflow (Bloch prep + signal assembly)
 # ---------------------------------------------------------------------------
@@ -1466,26 +1631,31 @@ def as_signal_inputs(traj: Dict[str, np.ndarray],
 @dataclass(frozen=True)
 class ReadoutWindow:
   """One contiguous span of ADC blocks plus its trajectory and the
-  index of the magnetization snapshot taken just before it.
+  index of the magnetization snapshot taken at the coherence-anchor
+  RF pulse for the group.
 
   Attributes
   ----------
   first_block, last_block : int
-      Inclusive range of block indices in ``feelmri_seq.blocks`` /
-      ``pulseq_seq.GR/RF/ADC/DUR`` (0-based).
+      Inclusive range of ADC-bearing block indices grouped under a
+      common coherence anchor. The range may include non-ADC blocks
+      (phase-encode blips, spoilers) interleaved with the ADCs.
   m_storage_block : int
-      Index of the last non-ADC block strictly before ``first_block``;
-      that block has ``store_magnetization`` set to True. -1 when the
-      readout starts before any prep block (no stored M available).
+      Block index of the coherence anchor (most recent RF block with
+      ``use ∈ {'excitation', 'refocusing', 'undefined'}``).
+      ``store_magnetization`` is set to True on that block. ``-1`` when
+      no use-labeled anchor exists; in that case the legacy
+      "last non-ADC block strictly before the first ADC" rule is used.
   m_storage_idx : int
-      Column index into ``BlochSolver.solve()``'s output Mxy/Mz array
-      (i.e. position of this readout's storage block among the marked
-      blocks, in sequence order). -1 mirrors ``m_storage_block == -1``.
+      Column index into ``BlochSolver.solve()``'s Mxy/Mz output
+      (position of this readout's anchor among all blocks flagged
+      ``store_magnetization``, in sequence order). ``-1`` mirrors
+      ``m_storage_block == -1``.
   kspace : np.ndarray
-      Shape (N, 3) array of (kx, ky, kz) at every ADC sample inside the
-      window, in 1/m.
+      Shape (N, 3) float32 array of (kx, ky, kz) at every ADC sample
+      inside the window, in 1/m.
   times : np.ndarray
-      Shape (N,) absolute sequence time of each ADC sample, in ms.
+      Shape (N,) float32 absolute sequence time of each ADC sample, in ms.
   adc_freq_offset : float
       Hz; constant within window (assumed identical across blocks).
   adc_phase_offset : float
@@ -1508,30 +1678,162 @@ class PulseqImport:
   partitioned view that splits prep blocks from ADC readout windows
   for use with the ``Phantom.update_magnetization`` /
   ``Phantom.mri_signal`` dual-path workflow.
+
+  ``prep_storage_blocks`` lists the block indices flagged
+  ``store_magnetization=True`` because they immediately follow a
+  ``use='preparation'`` RF pulse. They give callers (notably
+  myocardial-tagging readouts) a way to snapshot Mz after the prep even
+  when no ADC window immediately follows. The corresponding
+  ``prep_storage_indices`` mirror :attr:`ReadoutWindow.m_storage_idx`
+  for indexing into ``BlochSolver.solve()``'s output Mxy/Mz columns.
+
+  ``block_labels`` carries the per-block running state of every
+  ``LABELSET`` / ``LABELINC`` extension encountered in the file (e.g.
+  the user's ``make_label(label='SET', type='SET', value=A)`` tags).
+  Use :meth:`filter_blocks` to query block indices that match a
+  particular label state.
   """
   feelmri_seq: feelmriSequence
   pulseq_seq: PulseqSequence
   readouts: List[ReadoutWindow]
   prep_block_indices: List[int]
   adc_block_indices: List[int]
+  prep_storage_blocks: List[int]
+  prep_storage_indices: List[int]
+  block_labels: List[Dict[str, int]]
+
+  def filter_blocks(self, **labels: int) -> List[int]:
+    """Return block indices whose running LABELSET/LABELINC state matches
+    all given keyword constraints.
+
+    Example
+    -------
+    Tag every readout-group boundary with
+    ``pp.make_label(label='SET', type='SET', value=1)`` in the write
+    script, then::
+
+        imp = import_pulseq(path)
+        readout_blocks = imp.filter_blocks(SET=1)
+
+    AND semantics: multiple kwargs must all match
+    (``imp.filter_blocks(SET=1, SLC=0)`` matches blocks where SET == 1
+    *and* SLC == 0). Missing labels never match.
+    """
+    if not labels:
+      return list(range(len(self.block_labels)))
+    matches: List[int] = []
+    for i, state in enumerate(self.block_labels):
+      ok = True
+      for key, want in labels.items():
+        if state.get(key) != want:
+          ok = False
+          break
+      if ok:
+        matches.append(i)
+    return matches
+
+
+# RF use labels that anchor a coherence period. ADC blocks following one
+# of these — until the next anchor — belong to the same readout group.
+# 'undefined' mirrors pypulseq's Sequence.calculate_kspace behaviour
+# (sequence.py:1322-1325).
+_ANCHOR_USES = frozenset(('excitation', 'refocusing', 'undefined'))
+
+
+def _block_use_label(pulseq_seq: PulseqSequence, idx: int) -> Optional[str]:
+  """Return the canonical 'use' label of the RF pulse on block ``idx``,
+  or ``None`` when the block carries no active RF event."""
+  rf = pulseq_seq.RF[idx]
+  waveform = getattr(rf, 'waveform', None)
+  if waveform is None:
+    return None
+  if isinstance(waveform, np.ndarray):
+    if waveform.size == 0:
+      return None
+    if not np.any(np.abs(waveform) > 0.0):
+      return None
+  return str(getattr(rf, 'use', 'undefined'))
+
+
+def _compute_block_labels(pulseq_seq: PulseqSequence) -> List[Dict[str, int]]:
+  """Compute the running LABELSET / LABELINC state per block.
+
+  Walks ``pulseq_seq.EXT`` in order. Each ``LabelSet(label, value)``
+  overwrites the running entry; each ``LabelInc(label, value)`` adds
+  to it (defaulting from 0). Blocks with no label extension inherit
+  the previous block's dict unchanged.
+  """
+  n = len(pulseq_seq)
+  out: List[Dict[str, int]] = []
+  state: Dict[str, int] = {}
+  for i in range(n):
+    new_state = dict(state)
+    for ext in pulseq_seq.EXT[i]:
+      if isinstance(ext, LabelSet):
+        new_state[str(ext.label)] = int(ext.value)
+      elif isinstance(ext, LabelInc):
+        new_state[str(ext.label)] = int(new_state.get(str(ext.label), 0)) + int(ext.value)
+    out.append(new_state)
+    state = new_state
+  return out
 
 
 def _identify_readout_groups(pulseq_seq: PulseqSequence
-                             ) -> List[Tuple[int, int]]:
-  """Walk pulseq_seq.ADC and yield (first, last) inclusive index ranges
-  for each maximal run of consecutive blocks with adc.num > 0."""
-  groups: List[Tuple[int, int]] = []
-  start = -1
+                             ) -> List[Tuple[int, int, int]]:
+  """Group ADC-bearing blocks by their most recent coherence anchor.
+
+  Returns a list of ``(first_block, last_block, anchor_block)`` tuples.
+  ``anchor_block`` is the index of the latest RF block with
+  ``use ∈ {'excitation', 'refocusing', 'undefined'}``. Refocusing
+  pulses keep the current anchor (they flip k but do not start a new
+  coherence period). ``preparation`` / ``saturation`` / ``inversion`` /
+  ``other`` pulses do not anchor.
+
+  When no use-labeled anchor exists (the v1.4 fallback path), each ADC
+  block becomes its own group anchored on the most recent non-ADC
+  block — exactly the legacy partitioning.
+  """
   n = len(pulseq_seq)
+  anchor = -1
+  groups: Dict[Any, List[int]] = {}
+  anchor_order: List[Any] = []
+
   for i in range(n):
+    use = _block_use_label(pulseq_seq, i)
+    if use in _ANCHOR_USES and use != 'refocusing':
+      anchor = i
+
     has_adc = int(pulseq_seq.ADC[i].num) > 0
-    if has_adc and start < 0:
-      start = i
-    if start >= 0 and (not has_adc or i == n - 1):
-      end = i if has_adc else i - 1
-      groups.append((start, end))
-      start = -1
-  return groups
+    if not has_adc:
+      continue
+
+    if anchor < 0:
+      # No use-labeled anchor yet — fall back to legacy per-ADC rule.
+      key = ('fallback', i)
+      groups[key] = [i]
+      anchor_order.append(key)
+      continue
+
+    if anchor not in groups:
+      groups[anchor] = []
+      anchor_order.append(anchor)
+    groups[anchor].append(i)
+
+  out: List[Tuple[int, int, int]] = []
+  for key in anchor_order:
+    if isinstance(key, tuple) and key[0] == 'fallback':
+      idx = key[1]
+      m_block = -1
+      for j in range(idx - 1, -1, -1):
+        if int(pulseq_seq.ADC[j].num) == 0:
+          m_block = j
+          break
+      out.append((idx, idx, m_block))
+    else:
+      adc_blocks = groups[key]
+      out.append((min(adc_blocks), max(adc_blocks), key))
+  out.sort(key=lambda tup: tup[0])
+  return out
 
 
 def import_pulseq(filename) -> PulseqImport:
@@ -1545,7 +1847,6 @@ def import_pulseq(filename) -> PulseqImport:
   scanner = Scanner()
   feelmri_seq = feelmriSequence()
 
-  # Convert blocks (same logic as the previous read_seq_feelmri body).
   for i in range(len(pulseq_seq)):
     gx, gy, gz = pulseq_seq.GR[i]
     rf_ev = pulseq_seq.RF[i]
@@ -1573,54 +1874,53 @@ def import_pulseq(filename) -> PulseqImport:
     )
     feelmri_seq.add_block(block)
 
-  # Block category indices.
   n_blocks = len(pulseq_seq)
   adc_block_indices = [i for i in range(n_blocks)
                        if int(pulseq_seq.ADC[i].num) > 0]
-  adc_set = set(adc_block_indices)
-  prep_block_indices = [i for i in range(n_blocks) if i not in adc_set]
+  prep_block_indices = [i for i in range(n_blocks)
+                        if int(pulseq_seq.ADC[i].num) == 0]
 
-  # Readout groups → ReadoutWindow list.
+  # Per-block running LABELSET/LABELINC state (e.g. user-defined SET tags).
+  block_labels = _compute_block_labels(pulseq_seq)
+
+  # Pre-compute window time bounds from the in-house DUR list (seconds).
+  dur_s = np.asarray(pulseq_seq.DUR, dtype=float)
+  block_start_s = np.concatenate(([0.0], np.cumsum(dur_s)))
+  block_end_s = block_start_s[1:]
+  block_start_s = block_start_s[:-1]
+
+  if adc_block_indices:
+    try:
+      k_traj_adc, t_adc = _calculate_kspace_via_pypulseq(filename)
+    except Exception as exc:  # pragma: no cover - surfaced as hard error
+      raise RuntimeError(
+          f"Failed to compute k-space trajectory for {filename!s}: {exc}"
+      ) from exc
+  else:
+    k_traj_adc = np.zeros((3, 0), dtype=float)
+    t_adc = np.zeros((0,), dtype=float)
+
   groups = _identify_readout_groups(pulseq_seq)
-  per_block_samples, _ = _walk_kspace(pulseq_seq, emit_indices=adc_set)
+
+  # marked_in_order tracks every block flagged store_magnetization so
+  # readout `m_storage_idx` and prep `prep_storage_idx` index the same
+  # Mxy/Mz columns returned by BlochSolver.solve().
+  marked_in_order: List[int] = []
 
   readouts: List[ReadoutWindow] = []
-  marked_in_order: List[int] = []
-  for first, last in groups:
-    # m_storage_block: largest non-ADC index strictly < first.
-    m_block = -1
-    for j in range(first - 1, -1, -1):
-      if j not in adc_set:
-        m_block = j
-        break
+  for first, last, anchor_block in groups:
+    m_block = anchor_block
     if m_block >= 0 and m_block not in marked_in_order:
       feelmri_seq.blocks[m_block].store_magnetization = True
       marked_in_order.append(m_block)
     m_idx = marked_in_order.index(m_block) if m_block >= 0 else -1
 
-    kx_parts, ky_parts, kz_parts, t_parts = [], [], [], []
-    for i in range(first, last + 1):
-      s = per_block_samples[i]
-      if s['times'].size > 0:
-        kx_parts.append(s['kx'])
-        ky_parts.append(s['ky'])
-        kz_parts.append(s['kz'])
-        t_parts.append(s['times'])
-    if t_parts:
-      kspace = np.stack([
-        np.concatenate(kx_parts),
-        np.concatenate(ky_parts),
-        np.concatenate(kz_parts),
-      ], axis=1)
-      times_arr = np.concatenate(t_parts)
-    else:
-      kspace = np.zeros((0, 3), dtype=float)
-      times_arr = np.zeros((0,), dtype=float)
+    t_start = float(block_start_s[first])
+    t_end = float(block_end_s[last])
+    mask = (t_adc >= t_start - 1e-12) & (t_adc < t_end + 1e-12)
+    kspace = k_traj_adc[:, mask].T.astype(np.float32, copy=False)
+    times_arr = (t_adc[mask] * 1e3).astype(np.float32, copy=False)
 
-    # ADC offsets are taken from the first ADC block in the group; if
-    # they ever differ within a group the upstream sequence has
-    # multi-segment ADC, which Pulseq does not model with a single
-    # demodulation phase anyway.
     head_adc = pulseq_seq.ADC[first]
     readouts.append(ReadoutWindow(
       first_block=first,
@@ -1633,12 +1933,36 @@ def import_pulseq(filename) -> PulseqImport:
       adc_phase_offset=float(head_adc.phase),
     ))
 
+  # Prep storage points: each block with use='preparation' flags the
+  # immediately following block (skipping zero-duration ones) for an
+  # Mz snapshot.
+  prep_storage_blocks: List[int] = []
+  prep_storage_indices: List[int] = []
+  for i in range(n_blocks):
+    if _block_use_label(pulseq_seq, i) != 'preparation':
+      continue
+    target = -1
+    for j in range(i + 1, n_blocks):
+      if float(pulseq_seq.DUR[j]) > 0.0:
+        target = j
+        break
+    if target < 0:
+      continue
+    if target not in marked_in_order:
+      feelmri_seq.blocks[target].store_magnetization = True
+      marked_in_order.append(target)
+    prep_storage_blocks.append(target)
+    prep_storage_indices.append(marked_in_order.index(target))
+
   return PulseqImport(
     feelmri_seq=feelmri_seq,
     pulseq_seq=pulseq_seq,
     readouts=readouts,
     prep_block_indices=prep_block_indices,
     adc_block_indices=adc_block_indices,
+    prep_storage_blocks=prep_storage_blocks,
+    prep_storage_indices=prep_storage_indices,
+    block_labels=block_labels,
   )
 
 

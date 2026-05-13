@@ -35,6 +35,7 @@ from feelmri.PulseqAdapter import (
     ReadoutWindow,
     as_signal_inputs,
     import_pulseq,
+    kspace_to_signal_inputs,
     kspace_trajectory,
     read_seq_feelmri,
 )
@@ -87,11 +88,10 @@ __all__ = [
     "Trajectory", "CartesianStack", "RadialStack", "SpiralStack",
     # Phantom
     "FEMPhantom",
-    # Pulseq adapter / simulator
+    # Pulseq adapter
     "PulseqImport", "ReadoutWindow",
     "import_pulseq", "read_seq_feelmri", "kspace_trajectory",
-    "as_signal_inputs",
-    "SimulationResult", "simulate_pulseq",
+    "as_signal_inputs", "kspace_to_signal_inputs",
     # Motion
     "RespiratoryMotion", "POD", "PODVelocity", "PODSum",
     # Reconstruction

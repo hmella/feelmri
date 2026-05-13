@@ -17,7 +17,11 @@ from feelmri.Parameters import ParameterHandler, PVSMParser
 from feelmri.Phantom import FEMPhantom
 from feelmri.Plotter import MRIPlotter
 from feelmri.Recon import CartesianRecon, reconstruct_nufft
-from feelmri.PulseqAdapter import as_signal_inputs, import_pulseq, kspace_trajectory
+from feelmri.PulseqAdapter import (
+    import_pulseq,
+    kspace_to_signal_inputs,
+    kspace_trajectory,
+)
 import matplotlib.pyplot as plt
 
 
@@ -87,79 +91,68 @@ if __name__ == '__main__':
   # Phase shift in rad/s
   delta_omega0 = (2.0 * np.pi * scanner.gammabar * delta_B0).to('rad/ms')
 
-  # Test Pulseq adapter by loading a .seq file and plotting the sequence and kspace trajectory
-  path_prep = script_path / 'pulseq/epi_pypulseq_0.seq'
-  imp = import_pulseq(path_prep)
-  prep_x = imp.feelmri_seq
-  [setattr(b, 'store_magnetization', False) for i, b in enumerate(prep_x.blocks)]
-
-  path_prep = script_path / 'pulseq/epi_pypulseq_1.seq'
-  imp = import_pulseq(path_prep)
-  prep_y = imp.feelmri_seq
-  [setattr(b, 'store_magnetization', False) for i, b in enumerate(prep_y.blocks)]
-
-  path_ex = script_path / 'pulseq/epi_pypulseq_2.seq'
-  imp = import_pulseq(path_ex)
-  ex = imp.feelmri_seq
-  [setattr(b, 'store_magnetization', True) for i, b in enumerate(ex.blocks) if i == len(ex.blocks)-1] # Store magnetization only for the last block of the sequence
-
-  path_ro = script_path / 'pulseq/epi_pypulseq_3.seq'
-  imp = import_pulseq(path_ro)
-  ro = imp.feelmri_seq
-  traj = kspace_trajectory(imp.pulseq_seq)
-  # plt.plot(traj['kx'], traj['ky'], 'x-')
-  # plt.show()
-
-  path_spoil = script_path / 'pulseq/epi_pypulseq_4.seq'
-  imp = import_pulseq(path_spoil)
-  spoil = imp.feelmri_seq
-  [setattr(b, '_spoiler', True) for i, b in enumerate(spoil.blocks)]
-  [setattr(b, 'store_magnetization', False) for i, b in enumerate(spoil.blocks)]
-
-  # k-space arrays for Phantom.mri_signal. The C++ SignalAssembler
-  # kernels require rank-3 float32 C-contiguous tensors per axis (plus a
-  # matching rank-3 times tensor); as_signal_inputs centralises that
-  # contract. Default shape = (N, 1, 1), so K is filled flat and any
-  # EPI gridding is a follow-up concern.
-  kspace_points, kspace_times = as_signal_inputs(traj)
-  kspace_times *= 1e-3 # Convert to seconds
-
   # SPAMM magnetization
   Nb_frames = np.floor(u_times.m_as('ms').max()/parameters.Imaging.TimeSpacing.m_as('ms')).astype(np.int32) if not FAST_MODE else 1
-  Nb_frames = 4
   Mxy_spamm = np.zeros((phantom.local_nodes.shape[0], Nb_frames, 1), dtype=np.complex64)
+
+  # Import the Pulseq sequence and extract the k-space trajectory
+  seq_path = script_path / 'pulseq/epi_pypulseq.seq'
+  imp  = import_pulseq(seq_path)
+  traj = kspace_trajectory(imp.pulseq_seq)
+
+  # Diagnostic: report which blocks each SET category covers.
+  for s, name in [(0, 'prepx'), (1, 'prepy'), (100, 'spoiler'), (2, 'excitation'), (3, 'readout')]:
+    idx = imp.filter_blocks(SET=s)
+    n = len(imp.filter_blocks(SET=s))
+    MPI_print(f"  SET={s} ({name}): {n} block(s)")
 
   # Create sequence object
   seq = Sequence()
 
+  # Excitation block
+  tmp1 = imp.feelmri_seq.blocks[imp.filter_blocks(SET=2)[0]]
+  tmp2 = imp.feelmri_seq.blocks[imp.filter_blocks(SET=2)[1]]
+  ex = SequenceBlock(gradients=tmp1.S_gradients+tmp2.S_gradients, rf_pulses=tmp1.rf_pulses, store_magnetization=True)
+
+  # Readout block
+  ro_grads = []
+  for i in imp.filter_blocks(SET=3):
+    ro_grads += imp.feelmri_seq.blocks[i].gradients
+  ro = SequenceBlock(gradients=ro_grads)
+
+  # Spoiler block
+  spoiler = imp.feelmri_seq.blocks[imp.filter_blocks(SET=100)[0]]
+  spoiler._spoiler = True
+
   # Create dummy block to reach steady state
   dummy = ex.copy()
-  [setattr(b, 'store_magnetization', False) for i, b in enumerate(dummy.blocks)]
+  dummy.store_magnetization = False
 
   # Add dummy blocks to the sequence to reach steady state
-  time_spacing = (parameters.Imaging.TimeSpacing - ex.dur - ro.dur - spoil.dur).to('ms')
+  time_spacing = (parameters.Imaging.TimeSpacing - ex.dur - ro.dur - spoiler.dur).to('ms')
   print("Time spacing between frames: {:.2f} ms".format(time_spacing.m_as('ms')))
   for i in range(dummy_pulses):
     seq.add_block(dummy)
     seq.add_block(ro.dur.to('ms'), dt=Q_(1, 'ms'))
-    seq.add_block(spoil.dur.to('ms'), dt=Q_(1, 'ms'))
+    seq.add_block(spoiler.dur.to('ms'), dt=Q_(1, 'ms'))
     seq.add_block(time_spacing, dt=Q_(1, 'ms'))
     # seq.plot(figsize=(4, 6), tight_layout=True)
 
   # Add and additional block to synchronize the sequence with the cardiac cycle
   seq.add_block(u_times[-1] - seq.blocks[-1].time_extent[1] % u_times[-1], dt=Q_(1, 'ms'))
 
-  # Add blocks to the sequence
-  seq.add_block(prep_x, dt=Q_(1e-2, 'ms'))
-  seq.add_block(spoil, dt=Q_(1e-2, 'ms'))
-  seq.add_block(prep_y, dt=Q_(1e-2, 'ms'))
-  seq.add_block(spoil, dt=Q_(1e-2, 'ms'))
-  seq.add_block(Q_(1, 'ms'), dt=Q_(1, 'ms'))  # Time spacing between frames
-  seq.plot()
+  # Build sequence by concatenating blocks from the imported Pulseq sequence, using the SET label to identify the block categories. The time spacing between frames is set to match the SPAMM time spacing in the original Pulseq sequence.
+  # Tagging prepulses
+  [seq.add_block(imp.feelmri_seq.blocks[i], dt=Q_(1e-2, 'ms')) for i in imp.filter_blocks(SET=0)]
+  seq.add_block(spoiler, dt=Q_(1e-2, 'ms')) # Spoiler after prepulses
+  [seq.add_block(imp.feelmri_seq.blocks[i], dt=Q_(1e-2, 'ms')) for i in imp.filter_blocks(SET=1)]
+  seq.add_block(spoiler, dt=Q_(1e-2, 'ms')) # Spoiler after prepulses
+
+  # Add imaging blocks to the sequence
   for fr in range(Nb_frames):
     seq.add_block(ex, dt=Q_(1e-2, 'ms'))
     seq.add_block(ro.dur.to('ms'), dt=Q_(1e-2, 'ms'))
-    seq.add_block(spoil, dt=Q_(1e-2, 'ms'))
+    seq.add_block(spoiler, dt=Q_(1e-2, 'ms'))
     # seq.plot(blocks=slice(-4, None), figsize=(4, 6), tight_layout=True)
     seq.add_block(time_spacing, dt=Q_(1, 'ms'))  # Time spacing between frames
 
@@ -185,6 +178,7 @@ if __name__ == '__main__':
 
   # Solve for x and y directions
   Mxy, Mz = solver.solve()
+  Mxy_spamm[:, :, 0] = Mxy
 
   # Create XDMF file to store the POD velocity for comparison with the original velocity field
   file = XDMFFile(script_path/'pulseq_tagging.xdmf', nodes=phantom.global_nodes, elements={phantom.cell_type: phantom.global_elements})
@@ -213,8 +207,11 @@ if __name__ == '__main__':
   # Close the XDMF file
   file.close()
 
-  # Assign the magnetization to the corresponding direction
-  Mxy_spamm[..., 0] = Mxy
+  # Trajectory and timings
+  kspace_points = (traj['kx'].reshape((-1, 1, 1)).astype(np.float32),
+                  traj['ky'].reshape((-1, 1, 1)).astype(np.float32),
+                  traj['kz'].reshape((-1, 1, 1)).astype(np.float32))
+  kspace_times = 1e-3 * traj['times'].reshape((-1, 1, 1)).astype(np.float32)
 
   # k-space buffer matches the (N, 1, 1, 1) shape that mri_signal returns
   # for the default as_signal_inputs layout; an additional leading axis
