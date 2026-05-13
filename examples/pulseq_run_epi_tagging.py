@@ -7,16 +7,15 @@ import numpy as np
 from pint import Quantity as Q_
 
 from feelmri.Bloch import BlochSolver, Sequence, SequenceBlock
-from feelmri.KSpaceTraj import CartesianStack
 from feelmri.IO import XDMFFile
 from feelmri.Motion import POD
-from feelmri.MPIUtilities import MPI_print, gather_data
+from feelmri.MPIUtilities import MPI_print, MPI_rank, gather_data
 from feelmri.MRImaging import PositionEncoding, SliceProfile
 from feelmri.MRObjects import RF, Gradient, Scanner
 from feelmri.Parameters import ParameterHandler, PVSMParser
 from feelmri.Phantom import FEMPhantom
 from feelmri.Plotter import MRIPlotter
-from feelmri.Recon import CartesianRecon, reconstruct_nufft
+from feelmri.Recon import reconstruct_nufft
 from feelmri.PulseqAdapter import (
     import_pulseq,
     kspace_to_signal_inputs,
@@ -248,64 +247,26 @@ if __name__ == '__main__':
   # Gather results
   K = gather_data(K)
 
-  # ------------------------------------------------------------------
-  # Reshape the flat (N, 1, 1, 1, Nb_frames) k-space buffer onto the
-  # EPI grid (Nx readout x Ny phase encodes x Nz slices).
-  #
-  # write_epi_tagging.py orders the readout sequence as
-  #   for slice in 0..Nz-1:
-  #     for line  in 0..Ny-1:
-  #       for sample in 0..Nx-1: <one ADC sample>
-  #       (Gy blip, alternating Gx polarity)
-  # so the flat arrays from kspace_trajectory reshape cleanly to
-  # (Nz, Ny, Nx) and transpose to (Nx, Ny, Nz). The Gx-polarity
-  # alternation is reflected in the kx values themselves; NUFFT honours
-  # them directly, and CartesianRecon flips alternate lines internally
-  # via the CartesianStack lines_per_shot machinery.
-  # ------------------------------------------------------------------
-  Nx, Ny, Nz = (int(x) for x in parameters.Imaging.RES)
-
-  def _to_3d(flat):
-    arr = np.ascontiguousarray(flat, dtype=np.float32)
-    return arr.reshape(Nz, Ny, Nx).transpose(2, 1, 0)
-
-  kx_3d = _to_3d(traj['kx'])
-  ky_3d = _to_3d(traj['ky'])
-  kz_3d = _to_3d(traj['kz'])
-
-  K_grid = np.zeros((Nx, Ny, Nz, 1, Nb_frames), dtype=np.complex64)
-  for fr in range(Nb_frames):
-    K_grid[..., fr] = K[..., fr].reshape(Nz, Ny, Nx, 1).transpose(2, 1, 0, 3)
-
-  fov = tuple(2*planning.FOV.m_as('m'))
-
-  # ------------------------------------------------------------------
-  # (2) Cartesian reconstruction via a CartesianStack rebuilt to match
-  # the EPI fixture written by examples/write_epi_tagging.py. Setting
-  # lines_per_shot=Ny declares a single-shot EPI acquisition; with
-  # that, CartesianRecon.line-flip pass (Recon.py:49-53) automatically
-  # reverses K along the readout axis on every odd phase-encode line
-  # before the inverse FFT.
-  # ------------------------------------------------------------------
-  cart_traj = CartesianStack(
-    FOV=2*planning.FOV.to('m'),
-    res=np.array([Nx, Ny, Nz], dtype=np.int32),
-    oversampling=1,
-    lines_per_shot=Ny,
-    scanner=scanner,
-    receiver_bw=parameters.Hardware.r_BW,
-    MPS_ori=planning.MPS,
-    LOC=planning.LOC.m_as('m'),
+  # Reconstruct the image
+  RES = parameters.Imaging.RES
+  Im = reconstruct_nufft(
+    kdata=K.reshape((K.shape[0], K.shape[1], K.shape[2], -1)),  # (R, L, S, C)
+    ktraj=kspace_points,
+    img_shape=RES,
+    fov=2*planning.FOV.m_as('m'),
+    auto_dcw='pipe-menon',
+    oversamp=1.25,
+    kernel_size=6,
+    mode='adjoint',
+    combine=None,
   )
-  I_cart = CartesianRecon(K_grid, cart_traj)
+  Im = Im.transpose((1,2,3,0)).reshape((RES[0], RES[1], RES[2], 1, -1))  # (Nx, Ny, Nz, enc, C)
+  print(Im.shape)
 
-  # ------------------------------------------------------------------
-  # Display magnitude images from both reconstructions side-by-side.
-  # ------------------------------------------------------------------
-  mag_cart  = np.abs(np.squeeze(I_cart, axis=3))
-  plotter = MRIPlotter(
-    images=[mag_cart],
-    title=['EPI Cartesian'],
+  # Show the image
+  mag = np.abs(Im[...,0,:])
+  MRIPlotter(
+    images=[mag],
+    title=['EPI NUFFT'],
     FOV=2*planning.FOV.m_as('m'),
-  )
-  plotter.show()
+  ).show()
