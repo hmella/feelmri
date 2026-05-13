@@ -115,8 +115,8 @@ def test_pulseq_version_supported(adapter, parsed_imports, seq_path):
   ver = imp.pulseq_seq.DEF['PulseqVersion']
   assert ver.major == 1
   assert ver >= adapter.Version(1, 2, 0)
-  assert ver < adapter.Version(1, 5, 0), (
-    f'{seq_path.name} declares Pulseq {ver}; adapter warns on >=1.5.0'
+  assert ver < adapter.Version(1, 6, 0), (
+    f'{seq_path.name} declares Pulseq {ver}; adapter warns on >=1.6.0'
   )
 
 
@@ -135,8 +135,16 @@ def test_import_pulseq_partitions_blocks(parsed_imports, seq_path):
 
   for rw in imp.readouts:
     assert 0 <= rw.first_block <= rw.last_block < n
-    for i in range(rw.first_block, rw.last_block + 1):
-      assert i in adc, f'readout block {i} should have ADC'
+    # At minimum, first_block and last_block must themselves be ADC
+    # blocks (anchor groups start and end on an ADC). Intervening
+    # blocks may be phase-encode blips or spoilers when an EPI echo
+    # train shares one coherence anchor.
+    assert rw.first_block in adc, (
+      f'window first_block {rw.first_block} should have ADC'
+    )
+    assert rw.last_block in adc, (
+      f'window last_block {rw.last_block} should have ADC'
+    )
     if rw.m_storage_block >= 0:
       assert rw.m_storage_block in prep
       assert rw.m_storage_block < rw.first_block
@@ -197,6 +205,165 @@ def test_rotation_extension_round_trip(adapter):
   assert len(exts) == 1
   assert isinstance(exts[0], adapter.Rotation)
   assert exts[0].matrix.shape == (3, 3)
+
+
+# ---------------------------------------------------------------------------
+# v1.5 column-layout dispatch (RF / ADC)
+# ---------------------------------------------------------------------------
+
+def test_v1_5_column_layout(adapter):
+  """v1.5 RF rows are 11 columns; freq / phase sit at indices 8 / 9,
+  not 5 / 6 as in v1.4. The string ``use`` column lives at index 10.
+  Same column-drift story for ADC: v1.5 puts freq / phase at 5 / 6,
+  not 3 / 4."""
+  shape_id_mag = 1
+  shape_id_phase = 2
+  shape_library = {
+    shape_id_mag: (2, np.array([1.0, 1.0])),
+    shape_id_phase: (2, np.array([0.0, 0.0])),
+  }
+  rf_library = {
+    1: {'data': [
+      100.0,           # amplitude (T)
+      shape_id_mag,    # mag_id
+      shape_id_phase,  # phase_id
+      0.0,             # time_shape_id
+      0.5e-3,          # center (s)
+      1e-4,            # delay (s)
+      0.01,            # freq_ppm
+      0.02,            # phase_ppm
+      500.0,           # freq (Hz)   <- v1.5 picks this up at index 8
+      0.5,             # phase (rad) <- v1.5 picks this up at index 9
+      'e',             # use (single-char enum)
+    ]},
+  }
+  rf = adapter.read_RF(rf_library, shape_library, dt_rf=1e-6,
+                       idx=1, pulseq_version=adapter.Version(1, 5, 0))
+  assert rf.df == pytest.approx(500.0)
+  assert rf.use == 'excitation'
+  assert rf.freq_ppm == pytest.approx(0.01)
+  assert rf.phase_ppm == pytest.approx(0.02)
+
+  adc_library = {
+    1: {'data': [
+      32.0, 1e-6, 1e-5,
+      0.03, 0.04,
+      700.0, 1.2,
+      0.0,
+    ]},
+  }
+  adc = adapter.read_ADC(adc_library, idx=1,
+                         pulseq_version=adapter.Version(1, 5, 0))
+  assert adc.df == pytest.approx(700.0)
+  assert adc.phase == pytest.approx(1.2)
+  assert adc.freq_ppm == pytest.approx(0.03)
+  assert adc.phase_ppm == pytest.approx(0.04)
+
+
+# ---------------------------------------------------------------------------
+# LABELSET-driven filter API
+# ---------------------------------------------------------------------------
+
+def _build_labelset_seq(tmp_path):
+  """Build a tiny pp.Sequence with 4 blocks tagged via make_label SET.
+
+  Layout:
+    block 0: trapezoid + SET=0      (prep)
+    block 1: trapezoid + SET=1      (excitation)
+    block 2: trapezoid + SET=2      (readout)
+    block 3: trapezoid (no label)   (carries SET=2 by inheritance)
+  """
+  pp = pytest.importorskip('pypulseq')
+  system = pp.Opts(max_grad=10, grad_unit='mT/m',
+                   max_slew=80, slew_unit='T/m/s')
+  seq = pp.Sequence(system)
+  g = pp.make_trapezoid(channel='x', system=system,
+                        amplitude=5e-3, flat_time=200e-6)
+  seq.add_block(g, pp.make_label(label='SET', type='SET', value=0))
+  seq.add_block(g, pp.make_label(label='SET', type='SET', value=1))
+  seq.add_block(g, pp.make_label(label='SET', type='SET', value=2))
+  seq.add_block(g)
+  out = tmp_path / 'labelset_minimal.seq'
+  seq.write(str(out))
+  return out
+
+
+def test_labelset_filter(adapter, tmp_path):
+  """SET labels are LABELSET counters; only the *first* block of each
+  group needs the tag because the value carries forward. After import,
+  ``block_labels`` shows the running state and ``filter_blocks`` returns
+  matching block indices."""
+  pytest.importorskip('pypulseq')
+  seq_path = _build_labelset_seq(tmp_path)
+  imp = adapter.import_pulseq(seq_path)
+
+  assert len(imp.block_labels) == 4
+  assert imp.block_labels[0] == {'SET': 0}
+  assert imp.block_labels[1] == {'SET': 1}
+  assert imp.block_labels[2] == {'SET': 2}
+  # Block 3 inherits the running SET=2 from block 2 without a label
+  # extension of its own.
+  assert imp.block_labels[3] == {'SET': 2}
+
+  assert imp.filter_blocks(SET=0) == [0]
+  assert imp.filter_blocks(SET=1) == [1]
+  assert imp.filter_blocks(SET=2) == [2, 3]
+  assert imp.filter_blocks(SET=99) == []
+  # No-kwargs returns every block.
+  assert imp.filter_blocks() == [0, 1, 2, 3]
+
+
+# ---------------------------------------------------------------------------
+# Trajectory data bridge: kspace_to_signal_inputs(pp_seq)
+# ---------------------------------------------------------------------------
+
+def test_kspace_to_signal_inputs(adapter, tmp_path):
+  """kspace_to_signal_inputs takes a pp.Sequence directly, calls
+  calculate_kspace, and returns (pts, times) ready for mri_signal:
+  3-tuple of C-contiguous rank-3 float32 arrays in 1/m for k-space and
+  one matching rank-3 array in ms for times."""
+  pp = pytest.importorskip('pypulseq')
+  system = pp.Opts(max_grad=30, grad_unit='mT/m',
+                   max_slew=150, slew_unit='T/m/s',
+                   rf_dead_time=10e-6, rf_ringdown_time=10e-6)
+  seq = pp.Sequence(system)
+  rf, gz, _ = pp.make_sinc_pulse(
+    flip_angle=np.deg2rad(15), system=system,
+    duration=1e-3, slice_thickness=5e-3,
+    apodization=0.5, time_bw_product=4, return_gz=True,
+    delay=system.rf_dead_time,
+  )
+  # area + duration: pypulseq derives amplitude / rise_time within
+  # the supplied window.
+  gx = pp.make_trapezoid(channel='x', system=system,
+                         area=200.0, duration=600e-6)
+  adc = pp.make_adc(num_samples=16, duration=400e-6,
+                    delay=gx.rise_time + 50e-6)
+  seq.add_block(rf, gz)
+  seq.add_block(gx, adc)
+  out = tmp_path / 'bridge_minimal.seq'
+  seq.write(str(out))
+
+  pp_seq = pp.Sequence()
+  pp_seq.read(str(out), detect_rf_use=False)
+  pts, times = adapter.kspace_to_signal_inputs(pp_seq)
+
+  assert len(pts) == 3
+  for axis_arr in pts:
+    assert axis_arr.dtype == np.float32
+    assert axis_arr.flags['C_CONTIGUOUS']
+    assert axis_arr.shape == (16, 1, 1)
+    assert np.all(np.isfinite(axis_arr))
+  assert times.dtype == np.float32
+  assert times.flags['C_CONTIGUOUS']
+  assert times.shape == (16, 1, 1)
+
+  # Cross-check: the bridge multiplied seconds by 1e3 to get ms.
+  k_traj_adc, _kf, _te, _tr, t_adc = pp_seq.calculate_kspace()
+  np.testing.assert_allclose(times.reshape(-1), t_adc * 1e3,
+                             rtol=1e-6, atol=1e-9)
+  np.testing.assert_allclose(pts[0].reshape(-1), k_traj_adc[0],
+                             rtol=1e-6, atol=1e-9)
 
 
 # ---------------------------------------------------------------------------

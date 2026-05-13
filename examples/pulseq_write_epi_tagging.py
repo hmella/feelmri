@@ -3,6 +3,7 @@ Demo low-performance EPI sequence without ramp-sampling.
 """
 
 import numpy as np
+import matplotlib.pyplot as plt
 
 import pypulseq as pp
 from pathlib import Path
@@ -67,11 +68,7 @@ def main(
         rf_dead_time=100e-6,
     )
 
-    seq_prep_x = pp.Sequence(system)
-    seq_prep_y = pp.Sequence(system)
-    seq_ex = pp.Sequence(system)
-    seq_ro = pp.Sequence(system)
-    seq_spoil = pp.Sequence(system)
+    seq = pp.Sequence(system)
 
     # Create tagging prepulse objects
     rf_prep1 = pp.make_block_pulse(
@@ -151,59 +148,71 @@ def main(
     gz_spoil = pp.make_trapezoid(channel='z', area=f * 4 / slice_thickness, system=system)
 
     # Loop over slices
-    seq_prep_x.add_block(rf_prep1)
-    # seq_prep_x.add_block(pp.make_delay(system.rf_dead_time))
-    seq_prep_x.add_block(g_tag_x)
-    # seq_prep_x.add_block(pp.make_delay(system.rf_dead_time))
-    seq_prep_x.add_block(rf_prep2)
-    # seq_prep_x.add_block(pp.make_delay(system.rf_dead_time))
-    # Crush the transverse residual left by the second SPAMM 90 deg pulse.
-    # A 1-1 SPAMM prep leaves Mz = -M0*cos(phi(x)) AND My = +M0*sin(phi(x));
-    # the unwanted My residual aliases the desired Mz modulation in the
-    # first imaged frame unless it is spoiled before the next excitation.
+    seq.add_block(rf_prep1, pp.make_label(type='SET', label='SET', value=0))
+    # seq.add_block(pp.make_delay(system.rf_dead_time))
+    seq.add_block(g_tag_x, pp.make_label(type='SET', label='SET', value=0))
+    # seq.add_block(pp.make_delay(system.rf_dead_time))
+    seq.add_block(rf_prep2, pp.make_label(type='SET', label='SET', value=0))
+    # seq.add_block(pp.make_delay(system.rf_dead_time))
+    seq.add_block(gx_spoil, gy_spoil, gz_spoil, pp.make_label(type='SET', label='SET', value=100))
 
     rf_prep2.flip_angle = np.deg2rad(90)
-    seq_prep_y.add_block(rf_prep1)
-    # seq_prep_x.add_block(pp.make_delay(system.rf_dead_time))
-    seq_prep_y.add_block(g_tag_y)
-    # seq_prep_x.add_block(pp.make_delay(system.rf_dead_time))
-    seq_prep_y.add_block(rf_prep2)
-    # seq_prep_x.add_block(pp.make_delay(system.rf_dead_time))
+    seq.add_block(rf_prep1, pp.make_label(type='SET', label='SET', value=1))
+    # seq.add_block(pp.make_delay(system.rf_dead_time))
+    seq.add_block(g_tag_y, pp.make_label(type='SET', label='SET', value=1))
+    # seq.add_block(pp.make_delay(system.rf_dead_time))
+    seq.add_block(rf_prep2, pp.make_label(type='SET', label='SET', value=1))
+    # seq.add_block(pp.make_delay(system.rf_dead_time))
+    seq.add_block(gx_spoil, gy_spoil, gz_spoil, pp.make_label(type='SET', label='SET', value=100))
 
     for i_slice in range(n_slices):
         rf.freq_offset = gz.amplitude * slice_thickness * (i_slice - (n_slices - 1) / 2)
-        seq_ex.add_block(rf, gz)
-        seq_ex.add_block(gx_pre, gy_pre, gz_reph)
+        seq.add_block(rf, gz, pp.make_label(type='SET', label='SET', value=2))
+        seq.add_block(gx_pre, gy_pre, gz_reph, pp.make_label(type='SET', label='SET', value=2))
         for _ in range(n_y):
-            seq_ro.add_block(gx, adc)  # Read one line of k-space
-            seq_ro.add_block(gy)  # Phase blip
+            seq.add_block(gx, adc, pp.make_label(type='SET', label='SET', value=3))  # Read one line of k-space
+            seq.add_block(gy, pp.make_label(type='SET', label='SET', value=3))  # Phase blip
             gx.amplitude = -gx.amplitude  # Reverse polarity of read gradient
-        seq_spoil.add_block(gx_spoil, gy_spoil, gz_spoil)
+        seq.add_block(gx_spoil, gy_spoil, gz_spoil, pp.make_label(type='SET', label='SET', value=100))
 
-    for i, seq in enumerate([seq_prep_x, seq_prep_y, seq_ex, seq_ro, seq_spoil]):
-      ok, error_report = seq.check_timing()
-      if ok:
-          print('Timing check passed successfully')
-      else:
-          print('Timing check failed. Error listing follows:')
-          [print(e) for e in error_report]
+    # Check timings
+    ok, error_report = seq.check_timing()
+    if ok:
+        print('Timing check passed successfully')
+    else:
+        print('Timing check failed. Error listing follows:')
+        [print(e) for e in error_report]
 
-      if test_report:
-          print(seq.test_report())
+    if test_report:
+        print(seq.test_report())
 
-      if plot:
-          seq.plot()
+    if plot:
+        seq.plot()
 
-      seq.set_definition(key='FOV', value=[fov_x, fov_y, slice_thickness * n_slices])
-      seq.set_definition(key='Name', value='epi')
+        # Calculate trajectory for visualization
+        k_traj_adc, k_traj, t_excitation, t_refocusing, t_adc = seq.calculate_kspace()
 
-      if write_seq:
-          # Add i before .seq extension
-          path = Path(seq_filename)
-          seq_filename_i = path.with_name(f"{path.stem}_{i}{path.suffix}")
-          seq.write(seq_filename_i)
+        fig, ax = plt.subplots(1, 2)
+        ax[0].plot(k_traj_adc[0, :], k_traj_adc[1, :], '-')
+        ax[0].set_title('k-space trajectory (ADC)')
+        ax[0].set_xlabel('k_x (1/m)')
+        ax[0].set_ylabel('k_y (1/m)')
+        ax[0].axis('equal')
+        ax[1].plot(k_traj[0, :], k_traj[1, :], '-')
+        ax[1].set_title('k-space trajectory (all events)')
+        ax[1].set_xlabel('k_x (1/m)')
+        ax[1].set_ylabel('k_y (1/m)')
+        ax[1].axis('equal')
+        plt.tight_layout()
+        plt.show()
 
-    return (seq_prep_x, seq_prep_y, seq_ex, seq_ro, seq_spoil)
+    seq.set_definition(key='FOV', value=[fov_x, fov_y, slice_thickness * n_slices])
+    seq.set_definition(key='Name', value='epi')
+
+    if write_seq:
+      seq.write(seq_filename)
+
+    return seq
 
 
 if __name__ == '__main__':
@@ -220,7 +229,7 @@ if __name__ == '__main__':
                             transform_name='Transform1',
                             length_units=parameters.Formatting.units)
 
-    main(plot=False,
+    main(plot=True,
          write_seq=True,
          seq_filename=script_path/'pulseq/epi_pypulseq.seq',
          fov = tuple(2*planning.FOV[:-1].m_as('m')),

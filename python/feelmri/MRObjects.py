@@ -798,7 +798,8 @@ class RF:
                  phase_offset=Quantity(0.0, 'rad'),
                  frequency_offset=Quantity(0.0, 'Hz'),
                  timings=None,
-                 waveform=None):
+                 waveform=None,
+                 use='undefined'):
 
         # Safe default for scanner (prevents mutable default hazards)
         self.scanner = scanner if scanner is not None else Scanner()
@@ -806,6 +807,11 @@ class RF:
         self.NbLobes = NbLobes
         self.alpha = alpha
         self.shape = shape
+
+        # Functional label inherited from a Pulseq v1.5 'use' tag. Carried
+        # through verbatim so partition-aware code (e.g. PulseqAdapter) can
+        # identify excitation / refocusing / preparation pulses.
+        self.use = use
 
         # Shape selection (exact original behavior)
         if self.shape == 'sinc':
