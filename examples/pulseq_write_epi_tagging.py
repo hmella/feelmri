@@ -93,7 +93,9 @@ def main(
     )
 
     # Create tagging gradients. The area of the tagging gradients determines the spacing of the tag lines, which is typically around 8 mm for cardiac imaging.
-    area = parameters.PositionEncoding.ke.m_as('1/m') / 8
+    tag_spacing = 16e-3 # m
+    tag_frequency = 1 / tag_spacing # 1/m
+    area = tag_frequency
     g_tag_x = pp.make_trapezoid(channel='x', system=system, area=area)
     g_tag_y = pp.make_trapezoid(channel='y', system=system, area=area)
 
