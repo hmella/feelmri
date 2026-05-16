@@ -19,6 +19,15 @@ import pytest
 from pint import Quantity
 
 
+# The whole module exercises the PulseqAdapter, whose end-to-end paths
+# (kspace_trajectory, calculate_kspace bridge) require the optional
+# 'pypulseq' package. CI runs with '-m "not pulseq"' so the file is
+# deselected when pypulseq is unavailable. Existing
+# pytest.importorskip('pypulseq') calls inside individual tests remain
+# as a second line of defense for developers running the file directly.
+pytestmark = pytest.mark.pulseq
+
+
 PULSEQ_DIR = Path(__file__).resolve().parent.parent / 'examples' / 'pulseq'
 SEQ_FILES = sorted(PULSEQ_DIR.glob('*.seq'))
 ROTATION_SEQ = Path(__file__).resolve().parent / 'data' / 'rotation_minimal.seq'

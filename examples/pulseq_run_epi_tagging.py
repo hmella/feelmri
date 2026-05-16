@@ -1,7 +1,24 @@
 import os
+import sys
 
 os.environ["OPENBLAS_NUM_THREADS"] = "1" # export OPENBLAS_NUM_THREADS=1
 from pathlib import Path
+
+# This example evaluates k-space trajectories through pypulseq's
+# Sequence.calculate_kspace, which is an optional dependency. Fail fast
+# and cleanly here so users don't burn time on phantom setup before
+# hitting the missing dependency.
+try:
+  import pypulseq as _pp_probe  # noqa: F401
+except ImportError:
+  print(
+    "[pulseq_run_epi_tagging] Skipped: this example requires the optional "
+    "'pypulseq' package (used by feelmri.PulseqAdapter.kspace_trajectory / "
+    "kspace_to_signal_inputs). Install it with 'pip install pypulseq' (or "
+    "'pip install feelmri[pulseq]') to run this example.",
+    file=sys.stderr,
+  )
+  sys.exit(0)
 
 import numpy as np
 from pint import Quantity as Q_
@@ -107,11 +124,15 @@ if __name__ == '__main__':
 
   # Create sequence object
   seq = Sequence()
+  dt_seq = Q_(1e-2, 'ms')  # Time step for sequence blocks (10 us)
 
   # Excitation block
   tmp1 = imp.feelmri_seq.blocks[imp.filter_blocks(SET=2)[0]]
   tmp2 = imp.feelmri_seq.blocks[imp.filter_blocks(SET=2)[1]]
-  ex = SequenceBlock(gradients=tmp1.S_gradients+tmp2.S_gradients, rf_pulses=tmp1.rf_pulses, store_magnetization=True)
+  ex = SequenceBlock(gradients=tmp1.S_gradients+tmp2.S_gradients,
+                     rf_pulses=tmp1.rf_pulses, 
+                     store_magnetization=True,
+                     dt=dt_seq)
 
   # Readout block
   ro_grads = []
@@ -133,7 +154,7 @@ if __name__ == '__main__':
   for i in range(dummy_pulses):
     seq.add_block(dummy)
     seq.add_block(ro.dur.to('ms'), dt=Q_(1, 'ms'))
-    seq.add_block(spoiler.dur.to('ms'), dt=Q_(1, 'ms'))
+    seq.add_block(spoiler.dur.to('ms'), dt=dt_seq)
     seq.add_block(time_spacing, dt=Q_(1, 'ms'))
     # seq.plot(figsize=(4, 6), tight_layout=True)
 
@@ -142,16 +163,16 @@ if __name__ == '__main__':
 
   # Build sequence by concatenating blocks from the imported Pulseq sequence, using the SET label to identify the block categories. The time spacing between frames is set to match the SPAMM time spacing in the original Pulseq sequence.
   # Tagging prepulses
-  [seq.add_block(imp.feelmri_seq.blocks[i], dt=Q_(1e-2, 'ms')) for i in imp.filter_blocks(SET=0)]
-  seq.add_block(spoiler, dt=Q_(1e-2, 'ms')) # Spoiler after prepulses
-  [seq.add_block(imp.feelmri_seq.blocks[i], dt=Q_(1e-2, 'ms')) for i in imp.filter_blocks(SET=1)]
-  seq.add_block(spoiler, dt=Q_(1e-2, 'ms')) # Spoiler after prepulses
+  [seq.add_block(imp.feelmri_seq.blocks[i], dt=dt_seq) for i in imp.filter_blocks(SET=0)]
+  seq.add_block(spoiler, dt=dt_seq) # Spoiler after prepulses
+  [seq.add_block(imp.feelmri_seq.blocks[i], dt=dt_seq) for i in imp.filter_blocks(SET=1)]
+  seq.add_block(spoiler, dt=dt_seq) # Spoiler after prepulses
 
   # Add imaging blocks to the sequence
   for fr in range(Nb_frames):
-    seq.add_block(ex, dt=Q_(1e-2, 'ms'))
-    seq.add_block(ro.dur.to('ms'), dt=Q_(1e-2, 'ms'))
-    seq.add_block(spoiler, dt=Q_(1e-2, 'ms'))
+    seq.add_block(ex, dt=dt_seq)
+    seq.add_block(ro.dur.to('ms'), dt=Q_(1, 'ms'))
+    seq.add_block(spoiler, dt=dt_seq)
     # seq.plot(blocks=slice(-4, None), figsize=(4, 6), tight_layout=True)
     seq.add_block(time_spacing, dt=Q_(1, 'ms'))  # Time spacing between frames
 
@@ -173,7 +194,8 @@ if __name__ == '__main__':
                        delta_B=delta_B0.m_as('mT').reshape((-1, 1)),
                        pod_trajectory=pod_trajectory,
                        perfect_spoiling=False,
-                       isochromat_K=50)
+                       isochromat_K=100,
+                       method='magnus2')
 
   # Solve for x and y directions
   Mxy, Mz = solver.solve()

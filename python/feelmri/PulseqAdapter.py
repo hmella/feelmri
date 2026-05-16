@@ -48,6 +48,42 @@ from feelmri.MRObjects import RF as feelmriRF, Gradient, Scanner
 
 logger = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# Optional 'pypulseq' dependency
+# ---------------------------------------------------------------------------
+#
+# Only the k-space trajectory bridge functions require pypulseq; the rest of
+# this adapter (parser, block conversion, label-driven partitioning) is
+# pure-Python. Keep the import lazy and gated so 'import feelmri' works
+# without pypulseq installed and so users hit a clear error message when
+# they call a function that genuinely needs it.
+
+def _require_pypulseq(feature: str):  # pragma: no cover (optional dep)
+  """Import pypulseq on demand, raising a clear ImportError if absent.
+
+  Parameters
+  ----------
+  feature : str
+      Short name of the calling feature, used in the error message so the
+      user knows which call site asked for pypulseq.
+
+  Returns
+  -------
+  module
+      The imported ``pypulseq`` module.
+  """
+  try:
+    import pypulseq as pp
+  except ImportError as exc:
+    raise ImportError(
+      f"{feature} requires the optional 'pypulseq' package. Install it with "
+      f"'pip install pypulseq' (FEelMRI supports v1.2 through v1.5; the "
+      f"'feelmri[pulseq]' extra installs a compatible version)."
+    ) from exc
+  return pp
+
+
 # ---------------------------------------------------------------------------
 # Basic numerical / helper utilities
 # ---------------------------------------------------------------------------
@@ -1463,7 +1499,7 @@ def _convert_adc(adc: "ADC") -> Optional[feelmriADC]:
 # K-space trajectory extraction
 # ---------------------------------------------------------------------------
 
-def _calculate_kspace_via_pypulseq(
+def _calculate_kspace_via_pypulseq(  # pragma: no cover (optional dep)
     filename,
 ) -> Tuple[np.ndarray, np.ndarray]:
   """Read ``filename`` with pypulseq and return the ADC-sample trajectory.
@@ -1482,7 +1518,7 @@ def _calculate_kspace_via_pypulseq(
   Re-implementing this locally would force us to duplicate the
   use-label bookkeeping that pypulseq already encodes correctly.
   """
-  import pypulseq as pp  # runtime dep; see plan §6
+  pp = _require_pypulseq('kspace_trajectory')
   pp_seq = pp.Sequence()
   pp_seq.read(str(filename), detect_rf_use=False)
   k_traj_adc, _k_full, _t_exc, _t_ref, t_adc = pp_seq.calculate_kspace()
@@ -1570,7 +1606,7 @@ def as_signal_inputs(traj: Dict[str, np.ndarray],
   return points, times
 
 
-def kspace_to_signal_inputs(
+def kspace_to_signal_inputs(  # pragma: no cover (optional dep)
     pp_seq,
     shape: Optional[Tuple[int, int, int]] = None,
 ) -> Tuple[Tuple[np.ndarray, np.ndarray, np.ndarray], np.ndarray]:
@@ -1602,6 +1638,10 @@ def kspace_to_signal_inputs(
       arrays for (kx, ky, kz) in 1/m. ``kspace_times`` is a single
       C-contiguous rank-3 float32 array in **ms**.
   """
+  # pp_seq carries methods from the optional 'pypulseq' package; ensure it
+  # is importable here so the user gets the same actionable message as
+  # _calculate_kspace_via_pypulseq instead of an AttributeError further down.
+  _require_pypulseq('kspace_to_signal_inputs')
   k_traj_adc, _k_full, _t_exc, _t_ref, t_adc = pp_seq.calculate_kspace()
   k_traj_adc = np.asarray(k_traj_adc, dtype=float)
   t_adc = np.asarray(t_adc, dtype=float)
