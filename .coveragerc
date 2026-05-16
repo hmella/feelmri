@@ -13,4 +13,5 @@ show_missing = True
 skip_empty = True
 exclude_lines =
     pragma: no cover
+    pragma: no cover \(optional dep\)
     if __name__ == "__main__":

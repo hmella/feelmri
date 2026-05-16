@@ -20,3 +20,8 @@ def pytest_configure(config):
         "markers",
         "requires_mpi: marks tests that require mpirun on PATH",
     )
+    config.addinivalue_line(
+        "markers",
+        "pulseq: marks tests that depend on the optional 'pypulseq' package "
+        "(opt-out in CI via '-m \"not pulseq\"')",
+    )

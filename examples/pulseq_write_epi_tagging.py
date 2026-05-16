@@ -2,10 +2,23 @@
 Demo low-performance EPI sequence without ramp-sampling.
 """
 
+import sys
+
 import numpy as np
 import matplotlib.pyplot as plt
 
-import pypulseq as pp
+try:
+  import pypulseq as pp
+except ImportError:
+  print(
+    "[pulseq_write_epi_tagging] Skipped: this example builds a sequence with "
+    "pypulseq, which is an optional dependency of FEelMRI. Install it with "
+    "'pip install pypulseq' (or 'pip install feelmri[pulseq]') to run this "
+    "example.",
+    file=sys.stderr,
+  )
+  sys.exit(0)
+
 from pathlib import Path
 
 from feelmri.MRObjects import Gradient, Scanner

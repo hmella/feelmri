@@ -109,7 +109,10 @@ jobs:
       - name: Run tests with coverage
         run: |
           coverage erase
-          coverage run --rcfile=.coveragerc -m pytest tests/
+          # 'pulseq' marker excludes tests that depend on the optional
+          # 'pypulseq' package; CI does not install it. Register and apply
+          # the marker as documented in tests/conftest.py.
+          coverage run --rcfile=.coveragerc -m pytest tests/ -m "not pulseq"
 
       # ------------------------------------------------------------
       # Combine coverage and generate XML
