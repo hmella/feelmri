@@ -27,7 +27,13 @@ import numpy as np
 from matplotlib.patches import Circle
 from pint import Quantity as Quantity
 
-from feelmri.BlochSimulator import solve_mri
+from feelmri.BlochSimulator import solve_mri_f32, solve_mri_f64
+
+_METHOD_TO_ORDER = {
+  'cayley_klein': 0,
+  'magnus2': 2,
+  'magnus4': 4,
+}
 from feelmri.Motion import POD
 from feelmri.MPIUtilities import MPI_comm, MPI_print, MPI_rank
 from feelmri.MRObjects import Scanner
@@ -495,8 +501,28 @@ class BlochSolver:
                  perfect_spoiling: bool = True,
                  isochromat_K: int = 25,
                  isochromat_distribution: str = 'sobol',
-                 isochromat_seed: int | None = 0):
-        ones = np.ones((phantom.local_nodes.shape[0], 1), dtype=np.float32)
+                 isochromat_seed: int | None = 0,
+                 method: str = 'cayley_klein',
+                 dtype: str = 'float32'):
+        method_key = str(method).lower()
+        if method_key not in _METHOD_TO_ORDER:
+          raise ValueError(
+            f"BlochSolver: method must be one of {list(_METHOD_TO_ORDER)}; got {method!r}"
+          )
+        dtype_key = str(dtype).lower()
+        if dtype_key not in ('float32', 'float64'):
+          raise ValueError(
+            f"BlochSolver: dtype must be 'float32' or 'float64'; got {dtype!r}"
+          )
+
+        self._method = method_key
+        self._order = _METHOD_TO_ORDER[method_key]
+        self._dtype = dtype_key
+        self._np_real = np.float32 if dtype_key == 'float32' else np.float64
+        self._np_cplx = np.complex64 if dtype_key == 'float32' else np.complex128
+        self._py_cplx = complex  # pybind11 accepts either; cast at call site
+
+        ones = np.ones((phantom.local_nodes.shape[0], 1), dtype=self._np_real)
         self.sequence = sequence
         self.scanner = scanner
         self.phantom = phantom
@@ -504,7 +530,7 @@ class BlochSolver:
         self.T1 = Quantity(T1.m * ones, T1.units)
         self.T2 = Quantity(T2.m * ones, T2.units)
         self.delta_B = delta_B * ones
-        self.initial_Mxy = initial_Mxy * ones.astype(np.complex64)
+        self.initial_Mxy = initial_Mxy * ones.astype(self._np_cplx)
         self.initial_Mz = initial_Mz * ones if initial_Mz is not None else M0 * ones
         self.pod_trajectory = pod_trajectory
         self.perfect_spoiling = perfect_spoiling
@@ -517,13 +543,21 @@ class BlochSolver:
         self.isochromat_K = int(isochromat_K)
         self.isochromat_distribution = str(isochromat_distribution).lower()
         self.isochromat_seed = isochromat_seed
+        # Persistent Magnus state (per-node Bz, scalar rf) carried between
+        # blocks so that order-2/4 maintain a continuous field history. For
+        # order = 0 these arrays are written but never read by the kernel.
+        self._Bz_old = np.zeros(phantom.local_nodes.shape[0], dtype=self._np_real)
+        self._rf_old = self._np_cplx(0)
+        # Wall-clock cumulative time spent inside the C++ kernel across all
+        # solve() calls; populated by solve(). Useful for benchmarking.
+        self.bloch_elapsed = 0.0
 
     def solve(self, start: int = 0, end: int = None):
         # Current machine time
         t0 = time.perf_counter()
 
         # Phantom position
-        x = self.phantom.local_nodes
+        x = np.ascontiguousarray(self.phantom.local_nodes, dtype=self._np_real)
 
         # Blocks to be solved
         if start < 0:
@@ -531,7 +565,13 @@ class BlochSolver:
         if end is None:
             end = self.sequence.Nb_blocks
         blocks = self.sequence.blocks[start:end]
-        MPI_print(f"[BlochSolver] Solving sequence blocks {start} to {end-1} ({len(blocks)} blocks).")
+        MPI_print(
+          f"[BlochSolver] Solving sequence blocks {start} to {end-1} "
+          f"({len(blocks)} blocks) method={self._method} dtype={self._dtype}."
+        )
+
+        # Pick the right C++ entry point for this dtype.
+        solve_kernel = solve_mri_f32 if self._dtype == 'float32' else solve_mri_f64
 
         # Dimensions
         nb_nodes  = x.shape[0]
@@ -541,12 +581,17 @@ class BlochSolver:
         store_indices = [i for i, block in enumerate(blocks) if block.store_magnetization]
 
         # Allocate magnetizations
-        Mxy = np.zeros((nb_nodes, nb_blocks), dtype=np.complex64)
-        Mz  = np.zeros((nb_nodes, nb_blocks), dtype=np.float32)
+        Mxy = np.zeros((nb_nodes, nb_blocks), dtype=self._np_cplx)
+        Mz  = np.zeros((nb_nodes, nb_blocks), dtype=self._np_real)
 
         # Strip units of Bloch parameters just once
-        T1 = self.T1.m_as('ms')
-        T2 = self.T2.m_as('ms')
+        T1 = np.ascontiguousarray(self.T1.m_as('ms'), dtype=self._np_real)
+        T2 = np.ascontiguousarray(self.T2.m_as('ms'), dtype=self._np_real)
+        delta_B = np.ascontiguousarray(self.delta_B, dtype=self._np_real)
+        initial_Mxy = np.ascontiguousarray(self.initial_Mxy, dtype=self._np_cplx)
+        initial_Mz = np.ascontiguousarray(self.initial_Mz, dtype=self._np_real)
+        Bz_old = np.ascontiguousarray(self._Bz_old, dtype=self._np_real).reshape(-1)
+        rf_old = self._py_cplx(self._rf_old)
 
         # Gyromagnetic constant
         gamma = self.scanner.gamma.m_as('rad/ms/mT')
@@ -556,11 +601,12 @@ class BlochSolver:
 
             # Discrete time points and time intervals
             discrete_times = block.discrete_times.m_as('ms')
-            dt = np.diff(discrete_times, prepend=0)
+            dt = np.diff(discrete_times, prepend=0).astype(self._np_real, copy=False)
 
             # Precompute RF and gradients
-            rf_pulses = np.zeros((discrete_times.shape[0], 1), dtype=np.complex64)
-            gradients = np.zeros((discrete_times.shape[0], 3), dtype=np.float32)
+            n_steps = discrete_times.shape[0]
+            rf_pulses = np.zeros((n_steps, 1), dtype=self._np_cplx)
+            gradients = np.zeros((n_steps, 3), dtype=self._np_real)
             rf, G, adc_mask = block(discrete_times)
             rf_pulses[:, 0] = rf
             gradients[:, 0] = G[0]
@@ -569,30 +615,54 @@ class BlochSolver:
 
             # Indicator array
             regime_idx = np.abs(rf_pulses) != 0.0
-            
+
             # Pre-compute the POD modes and weights for this block's timeframe
             has_traj = self.pod_trajectory is not None
             if has_traj:
                 self.pod_trajectory.update_timeshift(block.time_extent[0].m_as('ms'))
-                
+
                 # Get the continuous weights for this block's time points
                 weights = self.pod_trajectory.get_weights(discrete_times - self.pod_trajectory.timeshift)
-                
+
                 # Get the static modes mapped to the original local nodes
                 modes = self.pod_trajectory.get_modes(nb_nodes)
-                modes_x = np.ascontiguousarray(modes[:, 0, :])
-                modes_y = np.ascontiguousarray(modes[:, 1, :])
-                modes_z = np.ascontiguousarray(modes[:, 2, :])
-                
+                modes_x = np.ascontiguousarray(modes[:, 0, :], dtype=self._np_real)
+                modes_y = np.ascontiguousarray(modes[:, 1, :], dtype=self._np_real)
+                modes_z = np.ascontiguousarray(modes[:, 2, :], dtype=self._np_real)
+
                 # Format weights securely for PyBind11
                 total_modes = modes_x.shape[1]
-                weights = np.ascontiguousarray(weights.reshape(-1, total_modes), dtype=np.float32)
+                weights = np.ascontiguousarray(weights.reshape(-1, total_modes), dtype=self._np_real)
             else:
                 # Dummies
-                weights = np.empty((0, 0), dtype=np.float32)
-                modes_x = np.empty((0, 0), dtype=np.float32)
-                modes_y = np.empty((0, 0), dtype=np.float32)
-                modes_z = np.empty((0, 0), dtype=np.float32)
+                weights = np.empty((0, 0), dtype=self._np_real)
+                modes_x = np.empty((0, 0), dtype=self._np_real)
+                modes_y = np.empty((0, 0), dtype=self._np_real)
+                modes_z = np.empty((0, 0), dtype=self._np_real)
+
+            # Seed Magnus state (Bz_old per node, rf_old shared) from the
+            # field at the start of this block. Without this seed, the very
+            # first step of any Magnus order would average the block's
+            # opening field with zero, producing an O(dt) boundary error
+            # that propagates across block stitches. Block-local seeding is
+            # the physically correct interpretation for sequences whose
+            # blocks may have arbitrary deadtime between them.
+            if self._order > 0:
+                if has_traj and weights.size > 0:
+                    w0 = weights[0]
+                    cx0 = x[:, 0] + modes_x @ w0
+                    cy0 = x[:, 1] + modes_y @ w0
+                    cz0 = x[:, 2] + modes_z @ w0
+                else:
+                    cx0 = x[:, 0]
+                    cy0 = x[:, 1]
+                    cz0 = x[:, 2]
+                Gx0 = gradients[0, 0]
+                Gy0 = gradients[0, 1]
+                Gz0 = gradients[0, 2]
+                Bz_old = (cx0 * Gx0 + cy0 * Gy0 + cz0 * Gz0
+                          + delta_B.reshape(-1)).astype(self._np_real, copy=False)
+                rf_old = self._py_cplx(rf_pulses[0, 0])
 
             # Solve
             if block._spoiler is True:
@@ -601,48 +671,36 @@ class BlochSolver:
                 (x_big, T1_big, T2_big,
                  deltaB_big, Mxy_big, Mz_big) = create_multi_isochromats(
                     x, T1, T2,
-                    self.delta_B,
-                    self.initial_Mxy,
-                    self.initial_Mz,
+                    delta_B,
+                    initial_Mxy,
+                    initial_Mz,
                     K=K,
                     pos_jitter=elem_size,
                     distribution=self.isochromat_distribution,
                     seed=self.isochromat_seed,
                 )
-                
-                # CRITICAL FIX: Expand modes to match the duplicated nodes in x_big!
+
+                # CRITICAL FIX: Expand modes and Magnus state to match the
+                # duplicated nodes in x_big!
                 if has_traj:
                     m_x_big = np.ascontiguousarray(np.repeat(modes_x, K, axis=0))
                     m_y_big = np.ascontiguousarray(np.repeat(modes_y, K, axis=0))
                     m_z_big = np.ascontiguousarray(np.repeat(modes_z, K, axis=0))
                 else:
                     m_x_big, m_y_big, m_z_big = modes_x, modes_y, modes_z
-
-                # Solve for the expanded mesh
-                Mxy_hist, Mz_hist = solve_mri(
-                    x_big, T1_big, T2_big, deltaB_big, self.M0, gamma,
-                    rf_pulses, gradients, dt, regime_idx, Mxy_big, Mz_big,
-                    m_x_big, m_y_big, m_z_big, weights, has_traj
+                Bz_old_big = np.ascontiguousarray(
+                    np.repeat(Bz_old, K, axis=0), dtype=self._np_real
                 )
 
-                # # Plot isochromat dephasing
-                # if MPI_rank == 0:
-                #     idx = 0 # Index of the node to visualize
-                #     plot_multi_isochromat_dephasing(
-                #         idx,
-                #         x_big,
-                #         Mxy_big,
-                #         Mxy_hist,
-                #         K,
-                #         x_original=x,
-                #         elem_radius=elem_size,
-                #         t_index=-1,
-                #         show_positions=True,
-                #         title_prefix="Isochromat Dephasing"
-                #         )
-                    
-                #     plot_isochromat_voxel(x_big, R=elem_size, alpha=0.7, s=8,
-                #           title=None, show=True, export_to=None)
+                # Solve for the expanded mesh
+                t_call = time.perf_counter()
+                Mxy_hist, Mz_hist, Bz_old_big_out, rf_old_out = solve_kernel(
+                    x_big, T1_big, T2_big, deltaB_big, self.M0, gamma,
+                    rf_pulses, gradients, dt, regime_idx, Mxy_big, Mz_big,
+                    m_x_big, m_y_big, m_z_big, weights, has_traj,
+                    self._order, Bz_old_big, rf_old,
+                )
+                self.bloch_elapsed += time.perf_counter() - t_call
 
                 Mxy_, Mz_ = collapse_isochromats(
                     Mxy_hist[:, -1],
@@ -654,32 +712,56 @@ class BlochSolver:
                 Mxy_ = Mxy_.reshape(-1, 1)
                 Mz_ = Mz_.reshape(-1, 1)
 
+                # Collapse the duplicated-node Magnus state back to per-node.
+                # Within one voxel all K isochromats see (almost) the same
+                # macroscopic field, so the mean is a faithful Bz_old to seed
+                # the next block.
+                Bz_old = Bz_old_big_out.reshape(-1, K).mean(axis=1).astype(
+                    self._np_real, copy=False
+                )
+                rf_old = self._py_cplx(rf_old_out)
+
             else:
                 # Solve normally
-                Mxy_, Mz_ = solve_mri(
-                    x, T1, T2, self.delta_B, self.M0, gamma,
+                t_call = time.perf_counter()
+                Mxy_, Mz_, Bz_old_out, rf_old_out = solve_kernel(
+                    x, T1, T2, delta_B, self.M0, gamma,
                     rf_pulses, gradients, dt, regime_idx,
-                    self.initial_Mxy, self.initial_Mz,
-                    modes_x, modes_y, modes_z, weights, has_traj
+                    initial_Mxy, initial_Mz,
+                    modes_x, modes_y, modes_z, weights, has_traj,
+                    self._order, Bz_old, rf_old,
                 )
+                self.bloch_elapsed += time.perf_counter() - t_call
+
+                Bz_old = np.ascontiguousarray(Bz_old_out, dtype=self._np_real).reshape(-1)
+                rf_old = self._py_cplx(rf_old_out)
 
             # Update magnetizations
             Mxy[:, i] = Mxy_[:, -1]
             Mz[:, i]  = Mz_[:, -1]
 
-            # Update the initial magnetization for the next block
+            # Update the initial magnetization for the next block. Keep the
+            # cached column-vector initial_Mxy/initial_Mz in step with the
+            # public self.initial_* attributes.
             if block.empty is True:
-                self.initial_Mxy[:, 0] = Mxy_[:, -1]
+                next_Mxy = Mxy_[:, -1]
             else:
                 # TODO: verify if there is a better way to know beforehand if the sequence will contain spoilers
                 if self.perfect_spoiling is True:
                     # This is done because gradient or RF spoiling cannot be applied on coarse meshes.
                     # Therefore, we need to artificially spoil the magnetization.
-                    self.initial_Mxy[:, 0] = 0.0
+                    next_Mxy = np.zeros_like(Mxy_[:, -1])
                 else:
-                    self.initial_Mxy[:, 0] = Mxy_[:, -1]
+                    next_Mxy = Mxy_[:, -1]
 
-            self.initial_Mz[:, 0] = Mz_[:, -1]
+            initial_Mxy[:, 0] = next_Mxy
+            initial_Mz[:, 0]  = Mz_[:, -1]
+            self.initial_Mxy[:, 0] = next_Mxy.astype(self._np_cplx, copy=False)
+            self.initial_Mz[:, 0]  = Mz_[:, -1].astype(self._np_real, copy=False)
+
+        # Persist final Magnus state for the next solve() call.
+        self._Bz_old = Bz_old
+        self._rf_old = rf_old
 
         # Print elapsed time
         MPI_print('[BlochSolver] Elapsed time for solving the sequence: {:.2f} s'.format(time.perf_counter() - t0))

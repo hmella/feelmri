@@ -1,0 +1,7 @@
+hostname,platform,omp_threads,method,dtype,bloch_s,total_s,n_nodes,n_steps_total,ns_per_step_per_node
+pop-os,Linux-6.17.9-76061709-generic-x86_64-with-glibc2.35,1,cayley_klein,float32,0.009011,0.011382,386,2102,11.22
+pop-os,Linux-6.17.9-76061709-generic-x86_64-with-glibc2.35,1,cayley_klein,float64,0.013478,0.016017,386,2102,16.78
+pop-os,Linux-6.17.9-76061709-generic-x86_64-with-glibc2.35,1,magnus2,float32,0.007451,0.009822,386,2102,9.28
+pop-os,Linux-6.17.9-76061709-generic-x86_64-with-glibc2.35,1,magnus2,float64,0.014443,0.017170,386,2102,17.98
+pop-os,Linux-6.17.9-76061709-generic-x86_64-with-glibc2.35,1,magnus4,float32,0.008228,0.010674,386,2102,10.24
+pop-os,Linux-6.17.9-76061709-generic-x86_64-with-glibc2.35,1,magnus4,float64,0.016398,0.018985,386,2102,20.41
