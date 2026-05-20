@@ -8,6 +8,11 @@
 #include <tuple>
 #include <utility>
 
+#ifdef FEELMRI_GPU
+#include "kernels/BlochSimulator_gpu.hpp"
+#include "runtime/device_init.hpp"
+#endif
+
 using namespace Eigen;
 namespace py = pybind11;
 
@@ -288,4 +293,167 @@ PYBIND11_MODULE(BlochSimulator, m) {
                                      modes_x, modes_y, modes_z, weights, has_traj,
                                      Bz_old_init, rf_old_init);
     });
+
+#ifdef FEELMRI_GPU
+  // GPU path. The Python wrapper routes `BlochSolver(device='gpu')`
+  // here. Inputs are C-contiguous numpy arrays (RowMajor); we pull raw
+  // pointers and hand them to the CUDA / HIP launch wrapper. The
+  // return shape mirrors solve_mri_f32 so downstream code in
+  // BlochSolver.solve() does not change. Covers float32 and float64,
+  // and Magnus orders 0 / 2 / 4 via the templated launch wrapper.
+  using PA_f32 = py::array_t<float,  py::array::c_style | py::array::forcecast>;
+  using PA_cf32 = py::array_t<std::complex<float>, py::array::c_style | py::array::forcecast>;
+  using PA_bool = py::array_t<bool,  py::array::c_style | py::array::forcecast>;
+  using PA_f64 = py::array_t<double, py::array::c_style | py::array::forcecast>;
+  using PA_cf64 = py::array_t<std::complex<double>, py::array::c_style | py::array::forcecast>;
+
+  m.def("solve_mri_f32_gpu",
+    [](PA_f32 r0, PA_f32 T1, PA_f32 T2, PA_f32 delta_B,
+       float M0, float gamma,
+       PA_cf32 rf_all, PA_f32 G_all, PA_f32 dt, PA_bool regime_idx,
+       PA_cf32 Mxy_initial, PA_f32 Mz_initial,
+       PA_f32 modes_x, PA_f32 modes_y, PA_f32 modes_z,
+       PA_f32 weights, bool has_traj, int order,
+       PA_f32 Bz_old_init, std::complex<float> rf_old_init)
+       -> std::tuple<py::array_t<std::complex<float>>,
+                     py::array_t<float>,
+                     py::array_t<float>,
+                     std::complex<float>> {
+      if (order != 0 && order != 2 && order != 4) {
+        throw std::invalid_argument(
+          "solve_mri_f32_gpu: order must be 0, 2, or 4");
+      }
+      (void)regime_idx;  // reserved for regime-selection logic; unused
+      const auto r0_buf = r0.request();
+      const auto rf_buf = rf_all.request();
+      if (r0_buf.ndim != 2 || r0_buf.shape[1] != 3) {
+        throw std::invalid_argument("r0 must have shape (n_pos, 3)");
+      }
+      const int n_pos  = static_cast<int>(r0_buf.shape[0]);
+      const int n_time = static_cast<int>(rf_buf.shape[0]);
+      const auto modes_buf = modes_x.request();
+      const int n_modes = has_traj
+        ? (modes_buf.ndim == 2 ? static_cast<int>(modes_buf.shape[1]) : 0)
+        : 0;
+
+      std::vector<py::ssize_t> col_shape = {n_pos, py::ssize_t{1}};
+      py::array_t<std::complex<float>> Mxy_out(col_shape);
+      py::array_t<float>               Mz_out (col_shape);
+      py::array_t<float>               Bz_old_final(static_cast<py::ssize_t>(n_pos));
+      std::complex<float>              rf_old_final = rf_old_init;
+
+      const int rc = feelmri_solve_mri_gpu_f32(
+        static_cast<const float*>(r0.data()),
+        static_cast<const float*>(T1.data()),
+        static_cast<const float*>(T2.data()),
+        static_cast<const float*>(delta_B.data()),
+        M0, gamma,
+        static_cast<const std::complex<float>*>(rf_all.data()),
+        static_cast<const float*>(G_all.data()),
+        static_cast<const float*>(dt.data()),
+        static_cast<const std::complex<float>*>(Mxy_initial.data()),
+        static_cast<const float*>(Mz_initial.data()),
+        has_traj ? static_cast<const float*>(modes_x.data()) : nullptr,
+        has_traj ? static_cast<const float*>(modes_y.data()) : nullptr,
+        has_traj ? static_cast<const float*>(modes_z.data()) : nullptr,
+        has_traj ? static_cast<const float*>(weights.data()) : nullptr,
+        has_traj ? 1 : 0,
+        n_modes, n_pos, n_time, order,
+        static_cast<const float*>(Bz_old_init.data()),
+        rf_old_init,
+        static_cast<std::complex<float>*>(Mxy_out.mutable_data()),
+        static_cast<float*>(Mz_out.mutable_data()),
+        static_cast<float*>(Bz_old_final.mutable_data()),
+        &rf_old_final);
+
+      if (rc != 0) {
+        const char* msg = feelmri_device_last_error_string();
+        throw std::runtime_error(
+          std::string("solve_mri_f32_gpu: device runtime reported error: ")
+            + (msg && msg[0] ? msg : "unknown"));
+      }
+      return std::make_tuple(std::move(Mxy_out), std::move(Mz_out),
+                             std::move(Bz_old_final), rf_old_final);
+    });
+
+  m.def("solve_mri_f64_gpu",
+    [](PA_f64 r0, PA_f64 T1, PA_f64 T2, PA_f64 delta_B,
+       double M0, double gamma,
+       PA_cf64 rf_all, PA_f64 G_all, PA_f64 dt, PA_bool regime_idx,
+       PA_cf64 Mxy_initial, PA_f64 Mz_initial,
+       PA_f64 modes_x, PA_f64 modes_y, PA_f64 modes_z,
+       PA_f64 weights, bool has_traj, int order,
+       PA_f64 Bz_old_init, std::complex<double> rf_old_init)
+       -> std::tuple<py::array_t<std::complex<double>>,
+                     py::array_t<double>,
+                     py::array_t<double>,
+                     std::complex<double>> {
+      if (order != 0 && order != 2 && order != 4) {
+        throw std::invalid_argument(
+          "solve_mri_f64_gpu: order must be 0, 2, or 4");
+      }
+      (void)regime_idx;
+      const auto r0_buf = r0.request();
+      const auto rf_buf = rf_all.request();
+      if (r0_buf.ndim != 2 || r0_buf.shape[1] != 3) {
+        throw std::invalid_argument("r0 must have shape (n_pos, 3)");
+      }
+      const int n_pos  = static_cast<int>(r0_buf.shape[0]);
+      const int n_time = static_cast<int>(rf_buf.shape[0]);
+      const auto modes_buf = modes_x.request();
+      const int n_modes = has_traj
+        ? (modes_buf.ndim == 2 ? static_cast<int>(modes_buf.shape[1]) : 0)
+        : 0;
+
+      std::vector<py::ssize_t> col_shape = {n_pos, py::ssize_t{1}};
+      py::array_t<std::complex<double>> Mxy_out(col_shape);
+      py::array_t<double>               Mz_out (col_shape);
+      py::array_t<double>               Bz_old_final(static_cast<py::ssize_t>(n_pos));
+      std::complex<double>              rf_old_final = rf_old_init;
+
+      const int rc = feelmri_solve_mri_gpu_f64(
+        static_cast<const double*>(r0.data()),
+        static_cast<const double*>(T1.data()),
+        static_cast<const double*>(T2.data()),
+        static_cast<const double*>(delta_B.data()),
+        M0, gamma,
+        static_cast<const std::complex<double>*>(rf_all.data()),
+        static_cast<const double*>(G_all.data()),
+        static_cast<const double*>(dt.data()),
+        static_cast<const std::complex<double>*>(Mxy_initial.data()),
+        static_cast<const double*>(Mz_initial.data()),
+        has_traj ? static_cast<const double*>(modes_x.data()) : nullptr,
+        has_traj ? static_cast<const double*>(modes_y.data()) : nullptr,
+        has_traj ? static_cast<const double*>(modes_z.data()) : nullptr,
+        has_traj ? static_cast<const double*>(weights.data()) : nullptr,
+        has_traj ? 1 : 0,
+        n_modes, n_pos, n_time, order,
+        static_cast<const double*>(Bz_old_init.data()),
+        rf_old_init,
+        static_cast<std::complex<double>*>(Mxy_out.mutable_data()),
+        static_cast<double*>(Mz_out.mutable_data()),
+        static_cast<double*>(Bz_old_final.mutable_data()),
+        &rf_old_final);
+
+      if (rc != 0) {
+        const char* msg = feelmri_device_last_error_string();
+        throw std::runtime_error(
+          std::string("solve_mri_f64_gpu: device runtime reported error: ")
+            + (msg && msg[0] ? msg : "unknown"));
+      }
+      return std::make_tuple(std::move(Mxy_out), std::move(Mz_out),
+                             std::move(Bz_old_final), rf_old_final);
+    });
+
+  m.def("device_init",          &feelmri_device_init);
+  m.def("device_shutdown",      &feelmri_device_shutdown);
+  m.def("device_count",         &feelmri_device_count);
+  m.def("device_current",       &feelmri_device_current);
+  m.def("device_is_available",  &feelmri_device_is_available);
+  m.def("device_last_error",
+        []() { return std::string(feelmri_device_last_error_string()); });
+  m.attr("gpu_available")       = true;
+#else
+  m.attr("gpu_available")       = false;
+#endif
 }
