@@ -195,7 +195,8 @@ if __name__ == '__main__':
                        pod_trajectory=pod_trajectory,
                        perfect_spoiling=False,
                        isochromat_K=100,
-                       method='magnus2')
+                       method='magnus2',
+                       device='gpu')
 
   # Solve for x and y directions
   Mxy, Mz = solver.solve()
@@ -246,7 +247,7 @@ if __name__ == '__main__':
 
   # Set assembler for MRI signal evaluation using FEM
   vxsz = 2*planning.FOV.m_as('m')/np.array(parameters.Imaging.RES)
-  phantom.set_assembler(voxel_size=vxsz[0], lorder=1, nodal_approximation=True, lumped=True)
+  phantom.set_assembler(voxel_size=vxsz[0], lorder=1, nodal_approximation=True, lumped=True, device='gpu')
 
   # Set static fields
   phantom.set_static_fields(T2=T2.m_as('ms'), phi_dB0=delta_omega0.m_as('rad/ms'))

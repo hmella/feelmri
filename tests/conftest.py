@@ -25,3 +25,9 @@ def pytest_configure(config):
         "pulseq: marks tests that depend on the optional 'pypulseq' package "
         "(opt-out in CI via '-m \"not pulseq\"')",
     )
+    config.addinivalue_line(
+        "markers",
+        "gpu: marks tests that require the optional GPU compute backend "
+        "(skipped automatically when feelmri.runtime.is_gpu_available() "
+        "is False)",
+    )

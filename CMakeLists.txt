@@ -1,6 +1,20 @@
 cmake_minimum_required(VERSION 3.18)
 project(feelmri LANGUAGES CXX)
 
+# ------------------------------------------------------------
+# Optional GPU backend
+# ------------------------------------------------------------
+# Default is OFF: standard builds compile identically to the CPU-only
+# baseline. Turn on with `-DFEELMRI_ENABLE_GPU=ON` to add the CUDA
+# (M1, NVIDIA) or HIP (M2, AMD) compute path. The backend selector
+# below switches between CUDA and HIP sources; the kernel TUs share the
+# same source files because they go through the vendor-neutral shim at
+# cpp/feelmri/runtime/device.hpp.
+option(FEELMRI_ENABLE_GPU "Compile GPU compute path (CUDA / HIP)" OFF)
+set(FEELMRI_GPU_BACKEND "cuda" CACHE STRING
+    "GPU backend when FEELMRI_ENABLE_GPU=ON: 'cuda' (NVIDIA via CUDA) or "
+    "'hip' (AMD via ROCm, or NVIDIA via __HIP_PLATFORM_NVIDIA__).")
+
 # Globally cache downloaded dependencies across all builds
 set(FETCHCONTENT_BASE_DIR "$ENV{HOME}/.cache/cmake" CACHE PATH "Directory for downloaded FetchContent dependencies")
 
@@ -84,7 +98,11 @@ foreach(pair ${CPU_TUNING_FLAG_PAIRS})
 endforeach()
 
 if (USED_CPU_FLAGS)
-    add_compile_options(${USED_CPU_FLAGS})
+    # Apply CPU tuning flags only to host C++ TUs. nvcc forwards unknown
+    # flags to its default host compiler, which on Pop!_OS 22.04 is gcc-11
+    # and does not recognize newer `-march` targets such as raptorlake;
+    # the project's CXX build uses gcc-13 where those are valid.
+    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:${USED_CPU_FLAGS}>)
 else()
     message(WARNING "⚠️ No supported CPU tuning flags found — using generic tuning.")
 endif()
@@ -159,6 +177,72 @@ endif()
 set(SRC_DIR cpp/feelmri)
 set(MODULES MRIAssemble Assemble BlochSimulator PODHelper)
 
+# ------------------------------------------------------------
+# GPU backend (CUDA at M1, HIP target at M2). All GPU-only sources
+# live under cpp/feelmri/runtime and cpp/feelmri/kernels; they are
+# compiled into a single 'feelmri_runtime' shared library that every
+# pybind11 module links against. The shared library is the single
+# point of ownership for the device runtime singleton, which avoids
+# the per-module initialisation pitfall when multiple pybind11
+# extensions each pull in their own copy of the CUDA runtime state.
+# ------------------------------------------------------------
+if(FEELMRI_ENABLE_GPU)
+    if(FEELMRI_GPU_BACKEND STREQUAL "hip")
+        # HIP build path. Requires `find_package(hip)` and that the .cu
+        # sources be treated as HIP (either renamed to .hip, or compiled
+        # with hipcc via LANGUAGE HIP). The shim at runtime/device.hpp
+        # routes feelmri::gpu::* to hip*; the kernel arithmetic is
+        # identical between backends.
+        find_package(hip REQUIRED CONFIG)
+        enable_language(HIP)
+        add_compile_definitions(FEELMRI_GPU_BACKEND_HIP=1)
+        message(STATUS "GPU backend enabled (HIP)")
+    else()
+        # CUDA build path (default).
+        enable_language(CUDA)
+        find_package(CUDAToolkit REQUIRED)
+        message(STATUS "GPU backend enabled (CUDA ${CUDAToolkit_VERSION})")
+    endif()
+
+    set(FEELMRI_RUNTIME_SOURCES
+        ${SRC_DIR}/runtime/device_init.cpp
+        ${SRC_DIR}/kernels/BlochSimulator_gpu.cu
+        ${SRC_DIR}/kernels/MRIAssemble_gpu.cu
+    )
+    if(FEELMRI_GPU_BACKEND STREQUAL "hip")
+        # When compiling for HIP, the .cu files are treated as HIP TUs.
+        set_source_files_properties(
+            ${SRC_DIR}/kernels/BlochSimulator_gpu.cu
+            ${SRC_DIR}/kernels/MRIAssemble_gpu.cu
+            PROPERTIES LANGUAGE HIP)
+    endif()
+    add_library(feelmri_runtime SHARED ${FEELMRI_RUNTIME_SOURCES})
+    target_include_directories(feelmri_runtime PRIVATE ${SRC_DIR})
+    set_target_properties(feelmri_runtime PROPERTIES
+        POSITION_INDEPENDENT_CODE ON
+        CUDA_STANDARD 17
+        CUDA_SEPARABLE_COMPILATION ON
+        OUTPUT_NAME feelmri_runtime
+        INSTALL_RPATH "$ORIGIN"
+        BUILD_WITH_INSTALL_RPATH OFF
+    )
+    # nvcc rejects -ffast-math on device passes; -fvisibility=hidden on
+    # the runtime TU would also hide its extern "C" exports. Apply just
+    # PIC + -O3 to the host TU and pass CUDA-specific flags via the
+    # COMPILE_LANGUAGE generator expression.
+    set_source_files_properties(${SRC_DIR}/runtime/device_init.cpp
+        PROPERTIES COMPILE_OPTIONS "-O3;-fPIC")
+    target_compile_options(feelmri_runtime PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:-O3 --use_fast_math --expt-relaxed-constexpr>
+        $<$<COMPILE_LANGUAGE:HIP>:-O3 -ffp-contract=fast>)
+    if(FEELMRI_GPU_BACKEND STREQUAL "hip")
+        target_link_libraries(feelmri_runtime PUBLIC hip::host hip::device)
+    else()
+        target_link_libraries(feelmri_runtime PUBLIC CUDA::cudart)
+    endif()
+    install(TARGETS feelmri_runtime LIBRARY DESTINATION feelmri)
+endif()
+
 foreach(mod ${MODULES})
     message(STATUS "Building module: ${mod}")
     pybind11_add_module(${mod} ${SRC_DIR}/${mod}.cpp)
@@ -192,6 +276,15 @@ foreach(mod ${MODULES})
         -DEIGEN_FAST_MATH
         -DEIGEN_DONT_PARALLELIZE
     )
+
+    if(FEELMRI_ENABLE_GPU)
+        target_compile_definitions(${mod} PRIVATE FEELMRI_GPU=1)
+        target_link_libraries(${mod} PRIVATE feelmri_runtime)
+        set_target_properties(${mod} PROPERTIES
+            INSTALL_RPATH "$ORIGIN"
+            BUILD_WITH_INSTALL_RPATH OFF
+        )
+    endif()
 
     set_target_properties(${mod} PROPERTIES OUTPUT_NAME ${mod})
     install(TARGETS ${mod} DESTINATION feelmri)

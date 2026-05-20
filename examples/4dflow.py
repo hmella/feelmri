@@ -137,7 +137,8 @@ if __name__ == '__main__':
                         T1=pars.Phantom.T1.to('ms'),
                         T2=pars.Phantom.T2star.to('ms'), 
                         delta_B=delta_B0.m_as('mT').reshape((-1, 1)),
-                        pod_trajectory=pod_velocity)
+                        pod_trajectory=pod_velocity,
+                        device='gpu')
 
   # Add dummy blocks to reach steady state
   dummy = SequenceBlock(gradients=[sp.dephasing,sp.rephasing],
@@ -227,7 +228,7 @@ if __name__ == '__main__':
 
   # Set assembler for MRI signal evaluation using FEM
   vxsz = planning.FOV.m_as('m')/np.array(pars.Imaging.RECON_RES)
-  phantom.set_assembler(voxel_size=100*vxsz[0], lorder=1, horder=6, nodal_approximation=True, lumped=True)
+  phantom.set_assembler(voxel_size=vxsz[0], lorder=1, horder=6, nodal_approximation=False, lumped=True, device='gpu')
 
   # Set static fields
   phantom.set_static_fields(T2=T2star, phi_dB0=delta_omega)

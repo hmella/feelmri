@@ -608,7 +608,8 @@ class FEMPhantom:
 
         return M
 
-    def set_assembler(self, voxel_size, lorder=1, horder=1, nodal_approximation=False, lumped=True):
+    def set_assembler(self, voxel_size, lorder=1, horder=1, nodal_approximation=False, lumped=True,
+                      device='cpu'):
         """Configure the signal assembler for small and large elements separately.
 
         Elements smaller than ``voxel_size`` use quadrature order ``lorder``;
@@ -630,7 +631,24 @@ class FEMPhantom:
             the small-element group. Default is False.
         lumped : bool, optional
             Lump the small-element mass matrix. Default is True.
+        device : str, optional
+            ``'cpu'`` (default) routes ``signal_sum`` / ``signal_nodal`` to the
+            host AVX2 path; ``'gpu'`` routes them to the CUDA kernel (M3).
+            Requires a build with ``FEELMRI_ENABLE_GPU=ON``. The quadrature
+            variant (``signal`` / ``signal_full``) currently stays on the host
+            regardless of this flag.
         """
+        device_key = str(device).lower()
+        if device_key not in ('cpu', 'gpu', 'cuda', 'hip'):
+          raise ValueError(
+            f"set_assembler: device must be one of 'cpu', 'gpu', 'cuda', "
+            f"'hip'; got {device!r}")
+        if device_key in ('cuda', 'hip'):
+          device_key = 'gpu'
+        if device_key == 'gpu':
+          from feelmri import runtime as _runtime
+          _runtime._require_gpu("FEMPhantom.set_assembler(device='gpu')")
+
         # TODO: add option to define low order (for small elements) and high order (for large elements) quadrature rules
         small = np.where(self.local_elem_size < voxel_size)[0]
         large = np.where(self.local_elem_size >= voxel_size)[0]
@@ -642,7 +660,9 @@ class FEMPhantom:
             size, order = d
             if np.size(size) == 0:
                 continue
-            self.assembler.append(SignalAssembler(self.local_elements[size, :], self.local_nodes, self.cell_type, order))
+            a = SignalAssembler(self.local_elements[size, :], self.local_nodes, self.cell_type, order)
+            a.set_device(device_key)
+            self.assembler.append(a)
 
         self.nodal_approximation__ = False
 

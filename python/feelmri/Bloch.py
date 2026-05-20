@@ -28,6 +28,15 @@ from matplotlib.patches import Circle
 from pint import Quantity as Quantity
 
 from feelmri.BlochSimulator import solve_mri_f32, solve_mri_f64
+try:
+  from feelmri.BlochSimulator import solve_mri_f32_gpu as _solve_mri_f32_gpu
+except ImportError:
+  _solve_mri_f32_gpu = None
+try:
+  from feelmri.BlochSimulator import solve_mri_f64_gpu as _solve_mri_f64_gpu
+except ImportError:
+  _solve_mri_f64_gpu = None
+from feelmri import runtime as _runtime
 
 _METHOD_TO_ORDER = {
   'cayley_klein': 0,
@@ -503,7 +512,8 @@ class BlochSolver:
                  isochromat_distribution: str = 'sobol',
                  isochromat_seed: int | None = 0,
                  method: str = 'cayley_klein',
-                 dtype: str = 'float32'):
+                 dtype: str = 'float32',
+                 device: str = 'cpu'):
         method_key = str(method).lower()
         if method_key not in _METHOD_TO_ORDER:
           raise ValueError(
@@ -515,9 +525,17 @@ class BlochSolver:
             f"BlochSolver: dtype must be 'float32' or 'float64'; got {dtype!r}"
           )
 
+        device_key = _runtime.normalize_device(device)
+        if device_key == 'gpu':
+          _runtime._require_gpu("BlochSolver(device='gpu')")
+          # All (method, dtype) combos that exist on the CPU are now
+          # implemented on the GPU as well — the templated kernel
+          # covers order in {0, 2, 4} x T in {float, double}.
+
         self._method = method_key
         self._order = _METHOD_TO_ORDER[method_key]
         self._dtype = dtype_key
+        self._device = device_key
         self._np_real = np.float32 if dtype_key == 'float32' else np.float64
         self._np_cplx = np.complex64 if dtype_key == 'float32' else np.complex128
         self._py_cplx = complex  # pybind11 accepts either; cast at call site
@@ -570,8 +588,14 @@ class BlochSolver:
           f"({len(blocks)} blocks) method={self._method} dtype={self._dtype}."
         )
 
-        # Pick the right C++ entry point for this dtype.
-        solve_kernel = solve_mri_f32 if self._dtype == 'float32' else solve_mri_f64
+        # Pick the right C++ entry point for this (device, dtype) combo.
+        # Four entries: CPU float32, CPU float64, GPU float32, GPU float64;
+        # each handles order in {0, 2, 4} via its `order` argument.
+        if self._device == 'gpu':
+          solve_kernel = (_solve_mri_f32_gpu if self._dtype == 'float32'
+                          else _solve_mri_f64_gpu)
+        else:
+          solve_kernel = solve_mri_f32 if self._dtype == 'float32' else solve_mri_f64
 
         # Dimensions
         nb_nodes  = x.shape[0]

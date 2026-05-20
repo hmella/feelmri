@@ -8,6 +8,13 @@
 #include <pybind11/complex.h>
 #include <pybind11/eigen.h> // REQUIRED for PyBind11 to seamlessly cast Eigen types
 #include <pybind11/stl.h>
+#include <stdexcept>
+#include <string>
+
+#ifdef FEELMRI_GPU
+#include "kernels/MRIAssemble_gpu.hpp"
+#include "runtime/device_init.hpp"
+#endif
 
 // Alias for convenience to avoid typing pybind11:: constantly
 namespace py = pybind11;
@@ -145,33 +152,86 @@ public:
     void update_full_magnetization(const Eigen::Matrix<C, Eigen::Dynamic, Eigen::Dynamic>& Mxy)
     {
         nv_ = (int)Mxy.cols();
-        const int nne = elems_.cols();
-        
+#ifdef FEELMRI_GPU
+        // GPU quadrature path projects on the device from f_Mxy_nodes_;
+        // the host-side f_Mxy_ is unused there, so skip the projection
+        // entirely (the dominant per-frame host cost at large meshes).
+        if (device_ == "gpu") {
+            return;
+        }
+#endif
         f_Mxy_.resize(total_q_, nv_);
 
-        // For each element, project nodal Mxy to quadrature Mxy
-        for (int e = 0; e < nelem_; ++e)
-        {
-            const int offset = e * nq_;
-            Eigen::Matrix<C, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> Mxy_e(nne, nv_);
-            for (int a = 0; a < nne; ++a) {
-                Mxy_e.row(a) = Mxy.row(elems_(e, a));
+        // S_global_ (built in the constructor, shape Q x N RowMajor sparse,
+        // real-valued) encodes exactly the per-element shape-function
+        // projection that the legacy per-element loop computed. Going
+        // through it directly:
+        //   - eliminates O(nelem) small Eigen::Matrix allocations and
+        //     per-element complex casts (the dominant host cost at scale,
+        //     ~200 ms per call on a 550k-node 4D-flow mesh),
+        //   - replaces them with two real sparse-times-dense matmuls
+        //     (Eigen handles AVX2 vectorisation internally) plus a single
+        //     vectorisable interleave pass.
+        // S_global_ stays real; we split Mxy into real / imag halves to
+        // keep both matmuls real-typed (a complex-typed sparse matrix
+        // would double the storage and run slower).
+        Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic> Mxy_re = Mxy.real();
+        Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic> Mxy_im = Mxy.imag();
+        Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> f_Mxy_re =
+            S_global_ * Mxy_re;
+        Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> f_Mxy_im =
+            S_global_ * Mxy_im;
+        for (int q = 0; q < total_q_; ++q) {
+            for (int v = 0; v < nv_; ++v) {
+                f_Mxy_(q, v) = C(f_Mxy_re(q, v), f_Mxy_im(q, v));
             }
-            // Cast shape functions to complex to match Mxy type, then multiply
-            Eigen::Matrix<C, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> SqTC = cache_.SqT[e].template cast<C>();
-            f_Mxy_.middleRows(offset, nq_).noalias() = SqTC * Mxy_e;
         }
     }
 
     // Pre-multiplies magnetization by a mass matrix (M) for Galerkin-style nodal integration.
     void update_nodal_magnetization(
-        const Eigen::SparseMatrix<T>& M, 
+        const Eigen::SparseMatrix<T>& M,
         const Eigen::Matrix<C, Eigen::Dynamic, Eigen::Dynamic>& Mxy)
     {
         nv_ = (int)Mxy.cols();
-        // Compute Mass Matrix * Mxy to avoid doing it inside the time loop
-        f_M_Mxy_nodes_.noalias() = M.template cast<C>() * Mxy;
+        // M is real; Mxy is complex. Split into real/imag halves to keep
+        // both matmuls real-typed (parity with update_full_magnetization's
+        // vectorisation). The previous `M.cast<C>() * Mxy` materialised a
+        // complex sparse matrix per call, doubling the storage and the
+        // matmul cost. Splitting eliminates that.
+        Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic> Mxy_re = Mxy.real();
+        Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic> Mxy_im = Mxy.imag();
+        Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> mM_re =
+            M * Mxy_re;
+        Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> mM_im =
+            M * Mxy_im;
+        f_M_Mxy_nodes_.resize(mM_re.rows(), nv_);
+        for (int n = 0; n < mM_re.rows(); ++n) {
+            for (int v = 0; v < nv_; ++v) {
+                f_M_Mxy_nodes_(n, v) = C(mM_re(n, v), mM_im(n, v));
+            }
+        }
     }
+
+    // Switch this assembler between the CPU and GPU compute paths.
+    // The GPU path requires a build with FEELMRI_ENABLE_GPU=ON and a
+    // visible device; raises a clear error otherwise.
+    void set_device(const std::string& device) {
+      if (device != "cpu" && device != "gpu") {
+        throw std::invalid_argument(
+          "SignalAssembler.set_device: must be 'cpu' or 'gpu', got '" + device + "'");
+      }
+#ifndef FEELMRI_GPU
+      if (device == "gpu") {
+        throw std::runtime_error(
+          "SignalAssembler.set_device('gpu'): this build was compiled without "
+          "GPU support. Rebuild with -DFEELMRI_ENABLE_GPU=ON.");
+      }
+#endif
+      device_ = device;
+    }
+
+    const std::string& device() const { return device_; }
 
     // Returns a characteristic length scale (cube root of volume) for each element
     Eigen::Vector<T, Eigen::Dynamic> estimate_element_sizes() const
@@ -194,7 +254,7 @@ public:
     // Replaced the Python callable `pod_trajectory` with pre-computed `modes` 
     // and `weights` matrices to entirely eliminate the Global Interpreter Lock (GIL) and allow AVX2 math.
     Tensor4CR signal_sum(
-        const std::vector<Tensor3> &kloc, 
+        const std::vector<Tensor3> &kloc,
         const Tensor3 &t,
         const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& modes_x,
         const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& modes_y,
@@ -202,6 +262,13 @@ public:
         const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& weights,
         bool has_traj)
     {
+#ifdef FEELMRI_GPU
+        if (device_ == "gpu") {
+            return signal_node_gpu_impl(kloc, t, modes_x, modes_y, modes_z,
+                                          weights, has_traj, /*use_M_Mxy=*/false);
+        }
+#endif
+
         const C i1(T(0), T(1));
         const T two_pi  = T(2) * T(M_PI);
 
@@ -299,7 +366,7 @@ public:
     // Cleaned up signatures to native Eigen types while keeping the
     // AVX2 Modes-Weights multiplication architecture.
     Tensor4CR signal_nodal(
-        const std::vector<Tensor3> &kloc, 
+        const std::vector<Tensor3> &kloc,
         const Tensor3 &t,
         const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& modes_x,
         const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& modes_y,
@@ -307,7 +374,13 @@ public:
         const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& weights,
         bool has_traj)
     {
-        // This function is structurally identical to signal_sum, except it integrates 
+#ifdef FEELMRI_GPU
+        if (device_ == "gpu") {
+            return signal_node_gpu_impl(kloc, t, modes_x, modes_y, modes_z,
+                                          weights, has_traj, /*use_M_Mxy=*/true);
+        }
+#endif
+        // This function is structurally identical to signal_sum, except it integrates
         // using the pre-computed mass-matrix projection (f_M_Mxy_nodes_) instead of raw Mxy.
         const C i1(T(0), T(1));
         const T two_pi  = T(2) * T(M_PI);
@@ -409,7 +482,7 @@ public:
     // Includes an explicit sparse-dense matrix multiplication step to project the fast
     // nodal displacements onto the exact quadrature evaluation points.
     Tensor4CR signal(
-        const std::vector<Tensor3> &kloc, 
+        const std::vector<Tensor3> &kloc,
         const Tensor3 &t,
         const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& modes_x,
         const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& modes_y,
@@ -417,6 +490,12 @@ public:
         const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& weights,
         bool has_traj)
     {
+#ifdef FEELMRI_GPU
+        if (device_ == "gpu") {
+            return signal_quadrature_gpu_impl(kloc, t, modes_x, modes_y,
+                                                modes_z, weights, has_traj);
+        }
+#endif
         const C i1(T(0), T(1));
         const T two_pi  = T(2) * T(M_PI);
 
@@ -427,9 +506,9 @@ public:
 
         Eigen::Matrix<C, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> kspace_mat(S, nv_);
         Eigen::RowVector<C, Eigen::Dynamic> s(nv_);
-        
+
         T t_old = T(-1);
-        
+
         const int BLOCK_SIZE = 8192;
         Eigen::Array<T, Eigen::Dynamic, 1> phase_block(BLOCK_SIZE);
         Eigen::Matrix<C, Eigen::Dynamic, 1> fourier_block(BLOCK_SIZE);
@@ -523,8 +602,206 @@ private:
     
     // Magnetization vectors matrices
     Eigen::Matrix<C, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> f_M_Mxy_nodes_;
-    Eigen::Matrix<C, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> f_Mxy_nodes_; 
-    Eigen::Matrix<C, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> f_Mxy_; 
+    Eigen::Matrix<C, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> f_Mxy_nodes_;
+    Eigen::Matrix<C, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> f_Mxy_;
+
+    // Compute backend selector. Controls whether signal_sum / signal_nodal
+    // and signal / signal_full dispatch to the host AVX2 path (default)
+    // or the CUDA kernel.
+    std::string device_ = "cpu";
+
+    // Cached quadrature-projected modes. Recomputed only when the caller-
+    // supplied modes_x.data() pointer or n_modes changes. POD modes are
+    // static across one Phantom.mri_signal loop (~100 calls in a 4D-flow
+    // run), so this avoids re-doing the O(Q x M) sparse-times-dense
+    // projection — which would otherwise allocate multi-GB per call at
+    // large meshes (e.g. ~60 GB total host alloc at N = 600k, horder = 4).
+    const T* cached_modes_x_ptr_ = nullptr;
+    const T* cached_modes_y_ptr_ = nullptr;
+    const T* cached_modes_z_ptr_ = nullptr;
+    int      cached_n_modes_     = 0;
+    Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>
+        cached_modes_q_x_, cached_modes_q_y_, cached_modes_q_z_;
+
+#ifdef FEELMRI_GPU
+    // Run signal() / signal_full() (quadrature integration) on the GPU.
+    // The kernel itself is the same one used by signal_sum / signal_nodal
+    // — we just feed it quadrature-point arrays instead of node arrays:
+    //   - "nodes" become the static quadrature coordinates f_xq*_.
+    //   - "modes" become the projected modes S_global_ * modes_*.
+    //   - "Mxy_nodes" becomes f_wq_-weighted f_Mxy_ (so the weight is
+    //     folded into the magnetisation; the magnitude inside the
+    //     kernel stays the same `exp(-tij/T2)`).
+    //   - invT2 / phi become their quadrature-interpolated f_invT2_,
+    //     f_phi_ (already populated by set_static_fields).
+    Tensor4CR signal_quadrature_gpu_impl(
+        const std::vector<Tensor3>& kloc,
+        const Tensor3& t,
+        const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& modes_x,
+        const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& modes_y,
+        const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& modes_z,
+        const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& weights,
+        bool has_traj)
+    {
+        const int nb_meas  = kloc[0].dimension(0);
+        const int nb_lines = kloc[0].dimension(1);
+        const int nb_kz    = kloc[0].dimension(2);
+        const int S        = nb_meas * nb_lines * nb_kz;
+
+        // Flatten kloc / t into iteration-order arrays (i outer, k inner).
+        std::vector<T> flat_kx(S), flat_ky(S), flat_kz(S), flat_t(S);
+        for (int i = 0, row = 0; i < nb_meas; ++i)
+        for (int j = 0; j < nb_lines; ++j)
+        for (int k = 0; k < nb_kz;    ++k, ++row) {
+            flat_kx[row] = kloc[0](i, j, k);
+            flat_ky[row] = kloc[1](i, j, k);
+            flat_kz[row] = kloc[2](i, j, k);
+            flat_t[row]  = t(i, j, k);
+        }
+
+        // Project modes nodes -> quadrature points. Cache the RowMajor
+        // result on the assembler keyed by (host pointer, n_modes); the
+        // recompute happens on the first call and on the rare cases
+        // where the caller swaps the POD modes object. At scale this
+        // saves ~30 GB/call host allocation + the matching H2D upload.
+        const int n_modes = has_traj ? static_cast<int>(modes_x.cols()) : 0;
+        Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>
+            rm_weights;
+        if (has_traj) {
+            const bool cache_stale = (modes_x.data() != cached_modes_x_ptr_)
+                                  || (modes_y.data() != cached_modes_y_ptr_)
+                                  || (modes_z.data() != cached_modes_z_ptr_)
+                                  || (n_modes        != cached_n_modes_);
+            if (cache_stale) {
+                cached_modes_q_x_ = S_global_ * modes_x;
+                cached_modes_q_y_ = S_global_ * modes_y;
+                cached_modes_q_z_ = S_global_ * modes_z;
+                cached_modes_x_ptr_ = modes_x.data();
+                cached_modes_y_ptr_ = modes_y.data();
+                cached_modes_z_ptr_ = modes_z.data();
+                cached_n_modes_     = n_modes;
+            }
+            rm_weights = weights;
+        }
+
+        // Output buffer: RowMajor (S, nv).
+        Eigen::Matrix<C, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>
+            kspace_mat(S, nv_);
+
+        // Fused projection + signal kernel. The host no longer materialises
+        // f_Mxy_ at quadrature points: we hand the GPU the per-node Mxy
+        // (already cached on the assembler by update_magnetization()) plus
+        // the S_global_ CSR triple, and the projection runs on the device.
+        const int rc = feelmri_mri_signal_with_projection_gpu_f32(
+            f_xq0_.data(), f_xq1_.data(), f_xq2_.data(),
+            f_invT2_.data(), f_phi_.data(),
+            f_Mxy_nodes_.data(),
+            nb_nodes_,
+            S_global_.outerIndexPtr(),
+            S_global_.innerIndexPtr(),
+            S_global_.valuePtr(),
+            static_cast<int>(S_global_.nonZeros()),
+            f_wq_.data(),
+            has_traj ? cached_modes_q_x_.data() : nullptr,
+            has_traj ? cached_modes_q_y_.data() : nullptr,
+            has_traj ? cached_modes_q_z_.data() : nullptr,
+            has_traj ? rm_weights.data() : nullptr,
+            has_traj ? 1 : 0,
+            n_modes, total_q_, nv_,
+            flat_kx.data(), flat_ky.data(), flat_kz.data(), flat_t.data(),
+            S,
+            kspace_mat.data());
+
+        if (rc != 0) {
+            const char* msg = feelmri_device_last_error_string();
+            throw std::runtime_error(
+                std::string("SignalAssembler GPU quadrature path: device "
+                            "runtime reported error: ")
+                + (msg && msg[0] ? msg : "unknown"));
+        }
+
+        return Eigen::TensorMap<Tensor4CR>(
+            kspace_mat.data(), nb_meas, nb_lines, nb_kz, (uint)nv_);
+    }
+
+    // Run signal_sum (use_M_Mxy = false) or signal_nodal (use_M_Mxy = true)
+    // on the GPU. Mirrors the host math exactly; the only host-side cost
+    // is repacking inputs into the row-major flat layout the kernel expects.
+    Tensor4CR signal_node_gpu_impl(
+        const std::vector<Tensor3>& kloc,
+        const Tensor3& t,
+        const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& modes_x,
+        const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& modes_y,
+        const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& modes_z,
+        const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& weights,
+        bool has_traj,
+        bool use_M_Mxy)
+    {
+        const int nb_meas  = kloc[0].dimension(0);
+        const int nb_lines = kloc[0].dimension(1);
+        const int nb_kz    = kloc[0].dimension(2);
+        const int S        = nb_meas * nb_lines * nb_kz;
+
+        // Flatten kloc / t into iteration-order arrays (i outer, k inner).
+        std::vector<T> flat_kx(S), flat_ky(S), flat_kz(S), flat_t(S);
+        for (int i = 0, row = 0; i < nb_meas; ++i)
+        for (int j = 0; j < nb_lines; ++j)
+        for (int k = 0; k < nb_kz;    ++k, ++row) {
+            flat_kx[row] = kloc[0](i, j, k);
+            flat_ky[row] = kloc[1](i, j, k);
+            flat_kz[row] = kloc[2](i, j, k);
+            flat_t[row]  = t(i, j, k);
+        }
+
+        // Row-major (n_nodes, n_modes) layout for modes; (n_samples, n_modes)
+        // for weights. The Python caller already passes C-contiguous numpy,
+        // but pybind11 + Eigen::Matrix copies into ColMajor on the way in,
+        // so we have to swap back here.
+        const int n_modes = has_traj ? static_cast<int>(modes_x.cols()) : 0;
+        Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>
+            rm_modes_x, rm_modes_y, rm_modes_z, rm_weights;
+        if (has_traj) {
+            rm_modes_x = modes_x;
+            rm_modes_y = modes_y;
+            rm_modes_z = modes_z;
+            rm_weights = weights;
+        }
+
+        // Pick the magnetisation buffer (f_Mxy_nodes_ for signal_sum,
+        // f_M_Mxy_nodes_ for signal_nodal). Both are stored RowMajor on
+        // the class — no repack needed.
+        const auto& Mxy_src = use_M_Mxy ? f_M_Mxy_nodes_ : f_Mxy_nodes_;
+        const std::complex<T>* Mxy_ptr = Mxy_src.data();
+
+        // Output buffer: RowMajor (S, nv).
+        Eigen::Matrix<C, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>
+            kspace_mat(S, nv_);
+
+        const int rc = feelmri_mri_signal_gpu_f32(
+            f_nodes_x0_.data(), f_nodes_x1_.data(), f_nodes_x2_.data(),
+            f_nodes_invT2_.data(), f_nodes_phi_.data(),
+            Mxy_ptr,
+            has_traj ? rm_modes_x.data() : nullptr,
+            has_traj ? rm_modes_y.data() : nullptr,
+            has_traj ? rm_modes_z.data() : nullptr,
+            has_traj ? rm_weights.data() : nullptr,
+            has_traj ? 1 : 0,
+            n_modes, nb_nodes_, nv_,
+            flat_kx.data(), flat_ky.data(), flat_kz.data(), flat_t.data(),
+            S,
+            kspace_mat.data());
+
+        if (rc != 0) {
+            const char* msg = feelmri_device_last_error_string();
+            throw std::runtime_error(
+                std::string("SignalAssembler GPU path: device runtime reported "
+                            "error: ") + (msg && msg[0] ? msg : "unknown"));
+        }
+
+        return Eigen::TensorMap<Tensor4CR>(
+            kspace_mat.data(), nb_meas, nb_lines, nb_kz, (uint)nv_);
+    }
+#endif  // FEELMRI_GPU
 };
 
 
@@ -570,6 +847,12 @@ PYBIND11_MODULE(MRIAssemble, m)
 
         .def("estimate_element_sizes", &Assembler::estimate_element_sizes,
              "Returns the characteristic 3D length of each element based on its Jacobian volume.")
+
+        // Switch this assembler between the CPU and GPU compute paths.
+        // GPU support requires a build with FEELMRI_ENABLE_GPU=ON.
+        .def("set_device", &Assembler::set_device, py::arg("device"),
+             "Select 'cpu' (default, AVX2) or 'gpu' (CUDA) for signal_sum / signal_nodal.")
+        .def_property_readonly("device", &Assembler::device)
 
         // Expose signal integration methods, mapped to the new mode/weight signatures.
         .def("signal_sum", &Assembler::signal_sum,
