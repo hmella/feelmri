@@ -49,8 +49,8 @@ dev = [
 # Optional adapter dependency. Used by feelmri.PulseqAdapter for the
 # kspace_trajectory / kspace_to_signal_inputs bridges and by the
 # examples/pulseq_*.py scripts. The library builds, imports, and tests
-# (with '-m "not pulseq"') without it. Version range matches the
-# supported .seq formats documented in CLAUDE.md.
+# (with '-m "not pulseq"') without it. The version range matches the
+# supported .seq formats.
 pulseq = [
   "pypulseq>=1.2,<1.6",
 ]
