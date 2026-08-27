@@ -155,3 +155,52 @@ def test_signal_for_2d_disk_decays_monotonically_in_kr(tmp_path):
     f'|S(k)| not monotonically decreasing in the first lobe: {S}'
   )
   assert S[0] > 0.0
+
+
+# ---------------------------------------------------------------------------
+# Multi-species: uniform per-species T2 / off-resonance factor out of the integral
+# ---------------------------------------------------------------------------
+
+def test_uniform_relaxation_and_offresonance_factor_out(tmp_path):
+  """A species whose T2 and off-resonance are spatially uniform can be evaluated
+  with them removed from the integral and re-applied afterwards:
+
+      S(k,t) = exp(-t/T2) exp(i dw t) * INT Mxy exp(i phi_shared t) exp(-i 2pi k.x) dV
+
+  This is what lets several chemical species share one mesh, one partition and one
+  assembler, carried as separate `nv` columns -- see
+  `feelmri_paper_experiments/water_and_fat.py`. It holds ONLY while those two
+  quantities are uniform per species; a spatially varying T2 needs its own
+  assembler.
+  """
+  pytest.importorskip('mpi4py')
+  pytest.importorskip('pymetis')
+  pytest.importorskip('meshio')
+  from _phantom_fixtures import make_cube_mesh
+
+  path, _ = make_cube_mesh(tmp_path / 'cube.vtu', 'tetra', n=4, scale=2e-3)
+  T2, dw, phi_shared = 40.0, -0.44, 0.013      # ms, rad/ms, rad/ms
+
+  rng = np.random.default_rng(0)
+  S = 16
+  pts = [np.ascontiguousarray(rng.uniform(-60, 60, (S, 1, 1)).astype(np.float32))
+         for _ in range(3)]
+  ts = np.ascontiguousarray(np.linspace(0.0, 3.0, S, dtype=np.float32).reshape(S, 1, 1))
+
+  def run(T2_val, phi_val):
+    phantom = FEMPhantom(path=str(path))
+    phantom.set_assembler(voxel_size=0.0, lorder=2, horder=2,
+                          nodal_approximation=False, lumped=False)
+    n = phantom.local_nodes.shape[0]
+    phantom.set_static_fields(T2=np.full(n, T2_val, dtype=np.float32),
+                              phi_dB0=np.full(n, phi_val, dtype=np.float32))
+    idx = np.arange(n)
+    phantom.update_magnetization(
+      (np.cos(idx * 0.1) + 1j * np.sin(idx * 0.07)).astype(np.complex64).reshape(-1, 1))
+    return np.asarray(phantom.signal(pts, ts, None)).reshape(-1)
+
+  inside = run(T2, phi_shared + dw)                       # both inside the integral
+  factored = run(np.inf, phi_shared) * (
+      np.exp(-ts.reshape(-1) / T2) * np.exp(1j * dw * ts.reshape(-1)))
+
+  assert np.max(np.abs(inside - factored)) / np.max(np.abs(inside)) < 1e-5

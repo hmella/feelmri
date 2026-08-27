@@ -33,6 +33,31 @@
  * Optional deforming-mesh support: pre-computed POD modes and weights are
  * applied via Eigen GEMV (`r_curr = r0 + modes @ weights[i+1, :]`) once per
  * time step, with zero Python callbacks during the inner loop.
+ *
+ * Return contract. `solve_mri_f32` / `solve_mri_f64` return
+ * `(Mxy, Mz, Bz_old_final, rf_old_final)`. By default `Mxy` and `Mz` have
+ * shape `(n_pos, 1)` and hold only the final state: the magnetisation is
+ * advanced in place through per-node rolling buffers, since the final column
+ * is the only one BlochSolver consumes. Passing `store_history = true`
+ * restores the full `(n_pos, n_time)` trace for the isochromat-dephasing
+ * plotter and ad-hoc debugging. `M[:, -1]` is the final state under both
+ * shapes, so callers need not branch on it.
+ *
+ * Steps with no RF take a reduced z-rotation path: with B1 = 0 the
+ * Cayley-Klein off-diagonal beta is exactly zero, so the square root,
+ * complex division and four complex products of the transverse algebra are
+ * skipped. The dropped terms are exact zeros, so results are bit-identical
+ * to the full path. The branch is per time step, not per node.
+ *
+ * Relaxation exponentials. When T1 and T2 are constant across nodes — the
+ * case whenever a phantom is built from scalar relaxation times —
+ * `exp(-dt/T1)` and `exp(-dt/T2)` are scalars and a change of time step
+ * costs two `std::exp` calls rather than `2 * n_pos`. This matters because
+ * RF rasters are generally not uniform in dt (an apodized-sinc excitation
+ * block can carry >100 distinct dt values), so the per-node path would
+ * re-exponentiate every node on most steps. The per-node path is kept for
+ * genuine T1/T2 maps and stays on libm `std::exp` so it remains bit-identical
+ * to the historical solver.
  */
 #pragma once
 

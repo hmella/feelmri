@@ -323,6 +323,94 @@ def test_labelset_filter(adapter, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Readout-placeholder substitution: feelmri_sim_seq
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize('seq_path', SEQ_FILES, ids=_seq_id)
+def test_feelmri_sim_seq_default_matches_seq(parsed_imports, seq_path):
+  """With the default ``readout_set_values=(3,)`` the simulation
+  sequence has identical block count and absolute duration as
+  ``feelmri_seq``. Per-block durations match exactly so the global
+  timing grid is preserved across the substitution."""
+  imp = parsed_imports[seq_path.name]
+  assert len(imp.feelmri_sim_seq.blocks) == len(imp.feelmri_seq.blocks)
+  durs_o = np.array([b.dur.m_as('ms') for b in imp.feelmri_seq.blocks])
+  durs_s = np.array([b.dur.m_as('ms') for b in imp.feelmri_sim_seq.blocks])
+  np.testing.assert_allclose(durs_s, durs_o, rtol=0, atol=1e-9)
+  np.testing.assert_allclose(
+    imp.feelmri_sim_seq.dur.m_as('ms'),
+    imp.feelmri_seq.dur.m_as('ms'),
+    rtol=0, atol=1e-9,
+  )
+
+
+@pytest.mark.parametrize('seq_path', SEQ_FILES, ids=_seq_id)
+def test_feelmri_sim_seq_storage_flag_carryover(parsed_imports, seq_path):
+  """``store_magnetization`` flags on non-readout blocks survive the
+  substitution. Readout-tagged blocks themselves never carry storage
+  flags by construction (the anchor block is the preceding RF)."""
+  imp = parsed_imports[seq_path.name]
+  flags_o = [b.store_magnetization for b in imp.feelmri_seq.blocks]
+  flags_s = [b.store_magnetization for b in imp.feelmri_sim_seq.blocks]
+  assert flags_o == flags_s
+
+
+def test_feelmri_sim_seq_collapses_set3(adapter):
+  """End-to-end: every SET=3 block on the bundled EPI tagging file is
+  empty (no RF, no gradients, no ADC) on ``feelmri_sim_seq``; all
+  non-readout blocks keep their event content via deep copy."""
+  epi = PULSEQ_DIR / 'epi_pypulseq.seq'
+  if not epi.exists():
+    pytest.skip(f'{epi.name} not bundled')
+  imp = adapter.import_pulseq(epi)
+  set3 = set(imp.filter_blocks(SET=3))
+  assert set(imp.readout_sim_block_indices) == set3
+  assert len(set3) > 0
+  for i in set3:
+    b = imp.feelmri_sim_seq.blocks[i]
+    assert b.empty is True
+    assert b.rf_pulses == []
+    assert b.gradients == []
+    assert b.adc is None
+  # Non-readout SET=2 blocks must still carry their RF / gradient events.
+  for i in imp.filter_blocks(SET=2):
+    assert imp.feelmri_sim_seq.blocks[i].empty is False
+
+
+def test_feelmri_sim_seq_optout(adapter):
+  """``readout_set_values=()`` disables the substitution; sim_seq
+  becomes an event-for-event mirror of feelmri_seq."""
+  epi = PULSEQ_DIR / 'epi_pypulseq.seq'
+  if not epi.exists():
+    pytest.skip(f'{epi.name} not bundled')
+  imp = adapter.import_pulseq(epi, readout_set_values=())
+  assert imp.readout_sim_block_indices == []
+  durs_o = np.array([b.dur.m_as('ms') for b in imp.feelmri_seq.blocks])
+  durs_s = np.array([b.dur.m_as('ms') for b in imp.feelmri_sim_seq.blocks])
+  np.testing.assert_allclose(durs_s, durs_o, rtol=0, atol=1e-9)
+  # No block should have been collapsed to empty when opt-out is requested.
+  for b_o, b_s in zip(imp.feelmri_seq.blocks, imp.feelmri_sim_seq.blocks):
+    assert b_o.empty == b_s.empty
+
+
+def test_feelmri_sim_seq_custom_set_values(adapter, tmp_path):
+  """The ``readout_set_values`` knob accepts arbitrary SET integer
+  values; the substitution targets only the requested values on a
+  synthetic fixture."""
+  seq_path = _build_labelset_seq(tmp_path)
+  imp = adapter.import_pulseq(seq_path, readout_set_values=(2,))
+  # Blocks 2 and 3 both carry running SET=2; both should be collapsed.
+  assert imp.readout_sim_block_indices == [2, 3]
+  for i in (2, 3):
+    assert imp.feelmri_sim_seq.blocks[i].empty is True
+    assert imp.feelmri_sim_seq.blocks[i].gradients == []
+  # Block 0 (SET=0) and block 1 (SET=1) keep their gradient events.
+  for i in (0, 1):
+    assert imp.feelmri_sim_seq.blocks[i].empty is False
+    assert len(imp.feelmri_sim_seq.blocks[i].gradients) > 0
+
+
+# ---------------------------------------------------------------------------
 # Trajectory data bridge: kspace_to_signal_inputs(pp_seq)
 # ---------------------------------------------------------------------------
 

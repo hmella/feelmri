@@ -33,7 +33,9 @@ public:
         const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& nodes,
         const std::string& meshio_type,
         int quadrature_degree)
-      : elems_(elems) // Store element connectivity
+      // Reorder to Basix DOF order once: elems_ then serves both the geometry map
+      // (via the quadrature cache) and the global assembly indices below.
+      : elems_(permute_meshio_to_basix(elems, meshio_type))
     {
         nelem_ = elems_.rows(); // Number of elements in the mesh
         
@@ -41,6 +43,10 @@ public:
         cache_ = BuildFEQuadratureCache<T>(elems_, nodes, meshio_type, quadrature_degree);
 
         nb_nodes_ = nodes.rows(); // Total number of nodes in the mesh
+
+        // Every node counts until told otherwise, which reproduces the serial
+        // result exactly and leaves single-rank runs unchanged.
+        f_node_owned_ = Eigen::Array<T, Eigen::Dynamic, 1>::Ones(nb_nodes_);
 
         // Extract static X, Y, Z coordinates for all nodes into 1D arrays
         f_nodes_x0_ = nodes.col(0).array();
@@ -134,19 +140,53 @@ public:
         }
     }
 
+    // Quadrature-space POD modes: Phi_q = S_global_ * Phi, cached.
+    //
+    // The quadrature signal path needs the displacement AT quadrature points,
+    // which it used to obtain per k-space sample as
+    //     S_global_ * (modes * w)      -- a dense GEMV plus a sparse projection
+    // Folding the projection into the modes once turns that into a single dense
+    // GEMV per sample, and makes the data layout identical to the nodal path so
+    // the same cache blocking applies. Rebuilt only when the caller passes a
+    // different modes array (pointer + shape fingerprint).
+    Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic> mq_x_, mq_y_, mq_z_;
+    const void* mq_key_ = nullptr;
+    int mq_cols_ = -1;
+
+    void ensure_quadrature_modes(
+        const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& modes_x,
+        const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& modes_y,
+        const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& modes_z)
+    {
+        const void* key = static_cast<const void*>(modes_x.data());
+        if (key == mq_key_ && modes_x.cols() == mq_cols_) return;
+        mq_x_.noalias() = S_global_ * modes_x;
+        mq_y_.noalias() = S_global_ * modes_y;
+        mq_z_.noalias() = S_global_ * modes_z;
+        mq_key_ = key;
+        mq_cols_ = (int)modes_x.cols();
+    }
+
     // Updates transverse magnetization strictly at the nodes (used for fast nodal sums).
+    //
+    // The projection to quadrature points is deferred to
+    // ensure_full_magnetization(), which the quadrature paths call on demand: it
+    // costs O(total_q * nne * nv) and the nodal paths never read f_Mxy_.
     void update_magnetization(const Eigen::Matrix<C, Eigen::Dynamic, Eigen::Dynamic>& Mxy)
     {
         nv_ = (int)Mxy.cols(); // Number of receiving coils / isochromats
-        f_Mxy_nodes_ = Mxy; 
+        f_Mxy_nodes_ = Mxy;
+        f_Mxy_dirty_ = true;
     }
 
-    // Updates and interpolates transverse magnetization to all quadrature points.
-    void update_full_magnetization(const Eigen::Matrix<C, Eigen::Dynamic, Eigen::Dynamic>& Mxy)
+    // Projects the stored nodal magnetization onto the quadrature points if it has
+    // changed since the last projection. Repeated k-space calls against a single
+    // magnetization update therefore project once.
+    void ensure_full_magnetization()
     {
-        nv_ = (int)Mxy.cols();
+        if (!f_Mxy_dirty_) return;
+
         const int nne = elems_.cols();
-        
         f_Mxy_.resize(total_q_, nv_);
 
         // For each element, project nodal Mxy to quadrature Mxy
@@ -155,12 +195,37 @@ public:
             const int offset = e * nq_;
             Eigen::Matrix<C, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> Mxy_e(nne, nv_);
             for (int a = 0; a < nne; ++a) {
-                Mxy_e.row(a) = Mxy.row(elems_(e, a));
+                Mxy_e.row(a) = f_Mxy_nodes_.row(elems_(e, a));
             }
             // Cast shape functions to complex to match Mxy type, then multiply
             Eigen::Matrix<C, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> SqTC = cache_.SqT[e].template cast<C>();
             f_Mxy_.middleRows(offset, nq_).noalias() = SqTC * Mxy_e;
         }
+
+        f_Mxy_dirty_ = false;
+    }
+
+    // Eager form of the above, for callers that want the projection cost up front.
+    void update_full_magnetization(const Eigen::Matrix<C, Eigen::Dynamic, Eigen::Dynamic>& Mxy)
+    {
+        update_magnetization(Mxy);
+        ensure_full_magnetization();
+    }
+
+    // Marks which nodes this rank is responsible for in the raw nodal sum.
+    //
+    // A rank owns every node its elements touch, so nodes on a partition boundary
+    // belong to several ranks. signal_sum is a plain sum over local nodes and the
+    // caller reduces it with MPI_SUM, so without this mask interface nodes are
+    // counted once per owning rank. signal_nodal and the quadrature paths are
+    // unaffected: their mass matrix and elements are owned exclusively.
+    void set_node_ownership(const Eigen::Array<T, Eigen::Dynamic, 1>& owned)
+    {
+        if (owned.size() != nb_nodes_)
+            throw std::runtime_error(
+                "set_node_ownership: expected " + std::to_string(nb_nodes_)
+                + " entries, got " + std::to_string(owned.size()));
+        f_node_owned_ = owned;
     }
 
     // Pre-multiplies magnetization by a mass matrix (M) for Galerkin-style nodal integration.
@@ -169,6 +234,10 @@ public:
         const Eigen::Matrix<C, Eigen::Dynamic, Eigen::Dynamic>& Mxy)
     {
         nv_ = (int)Mxy.cols();
+        // Keep the nodal copy so a quadrature call on this group projects the
+        // current magnetization.
+        f_Mxy_nodes_ = Mxy;
+        f_Mxy_dirty_ = true;
         // Compute Mass Matrix * Mxy to avoid doing it inside the time loop
         f_M_Mxy_nodes_.noalias() = M.template cast<C>() * Mxy;
     }
@@ -215,78 +284,84 @@ public:
         Eigen::Matrix<C, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> kspace_mat(S, nv_);
         Eigen::RowVector<C, Eigen::Dynamic> s(nv_);
         
-        T t_old = T(-1); // Tracks previous time step to avoid redundant calculations
-
         // Cache-blocking parameters to ensure arrays fit in CPU L1/L2 cache
         const int BLOCK_SIZE = 8192;
         Eigen::Array<T, Eigen::Dynamic, 1> phase_block(BLOCK_SIZE);
         Eigen::Matrix<C, Eigen::Dynamic, 1> fourier_block(BLOCK_SIZE);
+        Eigen::Array<T, Eigen::Dynamic, 1> f_mag(BLOCK_SIZE), f_po(BLOCK_SIZE);
+        Eigen::Array<T, Eigen::Dynamic, 1> dx0(BLOCK_SIZE), dx1(BLOCK_SIZE), dx2(BLOCK_SIZE);
 
-        Eigen::Array<T, Eigen::Dynamic, 1> f_mag(nb_nodes_);
-        Eigen::Array<T, Eigen::Dynamic, 1> f_po(nb_nodes_);
-
-        // Select the correct coordinate reference based on presence of trajectory
-        Eigen::Array<T, Eigen::Dynamic, 1>& x0_ref = has_traj ? f_dyn_nodes_x0_ : f_nodes_x0_;
-        Eigen::Array<T, Eigen::Dynamic, 1>& x1_ref = has_traj ? f_dyn_nodes_x1_ : f_nodes_x1_;
-        Eigen::Array<T, Eigen::Dynamic, 1>& x2_ref = has_traj ? f_dyn_nodes_x2_ : f_nodes_x2_;
-
-        // Loop over all k-space points (Measurements x Lines x Slices)
+        // Flatten the per-sample scalars once; S is small (one readout).
+        Eigen::Array<T, Eigen::Dynamic, 1> tv(S), kxv(S), kyv(S), kzv(S);
         for (uint i = 0, row = 0; i < nb_meas; ++i)
         for (uint j = 0; j < nb_lines; ++j)
-        for (uint k = 0; k < nb_kz; ++k, ++row)
+        for (uint k = 0; k < nb_kz; ++k, ++row) {
+            tv(row)  = t(i, j, k);
+            kxv(row) = two_pi * kloc[0](i, j, k);
+            kyv(row) = two_pi * kloc[1](i, j, k);
+            kzv(row) = two_pi * kloc[2](i, j, k);
+        }
+
+        kspace_mat.setZero();
+
+        // Node blocks outermost, k-points innermost.
+        //
+        // With k-points outermost the whole (n_nodes x n_modes) mode matrix is
+        // re-streamed from memory for every k-space sample, since a Cartesian
+        // readout gives each sample its own acquisition time and the `update_time`
+        // guard always fires. With the block outermost, a block's modes
+        // (BLOCK_SIZE x n_modes) stay resident across the whole readout.
+        //
+        // Block order is unchanged, so each output row accumulates its block
+        // contributions in the same sequence and the result is bit-identical.
+        for (int q_start = 0; q_start < nb_nodes_; q_start += BLOCK_SIZE)
         {
-            // Extract current time and k-space coordinates (kx, ky, kz)
-            const T tij = t(i, j, k); 
-            const T kx  = two_pi * kloc[0](i, j, k);
-            const T ky  = two_pi * kloc[1](i, j, k);
-            const T kz  = two_pi * kloc[2](i, j, k);
+            const int q_count = std::min(BLOCK_SIZE, nb_nodes_ - q_start);
 
-            // Optimization flag: Only update mesh/relaxation if time has changed
-            const bool update_time = (tij != t_old);
+            auto x0b    = f_nodes_x0_.segment(q_start, q_count);
+            auto x1b    = f_nodes_x1_.segment(q_start, q_count);
+            auto x2b    = f_nodes_x2_.segment(q_start, q_count);
+            auto invT2b = f_nodes_invT2_.segment(q_start, q_count);
+            auto phib   = f_nodes_phi_.segment(q_start, q_count);
+            auto ownb   = f_node_owned_.segment(q_start, q_count);
 
-            // Update node positions by executing a highly-optimized matrix-vector multiplication
-            if (has_traj && update_time) 
+            T t_old = T(-1); // per block: the k-point walk restarts here
+
+            for (int row = 0; row < S; ++row)
             {
-                // Extract the pre-computed weights vector for this specific 
-                // time frame (M_modes x 1) and multiply by static modes (N_nodes x M_modes).
-                // The `.noalias()` flag instructs Eigen to skip temporary allocation and 
-                // unroll the math directly into CPU AVX2/FMA vector instructions.
-                auto w = weights.row(row).transpose(); 
-                f_dyn_nodes_x0_ = f_nodes_x0_ + (modes_x * w).array();
-                f_dyn_nodes_x1_ = f_nodes_x1_ + (modes_y * w).array();
-                f_dyn_nodes_x2_ = f_nodes_x2_ + (modes_z * w).array();
-            }
+                const T tij = tv(row), kx = kxv(row), ky = kyv(row), kz = kzv(row);
+                const bool update_time = (tij != t_old);
 
-            s.setZero(); // Reset signal accumulator for this k-space point
-            if (update_time) t_old = tij;
-
-            // Process nodes in chunks (BLOCK_SIZE) to maximize CPU cache hits
-            for (int q_start = 0; q_start < nb_nodes_; q_start += BLOCK_SIZE)
-            {
-                const int q_count = std::min(BLOCK_SIZE, nb_nodes_ - q_start);
-                
-                // If time advanced, update the T2 decay (magnitude) and B0 phase accumulation
                 if (update_time) {
-                    f_mag.segment(q_start, q_count) = (-tij * f_nodes_invT2_.segment(q_start, q_count)).exp();
-                    f_po.segment(q_start, q_count)  = f_nodes_phi_.segment(q_start, q_count) * tij;
+                    if (has_traj) {
+                        auto w = weights.row(row).transpose();
+                        dx0.head(q_count) = x0b + (modes_x.middleRows(q_start, q_count) * w).array();
+                        dx1.head(q_count) = x1b + (modes_y.middleRows(q_start, q_count) * w).array();
+                        dx2.head(q_count) = x2b + (modes_z.middleRows(q_start, q_count) * w).array();
+                    }
+                    // Ownership mask: interface nodes carry weight 0 on every rank
+                    // but their canonical owner.
+                    f_mag.head(q_count) = ownb * (-tij * invT2b).exp();
+                    f_po.head(q_count)  = phib * tij;
+                    t_old = tij;
                 }
 
-                // Compute total phase: B0 phase accumulation - spatial encoding (k * r)
-                phase_block.head(q_count) = f_po.segment(q_start, q_count)
-                                            - kx * x0_ref.segment(q_start, q_count) 
-                                            - ky * x1_ref.segment(q_start, q_count) 
-                                            - kz * x2_ref.segment(q_start, q_count);
+                if (has_traj) {
+                    phase_block.head(q_count) = f_po.head(q_count)
+                                                - kx * dx0.head(q_count)
+                                                - ky * dx1.head(q_count)
+                                                - kz * dx2.head(q_count);
+                } else {
+                    phase_block.head(q_count) = f_po.head(q_count)
+                                                - kx * x0b - ky * x1b - kz * x2b;
+                }
 
-                // Euler's formula: construct complex exponentials (real=cos, imag=sin) multiplied by decay magnitude
-                fourier_block.head(q_count).array().real() = f_mag.segment(q_start, q_count) * phase_block.head(q_count).cos();
-                fourier_block.head(q_count).array().imag() = f_mag.segment(q_start, q_count) * phase_block.head(q_count).sin();
+                fourier_block.head(q_count).array().real() = f_mag.head(q_count) * phase_block.head(q_count).cos();
+                fourier_block.head(q_count).array().imag() = f_mag.head(q_count) * phase_block.head(q_count).sin();
 
-                // Vectorized multiply-add: integrate signal from this block of nodes
-                s.noalias() += fourier_block.head(q_count).transpose() * f_Mxy_nodes_.middleRows(q_start, q_count);
+                kspace_mat.row(row).noalias() +=
+                    fourier_block.head(q_count).transpose() * f_Mxy_nodes_.middleRows(q_start, q_count);
             }
-            
-            // Store the integrated signal for this k-space point
-            kspace_mat.row(row) = s;
         }
 
         // Return the flat matrix mapped back to a 4D Tensor format for Python
@@ -320,66 +395,72 @@ public:
         Eigen::Matrix<C, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> kspace_mat(S, nv_);
         Eigen::RowVector<C, Eigen::Dynamic> s(nv_);
         
-        T t_old = T(-1);
-
         const int BLOCK_SIZE = 8192;
         Eigen::Array<T, Eigen::Dynamic, 1> phase_block(BLOCK_SIZE);
         Eigen::Matrix<C, Eigen::Dynamic, 1> fourier_block(BLOCK_SIZE);
+        Eigen::Array<T, Eigen::Dynamic, 1> f_mag(BLOCK_SIZE), f_po(BLOCK_SIZE);
+        Eigen::Array<T, Eigen::Dynamic, 1> dx0(BLOCK_SIZE), dx1(BLOCK_SIZE), dx2(BLOCK_SIZE);
 
-        Eigen::Array<T, Eigen::Dynamic, 1> f_mag(nb_nodes_);
-        Eigen::Array<T, Eigen::Dynamic, 1> f_po(nb_nodes_);
-
-        Eigen::Array<T, Eigen::Dynamic, 1>& x0_ref = has_traj ? f_dyn_nodes_x0_ : f_nodes_x0_;
-        Eigen::Array<T, Eigen::Dynamic, 1>& x1_ref = has_traj ? f_dyn_nodes_x1_ : f_nodes_x1_;
-        Eigen::Array<T, Eigen::Dynamic, 1>& x2_ref = has_traj ? f_dyn_nodes_x2_ : f_nodes_x2_;
-
-        // Standard k-space integration loop
+        Eigen::Array<T, Eigen::Dynamic, 1> tv(S), kxv(S), kyv(S), kzv(S);
         for (uint i = 0, row = 0; i < nb_meas; ++i)
         for (uint j = 0; j < nb_lines; ++j)
-        for (uint k = 0; k < nb_kz; ++k, ++row)
+        for (uint k = 0; k < nb_kz; ++k, ++row) {
+            tv(row)  = t(i, j, k);
+            kxv(row) = two_pi * kloc[0](i, j, k);
+            kyv(row) = two_pi * kloc[1](i, j, k);
+            kzv(row) = two_pi * kloc[2](i, j, k);
+        }
+
+        kspace_mat.setZero();
+
+        // Node blocks outermost, k-points innermost -- see signal_sum. Identical
+        // to that routine except the accumulation is against the mass-matrix
+        // weighted magnetisation f_M_Mxy_nodes_.
+        for (int q_start = 0; q_start < nb_nodes_; q_start += BLOCK_SIZE)
         {
-            const T tij = t(i, j, k); 
-            const T kx  = two_pi * kloc[0](i, j, k);
-            const T ky  = two_pi * kloc[1](i, j, k);
-            const T kz  = two_pi * kloc[2](i, j, k);
+            const int q_count = std::min(BLOCK_SIZE, nb_nodes_ - q_start);
 
-            const bool update_time = (tij != t_old);
+            auto x0b    = f_nodes_x0_.segment(q_start, q_count);
+            auto x1b    = f_nodes_x1_.segment(q_start, q_count);
+            auto x2b    = f_nodes_x2_.segment(q_start, q_count);
+            auto invT2b = f_nodes_invT2_.segment(q_start, q_count);
+            auto phib   = f_nodes_phi_.segment(q_start, q_count);
 
-            // Fetch and apply dynamic trajectory positions (AVX2 optimized)
-            if (has_traj && update_time) 
+            T t_old = T(-1);
+
+            for (int row = 0; row < S; ++row)
             {
-                auto w = weights.row(row).transpose(); 
-                f_dyn_nodes_x0_ = f_nodes_x0_ + (modes_x * w).array();
-                f_dyn_nodes_x1_ = f_nodes_x1_ + (modes_y * w).array();
-                f_dyn_nodes_x2_ = f_nodes_x2_ + (modes_z * w).array();
-            }
+                const T tij = tv(row), kx = kxv(row), ky = kyv(row), kz = kzv(row);
+                const bool update_time = (tij != t_old);
 
-            s.setZero();
-            if (update_time) t_old = tij;
-
-            // Blocked evaluation for performance
-            for (int q_start = 0; q_start < nb_nodes_; q_start += BLOCK_SIZE)
-            {
-                const int q_count = std::min(BLOCK_SIZE, nb_nodes_ - q_start);
-                
                 if (update_time) {
-                    f_mag.segment(q_start, q_count) = (-tij * f_nodes_invT2_.segment(q_start, q_count)).exp();
-                    f_po.segment(q_start, q_count)  = f_nodes_phi_.segment(q_start, q_count) * tij;
+                    if (has_traj) {
+                        auto w = weights.row(row).transpose();
+                        dx0.head(q_count) = x0b + (modes_x.middleRows(q_start, q_count) * w).array();
+                        dx1.head(q_count) = x1b + (modes_y.middleRows(q_start, q_count) * w).array();
+                        dx2.head(q_count) = x2b + (modes_z.middleRows(q_start, q_count) * w).array();
+                    }
+                    f_mag.head(q_count) = (-tij * invT2b).exp();
+                    f_po.head(q_count)  = phib * tij;
+                    t_old = tij;
                 }
 
-                phase_block.head(q_count) = f_po.segment(q_start, q_count)
-                                            - kx * x0_ref.segment(q_start, q_count) 
-                                            - ky * x1_ref.segment(q_start, q_count) 
-                                            - kz * x2_ref.segment(q_start, q_count);
+                if (has_traj) {
+                    phase_block.head(q_count) = f_po.head(q_count)
+                                                - kx * dx0.head(q_count)
+                                                - ky * dx1.head(q_count)
+                                                - kz * dx2.head(q_count);
+                } else {
+                    phase_block.head(q_count) = f_po.head(q_count)
+                                                - kx * x0b - ky * x1b - kz * x2b;
+                }
 
-                fourier_block.head(q_count).array().real() = f_mag.segment(q_start, q_count) * phase_block.head(q_count).cos();
-                fourier_block.head(q_count).array().imag() = f_mag.segment(q_start, q_count) * phase_block.head(q_count).sin();
+                fourier_block.head(q_count).array().real() = f_mag.head(q_count) * phase_block.head(q_count).cos();
+                fourier_block.head(q_count).array().imag() = f_mag.head(q_count) * phase_block.head(q_count).sin();
 
-                // Key difference here: f_M_Mxy_nodes_ is used instead of f_Mxy_nodes_
-                s.noalias() += fourier_block.head(q_count).transpose() * f_M_Mxy_nodes_.middleRows(q_start, q_count);
+                kspace_mat.row(row).noalias() +=
+                    fourier_block.head(q_count).transpose() * f_M_Mxy_nodes_.middleRows(q_start, q_count);
             }
-            
-            kspace_mat.row(row) = s;
         }
 
         return Eigen::TensorMap<Tensor4CR>(kspace_mat.data(), nb_meas, nb_lines, nb_kz, (uint)nv_);
@@ -417,6 +498,10 @@ public:
         const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& weights,
         bool has_traj)
     {
+        // Only path that reads f_Mxy_, so the nodal -> quadrature projection is
+        // performed here rather than on every magnetization update.
+        ensure_full_magnetization();
+
         const C i1(T(0), T(1));
         const T two_pi  = T(2) * T(M_PI);
 
@@ -428,75 +513,76 @@ public:
         Eigen::Matrix<C, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> kspace_mat(S, nv_);
         Eigen::RowVector<C, Eigen::Dynamic> s(nv_);
         
-        T t_old = T(-1);
-        
         const int BLOCK_SIZE = 8192;
         Eigen::Array<T, Eigen::Dynamic, 1> phase_block(BLOCK_SIZE);
         Eigen::Matrix<C, Eigen::Dynamic, 1> fourier_block(BLOCK_SIZE);
+        Eigen::Array<T, Eigen::Dynamic, 1> f_mag(BLOCK_SIZE), f_po(BLOCK_SIZE);
+        Eigen::Array<T, Eigen::Dynamic, 1> dx0(BLOCK_SIZE), dx1(BLOCK_SIZE), dx2(BLOCK_SIZE);
 
-        Eigen::Array<T, Eigen::Dynamic, 1> f_mag(total_q_);
-        Eigen::Array<T, Eigen::Dynamic, 1> f_po(total_q_);
+        if (has_traj) ensure_quadrature_modes(modes_x, modes_y, modes_z);
 
-        // Reference pointers dynamically switch based on trajectory presence
-        Eigen::Array<T, Eigen::Dynamic, 1>& x0_ref = has_traj ? f_dyn_xq0_ : f_xq0_;
-        Eigen::Array<T, Eigen::Dynamic, 1>& x1_ref = has_traj ? f_dyn_xq1_ : f_xq1_;
-        Eigen::Array<T, Eigen::Dynamic, 1>& x2_ref = has_traj ? f_dyn_xq2_ : f_xq2_;
-
+        Eigen::Array<T, Eigen::Dynamic, 1> tv(S), kxv(S), kyv(S), kzv(S);
         for (uint i = 0, row = 0; i < nb_meas; ++i)
         for (uint j = 0; j < nb_lines; ++j)
-        for (uint k = 0; k < nb_kz; ++k, ++row)
+        for (uint k = 0; k < nb_kz; ++k, ++row) {
+            tv(row)  = t(i, j, k);
+            kxv(row) = two_pi * kloc[0](i, j, k);
+            kyv(row) = two_pi * kloc[1](i, j, k);
+            kzv(row) = two_pi * kloc[2](i, j, k);
+        }
+
+        kspace_mat.setZero();
+
+        // Quadrature blocks outermost, k-points innermost -- see signal_sum for
+        // the rationale. Here the win is larger because the per-sample work the
+        // old order repeated was a dense GEMV *and* a sparse (Q x N) projection.
+        for (int q_start = 0; q_start < total_q_; q_start += BLOCK_SIZE)
         {
-            const T tij = t(i, j, k); 
-            const T kx  = two_pi * kloc[0](i, j, k);
-            const T ky  = two_pi * kloc[1](i, j, k);
-            const T kz  = two_pi * kloc[2](i, j, k);
+            const int q_count = std::min(BLOCK_SIZE, total_q_ - q_start);
 
-            const bool update_time = (tij != t_old);
+            auto x0b    = f_xq0_.segment(q_start, q_count);
+            auto x1b    = f_xq1_.segment(q_start, q_count);
+            auto x2b    = f_xq2_.segment(q_start, q_count);
+            auto wqb    = f_wq_.segment(q_start, q_count);
+            auto invT2b = f_invT2_.segment(q_start, q_count);
+            auto phib   = f_phi_.segment(q_start, q_count);
 
-            if (has_traj && update_time) 
+            T t_old = T(-1);
+
+            for (int row = 0; row < S; ++row)
             {
-                auto w = weights.row(row).transpose(); 
-                
-                // 1. Compute nodal displacements using the fast AVX2 GEMV
-                Eigen::Matrix<T, Eigen::Dynamic, 1> disp_x = modes_x * w;
-                Eigen::Matrix<T, Eigen::Dynamic, 1> disp_y = modes_y * w;
-                Eigen::Matrix<T, Eigen::Dynamic, 1> disp_z = modes_z * w;
+                const T tij = tv(row), kx = kxv(row), ky = kyv(row), kz = kzv(row);
+                const bool update_time = (tij != t_old);
 
-                // 2. Map from Node displacements to Quadrature Point displacements
-                // Matrix multiply: Projection Matrix (Q x N) * Nodal Disp (N x 3) = Quad Disp (Q x 3)
-                // This updates the quadrature point coordinates for the integration loop natively in C++.
-                f_dyn_xq0_ = f_xq0_ + (S_global_ * disp_x).array();
-                f_dyn_xq1_ = f_xq1_ + (S_global_ * disp_y).array();
-                f_dyn_xq2_ = f_xq2_ + (S_global_ * disp_z).array();
-            }
-
-            s.setZero();
-            if (update_time) t_old = tij;
-
-            // Iterate through every single quadrature point globally
-            for (int q_start = 0; q_start < total_q_; q_start += BLOCK_SIZE)
-            {
-                const int q_count = std::min(BLOCK_SIZE, total_q_ - q_start);
-                
-                // Key difference here: T2 decay is pre-multiplied by the quadrature weight (f_wq_)
                 if (update_time) {
-                    f_mag.segment(q_start, q_count) = f_wq_.segment(q_start, q_count) * (-tij * f_invT2_.segment(q_start, q_count)).exp();
-                    f_po.segment(q_start, q_count)  = f_phi_.segment(q_start, q_count) * tij;
+                    if (has_traj) {
+                        auto w = weights.row(row).transpose();
+                        dx0.head(q_count) = x0b + (mq_x_.middleRows(q_start, q_count) * w).array();
+                        dx1.head(q_count) = x1b + (mq_y_.middleRows(q_start, q_count) * w).array();
+                        dx2.head(q_count) = x2b + (mq_z_.middleRows(q_start, q_count) * w).array();
+                    }
+                    // T2 decay pre-multiplied by the quadrature weight
+                    f_mag.head(q_count) = wqb * (-tij * invT2b).exp();
+                    f_po.head(q_count)  = phib * tij;
+                    t_old = tij;
                 }
 
-                phase_block.head(q_count) = f_po.segment(q_start, q_count) 
-                                            - kx * x0_ref.segment(q_start, q_count) 
-                                            - ky * x1_ref.segment(q_start, q_count) 
-                                            - kz * x2_ref.segment(q_start, q_count);
+                if (has_traj) {
+                    phase_block.head(q_count) = f_po.head(q_count)
+                                                - kx * dx0.head(q_count)
+                                                - ky * dx1.head(q_count)
+                                                - kz * dx2.head(q_count);
+                } else {
+                    phase_block.head(q_count) = f_po.head(q_count)
+                                                - kx * x0b - ky * x1b - kz * x2b;
+                }
 
-                fourier_block.head(q_count).array().real() = f_mag.segment(q_start, q_count) * phase_block.head(q_count).cos();
-                fourier_block.head(q_count).array().imag() = f_mag.segment(q_start, q_count) * phase_block.head(q_count).sin();
+                fourier_block.head(q_count).array().real() = f_mag.head(q_count) * phase_block.head(q_count).cos();
+                fourier_block.head(q_count).array().imag() = f_mag.head(q_count) * phase_block.head(q_count).sin();
 
-                // Multiply by magnetization evaluated at quadrature points (f_Mxy_)
-                s.noalias() += fourier_block.head(q_count).transpose() * f_Mxy_.middleRows(q_start, q_count);
+                kspace_mat.row(row).noalias() +=
+                    fourier_block.head(q_count).transpose() * f_Mxy_.middleRows(q_start, q_count);
             }
-            
-            kspace_mat.row(row) = s;
         }
 
         return Eigen::TensorMap<Tensor4CR>(kspace_mat.data(), nb_meas, nb_lines, nb_kz, (uint)nv_);
@@ -523,10 +609,26 @@ private:
     
     // Magnetization vectors matrices
     Eigen::Matrix<C, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> f_M_Mxy_nodes_;
+    Eigen::Array<T, Eigen::Dynamic, 1> f_node_owned_;  ///< 1 for nodes this rank owns, 0 for duplicates
     Eigen::Matrix<C, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> f_Mxy_nodes_; 
-    Eigen::Matrix<C, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> f_Mxy_; 
+    Eigen::Matrix<C, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> f_Mxy_;
+    bool f_Mxy_dirty_ = false;   ///< f_Mxy_ is stale w.r.t. f_Mxy_nodes_ 
 };
 
+
+// Number of quadrature points Basix's default rule uses for a cell type and degree.
+//
+// Exposed because per-element quadrature cost drives load balance in the assembler
+// and no Python-side Basix is available. A hardcoded table would drift from Basix's
+// own rule selection, which varies with degree.
+inline int quadrature_npoints(const std::string& meshio_type, int degree)
+{
+    const FEInfo& fe_info = get_fe_info(meshio_type);
+    auto qw = basix::quadrature::make_quadrature<double>(
+        basix::quadrature::type::Default, fe_info.cell,
+        basix::polyset::type::standard, degree);
+    return static_cast<int>(qw[1].size());
+}
 
 // =============================================================================
 // PYBIND11 MODULE BINDINGS
@@ -535,6 +637,11 @@ private:
 PYBIND11_MODULE(MRIAssemble, m)
 {
     m.doc() = "Highly optimized MRI Finite Element Assembly Module";
+
+    m.def("quadrature_npoints", &quadrature_npoints,
+          py::arg("meshio_type"), py::arg("degree"),
+          "Number of quadrature points Basix's default rule uses for this cell type "
+          "and degree. Used to weight elements by their integration cost.");
 
     using T = float; // Matches the Python float32 arrays
     using Assembler = SignalAssembler<T>;
@@ -564,6 +671,11 @@ PYBIND11_MODULE(MRIAssemble, m)
         .def("update_full_magnetization", &Assembler::update_full_magnetization,
              py::arg("Mxy"))
 
+        .def("set_node_ownership", &Assembler::set_node_ownership,
+             py::arg("owned"),
+             "Per-node weight for the raw nodal sum: 1 on the rank that owns a node, "
+             "0 on the other ranks that merely touch it. Prevents signal_sum from "
+             "double counting interface nodes under MPI_SUM.")
         .def("update_nodal_magnetization", &Assembler::update_nodal_magnetization,
              py::arg("M"), py::arg("Mxy"),
              "Pre-computes the M * Mxy product for fast nodal Galerkin projection.")

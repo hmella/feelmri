@@ -22,6 +22,108 @@ from feelmri.MPIUtilities import MPI_print, MPI_rank
 from feelmri.PODHelper import tensordot_modes_weights
 
 
+def _snapshot_eigenspectrum(flat_sv: np.ndarray):
+    """Eigen-decompose the snapshot covariance, largest eigenvalue first.
+
+    Parameters
+    ----------
+    flat_sv : np.ndarray
+        Snapshot matrix of shape ``(P*C, T)``.
+
+    Returns
+    -------
+    tuple
+        ``(eigen_values, eigen_vectors)`` for the ``(T, T)`` covariance
+        ``flat_sv.T @ flat_sv``, sorted by descending eigenvalue.
+        Eigenvalues are clipped at zero: the covariance is positive
+        semi-definite, so any negative value is round-off and would
+        otherwise corrupt the energy sums.
+    """
+    covariance_matrix = np.dot(flat_sv.T, flat_sv)
+    eigen_values, eigen_vectors = np.linalg.eigh(covariance_matrix)
+
+    descending_sort_idx = np.argsort(eigen_values)[::-1]
+    eigen_values = np.clip(eigen_values[descending_sort_idx], 0.0, None)
+    eigen_vectors = eigen_vectors[:, descending_sort_idx]
+
+    return eigen_values, eigen_vectors
+
+
+def _cumulative_energy(eigen_values: np.ndarray) -> np.ndarray:
+    """Cumulative fraction of the total energy, one entry per mode."""
+    total = float(eigen_values.sum())
+    if total <= 0.0:
+        raise ValueError(
+            "Snapshot data carries no energy (all eigenvalues are zero); "
+            "the POD is undefined.")
+    return np.cumsum(eigen_values) / total
+
+
+def _modes_for_energy(cumulative_energy: np.ndarray, target: float) -> int:
+    """Smallest mode count whose cumulative energy reaches ``target``."""
+    target = float(target)
+    if not 0.0 < target <= 1.0:
+        raise ValueError(f"target must lie in (0, 1], got {target}.")
+    # searchsorted returns the first index with cum >= target; the clamp
+    # covers target == 1.0 landing just past the end on round-off.
+    idx = int(np.searchsorted(cumulative_energy, target))
+    return min(idx + 1, int(cumulative_energy.size))
+
+
+def _frame_errors(eigen_values: np.ndarray, eigen_vectors: np.ndarray,
+                  n_modes: int) -> np.ndarray:
+    """Relative truncation error of each snapshot, from the spectrum alone.
+
+    Writing ``X = sum_i sigma_i u_i v_i^T`` with orthonormal ``u_i``, the
+    residual of snapshot ``t`` after keeping ``n`` modes is
+
+    .. math::
+
+       \\|x_t - x_t^{(n)}\\|^2 = \\sum_{i > n} \\lambda_i\\, V_{ti}^2,
+       \\qquad
+       \\|x_t\\|^2 = \\sum_i \\lambda_i\\, V_{ti}^2
+
+    so the whole per-snapshot curve follows from the ``(T,)`` eigenvalues
+    and the ``(T, T)`` eigenvectors, with no reconstruction and no access
+    to the snapshot data.
+
+    Parameters
+    ----------
+    eigen_values : np.ndarray
+        Descending spectrum of shape ``(T,)``.
+    eigen_vectors : np.ndarray
+        Matching eigenvectors of shape ``(T, T)``, columns ordered to
+        match ``eigen_values``.
+    n_modes : int
+        Number of retained modes.
+
+    Returns
+    -------
+    np.ndarray
+        Relative error per snapshot, shape ``(T,)``, each entry in
+        ``[0, 1]``. Snapshots with zero norm report 0.
+    """
+    # (T, T): energy that mode i contributes to snapshot t.
+    per_mode = eigen_values[np.newaxis, :] * eigen_vectors ** 2
+
+    total = per_mode.sum(axis=1)
+    dropped = per_mode[:, n_modes:].sum(axis=1)
+
+    # A snapshot with no signal must not divide. The test has to be
+    # relative: an exactly-zero frame still leaves round-off in `total`
+    # after the eigendecomposition, and dividing two round-off quantities
+    # returns noise rather than the 0 the frame deserves.
+    errors = np.zeros_like(total)
+    floor = total.size * np.finfo(np.float64).eps * total.max(initial=0.0)
+    valid = total > floor
+
+    ratio = np.zeros_like(total)
+    ratio[valid] = dropped[valid] / total[valid]
+    errors[valid] = np.sqrt(np.clip(ratio[valid], 0.0, 1.0))
+
+    return errors
+
+
 class RespiratoryMotion:
     """Scalar respiratory motion projected onto a spatial direction.
 
@@ -208,7 +310,10 @@ class POD:
         Index array mapping global node indices to the local MPI partition.
         If given, modes are extracted for the local partition only.
     n_modes : int, optional
-        Number of POD modes to retain. Default is 5.
+        Number of POD modes to retain. Default is 5. Reduced automatically,
+        with a warning, when it exceeds the numerical rank of ``data``.
+        Use :func:`modes_for_energy` to pick this from the data instead of
+        by hand.
     is_periodic : bool, optional
         If True, the trajectory is treated as periodic with period
         ``times[-1]``. Default is False.
@@ -306,6 +411,13 @@ class POD:
             ``(modes, weights)`` where ``modes`` has shape
             ``(P_local, C, n_modes)`` and ``weights`` has shape
             ``(T, n_modes)``.
+
+        Notes
+        -----
+        Also sets ``self.eigenvalues`` (the full ``(T,)`` spectrum),
+        ``self.energy`` (its cumulative fraction) and ``self.n_modes_max``.
+        ``self.n_modes`` is reduced in place when it exceeds the numerical
+        rank of the snapshots.
         """
         start = time.perf_counter()
         MPI_print(f"[POD] Calculating POD with {self.n_modes} modes and {self.interpolation_method} interpolation")
@@ -318,16 +430,35 @@ class POD:
             sv_temporal_mean = np.mean(flat_sv, axis=1, keepdims=True)
             flat_sv -= sv_temporal_mean
 
-        # Calculate covariance matrix: (P*ch, t) @ (t, P*ch) -> (P*ch, P*ch)
-        covariance_matrix = np.dot(flat_sv.T, flat_sv)
+        # Full spectrum of the (t, t) covariance matrix. Its eigenvalues are
+        # the squared singular values of flat_sv, so partial sums give the
+        # retained energy, and t is the largest mode count the data supports.
+        eigen_values, eigen_vectors = _snapshot_eigenspectrum(flat_sv)
+        self.eigenvalues = eigen_values
+        self.energy = _cumulative_energy(eigen_values)
+        self.n_modes_max = n_tsteps
+        # (T, T) and therefore cheap to keep; it is what lets frame_errors
+        # report the per-snapshot breakdown without a reconstruction.
+        self._eigenvectors = eigen_vectors
 
-        # Calculate eigenvalues and eigenvectors
-        eigen_values, eigen_vectors = np.linalg.eigh(covariance_matrix)
+        # Modes beyond the numerical rank would be scaled by 1/sqrt(~0) below
+        # and come out as inf/nan without a word, so clamp instead.
+        tol = eigen_values[0] * n_tsteps * np.finfo(np.float64).eps
+        rank = int(np.count_nonzero(eigen_values > tol))
+        if self.n_modes > rank:
+            if rank < n_tsteps:
+                reason = (f"the snapshot rank is {rank} (eigenvalue {rank + 1} is "
+                          f"{eigen_values[rank] / eigen_values[0]:.1e} of the "
+                          f"leading one)")
+            else:
+                reason = f"the data only has {n_tsteps} time steps"
+            MPI_print(f"[POD] Requested {self.n_modes} modes but {reason}. "
+                      f"Clamping to {rank}.")
+            self.n_modes = rank
 
-        # Sort eigenvalues and eigenvectors in descending order:
-        descending_sort_idx = np.argsort(eigen_values)[::-1][0:self.n_modes]
-        eigen_values = eigen_values[descending_sort_idx]
-        eigen_vectors = eigen_vectors[:, descending_sort_idx]
+        # Keep the leading n_modes
+        eigen_values = eigen_values[0:self.n_modes]
+        eigen_vectors = eigen_vectors[:, 0:self.n_modes]
 
         # Scale eigen-vectors with inverse sqrt of eigen-value:
         modes_cut = eigen_vectors / np.sqrt(eigen_values).reshape(1, -1)
@@ -421,6 +552,108 @@ class POD:
         t_eff = self._fold_time(t_array + self.timeshift)
         # scipy's PPoly natively returns (N_times, M_modes) when evaluated with an array
         return self._pp_batch(t_eff).astype(np.float32)
+
+    def energy_ratio(self, n_modes: int = None) -> float:
+        """Fraction of the snapshot energy retained by the leading modes.
+
+        Energy is a *squared* quantity, so this reads more reassuring than
+        it is: ``energy_ratio() == 0.99`` is a 10% error on the field, not
+        1%. Use :meth:`reconstruction_error` for the error itself and
+        :meth:`frame_errors` for its distribution over time.
+
+        Parameters
+        ----------
+        n_modes : int, optional
+            Mode count to evaluate. Defaults to the number this object
+            actually keeps.
+
+        Returns
+        -------
+        float
+            Value in ``(0, 1]``. Its complement is the relative squared
+            reconstruction error of the truncated field.
+        """
+        n = self.n_modes if n_modes is None else int(n_modes)
+        if n < 1 or n > self.n_modes_max:
+            raise ValueError(
+                f"n_modes must lie in [1, {self.n_modes_max}], got {n}.")
+        return float(self.energy[n - 1])
+
+    def cumulative_energy(self) -> np.ndarray:
+        """Retained-energy curve over every available mode count.
+
+        Returns
+        -------
+        np.ndarray
+            Array of shape ``(T,)``; entry ``i`` is the energy kept by the
+            leading ``i + 1`` modes, and the last entry is 1.
+        """
+        return self.energy.copy()
+
+    def modes_for_energy(self, target: float) -> int:
+        """Smallest mode count reaching ``target`` of the total energy.
+
+        Parameters
+        ----------
+        target : float
+            Desired energy fraction in ``(0, 1]``.
+
+        Returns
+        -------
+        int
+            Mode count, never larger than ``self.n_modes_max``.
+        """
+        return _modes_for_energy(self.energy, target)
+
+    def reconstruction_error(self, n_modes: int = None) -> float:
+        """Relative L2 error of the truncated field.
+
+        This is ``sqrt(1 - energy_ratio(n))``, i.e.
+        ``||X - X_n||_F / ||X||_F``. Because energy is squared, the error
+        is much larger than the energy shortfall suggests: 99% energy is a
+        10% error, 99.9% is 3%.
+
+        Parameters
+        ----------
+        n_modes : int, optional
+            Mode count to evaluate. Defaults to the number this object
+            actually keeps.
+
+        Returns
+        -------
+        float
+            Value in ``[0, 1)``.
+        """
+        return float(np.sqrt(max(0.0, 1.0 - self.energy_ratio(n_modes))))
+
+    def frame_errors(self, n_modes: int = None) -> np.ndarray:
+        """Relative truncation error of each individual snapshot.
+
+        :meth:`reconstruction_error` is an energy-weighted average over
+        time, so it is dominated by the high-amplitude snapshots. Frames
+        carrying little energy can be reconstructed far worse than the
+        global figure implies — on pulsatile flow, a truncation that holds
+        systole to a few percent routinely leaves diastole at tens of
+        percent. Check this curve before trusting a mode count.
+
+        Parameters
+        ----------
+        n_modes : int, optional
+            Mode count to evaluate. Defaults to the number this object
+            actually keeps.
+
+        Returns
+        -------
+        np.ndarray
+            Relative error per snapshot time, shape ``(T,)``. Entries lie
+            in ``[0, 1]``; an all-zero snapshot reports 0.
+        """
+        n = self.n_modes if n_modes is None else int(n_modes)
+        if n < 1 or n > self.n_modes_max:
+            raise ValueError(
+                f"n_modes must lie in [1, {self.n_modes_max}], got {n}.")
+        return _frame_errors(self.eigenvalues, self._eigenvectors, n)
+
 
 class PODVelocity(POD):
     """POD trajectory for velocity fields.
@@ -532,3 +765,206 @@ class PODSum:
         w2 = self.pod2.get_weights(t_array)
         # Combine along the 'modes' axis
         return np.concatenate([w1, w2], axis=1)
+
+
+def pod_energy_spectrum(data: np.ndarray, *, remove_mean: bool = False):
+    """Energy spectrum of a snapshot array, without building a POD.
+
+    Decomposes the snapshots the same way :meth:`POD.calculate_pod` does
+    and reports how much of the field each mode count captures, so
+    ``n_modes`` can be sized before the POD is constructed. The
+    eigenvalues are the squared singular values of the snapshot matrix,
+    hence the retained energy for ``n`` modes is
+
+    .. math::
+
+       E(n) \\;=\\; \\frac{\\sum_{i \\le n} \\lambda_i}
+                          {\\sum_{i \\le T} \\lambda_i}
+             \\;=\\; 1 - \\frac{\\|X - X_n\\|_F^2}{\\|X\\|_F^2}
+
+    so ``1 - E(n)`` is the relative squared reconstruction error of the
+    truncated field. Mind the square: ``E = 0.99`` is a 10% error on the
+    field, not 1%. :func:`pod_frame_errors` gives the error directly, and
+    per snapshot.
+
+    Parameters
+    ----------
+    data : np.ndarray
+        Snapshots of shape ``(P, C, T)``. Any shape works as long as the
+        last axis is time; it is flattened to ``(-1, T)``.
+    remove_mean : bool, optional
+        Subtract the temporal mean before decomposing. Default False,
+        matching :class:`POD`, which decomposes the raw field so the mean
+        counts toward the energy.
+
+    Returns
+    -------
+    tuple of np.ndarray
+        ``(eigenvalues, cumulative_energy)``, both of shape ``(T,)``.
+        Eigenvalues descend; the cumulative curve ends at 1.
+
+    See Also
+    --------
+    modes_for_energy : Invert the curve for a target energy.
+    POD.energy_ratio : Same quantity from an existing POD.
+    """
+    data = np.asarray(data)
+    n_tsteps = data.shape[-1]
+    # Copy: remove_mean would otherwise write through the reshape view
+    # into the caller's array.
+    flat_sv = data.reshape(-1, n_tsteps).astype(np.float64, copy=True)
+
+    if remove_mean:
+        flat_sv -= np.mean(flat_sv, axis=1, keepdims=True)
+
+    eigen_values, _ = _snapshot_eigenspectrum(flat_sv)
+
+    return eigen_values, _cumulative_energy(eigen_values)
+
+
+def modes_for_energy(data: np.ndarray, target: float, *,
+                     remove_mean: bool = False) -> int:
+    """Number of POD modes needed to retain ``target`` of the energy.
+
+    Energy is squared, so a ``target`` of 0.99 leaves a 10% error on the
+    field. Follow up with :func:`pod_frame_errors` to see how that error
+    is spread over time before settling on the count.
+
+    Parameters
+    ----------
+    data : np.ndarray
+        Snapshots of shape ``(P, C, T)``.
+    target : float
+        Desired energy fraction in ``(0, 1]``, e.g. ``0.99``.
+    remove_mean : bool, optional
+        Forwarded to :func:`pod_energy_spectrum`.
+
+    Returns
+    -------
+    int
+        Mode count to pass as ``POD(n_modes=...)``, never larger than the
+        number of time steps ``T``.
+    """
+    _, cumulative = pod_energy_spectrum(data, remove_mean=remove_mean)
+    return _modes_for_energy(cumulative, target)
+
+
+def pod_frame_errors(data: np.ndarray, n_modes: int, *,
+                     remove_mean: bool = False) -> np.ndarray:
+    """Per-snapshot truncation error, without building a POD.
+
+    The companion to :func:`modes_for_energy`: once a mode count is on the
+    table, this shows where the resulting error actually lands. A single
+    global figure is an energy-weighted average and hides low-amplitude
+    phases, which are often the ones a truncation sacrifices.
+
+    Parameters
+    ----------
+    data : np.ndarray
+        Snapshots of shape ``(P, C, T)``.
+    n_modes : int
+        Mode count to evaluate.
+    remove_mean : bool, optional
+        Subtract the temporal mean first. Default False, matching
+        :class:`POD`.
+
+    Returns
+    -------
+    np.ndarray
+        Relative error per snapshot, shape ``(T,)``.
+
+    See Also
+    --------
+    POD.frame_errors : Same curve from an existing POD.
+    """
+    data = np.asarray(data)
+    n_tsteps = data.shape[-1]
+
+    n = int(n_modes)
+    if n < 1 or n > n_tsteps:
+        raise ValueError(f"n_modes must lie in [1, {n_tsteps}], got {n}.")
+
+    flat_sv = data.reshape(-1, n_tsteps).astype(np.float64, copy=True)
+    if remove_mean:
+        flat_sv -= np.mean(flat_sv, axis=1, keepdims=True)
+
+    eigen_values, eigen_vectors = _snapshot_eigenspectrum(flat_sv)
+
+    return _frame_errors(eigen_values, eigen_vectors, n)
+
+
+def plot_pod_energy(source, *, target: float = 0.99, ax=None, show: bool = True,
+                    export_to=None, title: str = None):
+    """Plot the POD eigenvalue scree and the cumulative energy curve.
+
+    Draws the normalised eigenvalues on a log axis and the cumulative
+    retained energy on a twinned axis, with the ``target`` level and the
+    mode count that first reaches it marked.
+
+    Parameters
+    ----------
+    source : POD or np.ndarray
+        An existing :class:`POD` (its stored spectrum is reused, nothing
+        is recomputed) or a raw ``(P, C, T)`` snapshot array.
+    target : float, optional
+        Energy fraction to mark. Default 0.99.
+    ax : matplotlib axis, optional
+        Axes to draw into. A fresh figure is created when None.
+    show : bool, optional
+        Call ``plt.show()`` after rendering. Default True.
+    export_to : str or path-like, optional
+        Save the figure to this path.
+    title : str, optional
+        Axes title.
+
+    Returns
+    -------
+    matplotlib axis or None
+        The axis drawn into, or None on non-root MPI ranks.
+    """
+    if MPI_rank != 0:
+        return None
+
+    # Local import: this is the only plotting entry point in the module,
+    # and importing pyplot at module scope would cost every MPI rank.
+    import matplotlib.pyplot as plt
+
+    if isinstance(source, POD):
+        eigen_values = source.eigenvalues
+        cumulative = source.energy
+    else:
+        eigen_values, cumulative = pod_energy_spectrum(source)
+
+    modes = np.arange(1, eigen_values.size + 1)
+    n_target = _modes_for_energy(cumulative, target)
+
+    if ax is None:
+        _, ax = plt.subplots(figsize=(7.0, 4.5))
+
+    ax.semilogy(modes, eigen_values / eigen_values[0], marker='o',
+                markersize=4, color='steelblue', label='eigenvalue')
+    ax.set_xlabel('POD mode')
+    ax.set_ylabel('normalised eigenvalue', color='steelblue')
+    ax.tick_params(axis='y', labelcolor='steelblue')
+
+    twin = ax.twinx()
+    twin.plot(modes, 100.0 * cumulative, marker='s', markersize=4,
+              color='indianred', label='cumulative energy')
+    twin.axhline(100.0 * target, ls='--', lw=1.0, color='grey')
+    twin.set_ylabel('retained energy [%]', color='indianred')
+    twin.tick_params(axis='y', labelcolor='indianred')
+    twin.set_ylim(0.0, 102.0)
+
+    ax.axvline(n_target, ls=':', lw=1.0, color='grey')
+    ax.annotate(f'{n_target} modes for {100.0 * target:.4g}%',
+                xy=(n_target, 1.0), xycoords=('data', 'axes fraction'),
+                xytext=(4, -12), textcoords='offset points', fontsize=9)
+
+    ax.set_title(title if title is not None else 'POD energy retention')
+
+    if export_to is not None:
+        ax.figure.savefig(export_to, bbox_inches='tight')
+    if show:
+        plt.show()
+
+    return ax

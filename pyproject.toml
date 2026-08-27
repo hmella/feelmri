@@ -57,8 +57,8 @@ pulseq = [
 
 [tool.scikit-build]
 wheel.packages = ["python/feelmri"]
-cmake.minimum-version = "3.18"
-cmake.verbose = true
+cmake.version = ">=3.18"
+build.verbose = true
 build-dir = "build"
 ninja.make-fallback = true
 sdist.include = [
