@@ -41,7 +41,16 @@ from feelmri.PulseqAdapter import (
 )
 
 # Motion models
-from feelmri.Motion import POD, PODSum, PODVelocity, RespiratoryMotion
+from feelmri.Motion import (
+    POD,
+    PODSum,
+    PODVelocity,
+    RespiratoryMotion,
+    modes_for_energy,
+    plot_pod_energy,
+    pod_energy_spectrum,
+    pod_frame_errors,
+)
 
 # Image reconstruction
 from feelmri.Recon import (
@@ -94,6 +103,8 @@ __all__ = [
     "as_signal_inputs", "kspace_to_signal_inputs",
     # Motion
     "RespiratoryMotion", "POD", "PODVelocity", "PODSum",
+    "pod_energy_spectrum", "modes_for_energy", "pod_frame_errors",
+    "plot_pod_energy",
     # Reconstruction
     "CartesianRecon", "reconstruct_nufft",
     "dcf_pipe_menon", "dcf_radial_stack", "dcf_local_speed_readout",

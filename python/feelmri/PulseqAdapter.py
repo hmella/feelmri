@@ -1732,15 +1732,28 @@ class PulseqImport:
   the user's ``make_label(label='SET', type='SET', value=A)`` tags).
   Use :meth:`filter_blocks` to query block indices that match a
   particular label state.
+
+  ``feelmri_sim_seq`` is a parallel :class:`feelmriSequence` with the
+  same block count and indices as ``feelmri_seq``, except that every
+  block whose running ``SET`` label value matches the
+  ``readout_set_values`` argument to :func:`import_pulseq` is replaced
+  by an empty :class:`SequenceBlock` of identical duration. Storage
+  flags (``store_magnetization=True``) on non-readout blocks are
+  preserved verbatim, so :attr:`ReadoutWindow.m_storage_idx` columns
+  remain valid against ``feelmri_sim_seq``. The list
+  ``readout_sim_block_indices`` enumerates which block indices were
+  collapsed (one entry per replaced block).
   """
   feelmri_seq: feelmriSequence
   pulseq_seq: PulseqSequence
+  feelmri_sim_seq: feelmriSequence
   readouts: List[ReadoutWindow]
   prep_block_indices: List[int]
   adc_block_indices: List[int]
   prep_storage_blocks: List[int]
   prep_storage_indices: List[int]
   block_labels: List[Dict[str, int]]
+  readout_sim_block_indices: List[int]
 
   def filter_blocks(self, **labels: int) -> List[int]:
     """Return block indices whose running LABELSET/LABELINC state matches
@@ -1876,10 +1889,35 @@ def _identify_readout_groups(pulseq_seq: PulseqSequence
   return out
 
 
-def import_pulseq(filename) -> PulseqImport:
+def import_pulseq(
+    filename,
+    *,
+    readout_set_values: Tuple[int, ...] = (3,),
+    placeholder_dt: Quantity = Quantity(1.0, 'ms'),
+) -> PulseqImport:
   """Parse a ``.seq`` file and return a partitioned view ready for the
   dual-path workflow (``BlochSolver`` for prep + ``Phantom.mri_signal``
   for readouts).
+
+  Parameters
+  ----------
+  filename : str or Path
+      Path to a Pulseq ``.seq`` file.
+  readout_set_values : tuple of int, optional
+      ``SET`` label values that mark readout-train blocks. Every block
+      whose running ``LABELSET`` state has ``SET`` in this set is
+      replaced by an empty delay of identical duration when building
+      :attr:`PulseqImport.feelmri_sim_seq`. The default ``(3,)``
+      matches the writer convention used by
+      ``examples/pulseq_write_epi_tagging.py`` (prep=0/1, excitation=2,
+      readout=3, spoiler=100). Pass ``()`` to disable substitution so
+      ``feelmri_sim_seq`` is identical to ``feelmri_seq``.
+  placeholder_dt : pint.Quantity, optional
+      Time-step granularity for the replacement delay blocks. Controls
+      the block's internal ``discrete_times`` grid. Default ``1 ms`` is
+      fine enough for T1/T2 relaxation and off-resonance phase
+      accumulation across a typical EPI readout train without paying
+      for sub-millisecond sampling that has no event content.
 
   See :class:`PulseqImport` for the returned object's shape.
   """
@@ -1994,15 +2032,58 @@ def import_pulseq(filename) -> PulseqImport:
     prep_storage_blocks.append(target)
     prep_storage_indices.append(marked_in_order.index(target))
 
+  # ---------------------------------------------------------------------------
+  # Simulation skeleton sequence
+  # ---------------------------------------------------------------------------
+  # Build a parallel Sequence with the same block count and indices as
+  # feelmri_seq, but with every readout-tagged block replaced by an
+  # empty delay of identical duration. Two integrity invariants:
+  #
+  #  1. Index parity with feelmri_seq (and pulseq_seq) so the
+  #     ReadoutWindow / prep_storage_blocks indices stay valid.
+  #  2. Storage flags carry through SequenceBlock.copy() inside
+  #     Sequence.add_block, so BlochSolver.solve() returns Mxy/Mz
+  #     columns at the same anchor points whether the runner uses
+  #     feelmri_seq or feelmri_sim_seq.
+  #
+  # Readout-tagged blocks never carry storage flags by construction
+  # (the anchor is the preceding RF, not the ADC), so dropping their
+  # event content is safe with respect to the snapshot machinery.
+  readout_set = set(int(v) for v in readout_set_values)
+  feelmri_sim_seq = feelmriSequence()
+  readout_sim_block_indices: List[int] = []
+  for i, blk in enumerate(feelmri_seq.blocks):
+    set_value = block_labels[i].get('SET') if i < len(block_labels) else None
+    is_readout = set_value is not None and int(set_value) in readout_set
+    if is_readout:
+      dur_ms = float(blk.dur.m_as('ms'))
+      if dur_ms > 0.0:
+        feelmri_sim_seq.add_block(Quantity(dur_ms, 'ms'), dt=placeholder_dt)
+      else:
+        # Zero-duration readout block: preserve index alignment by
+        # appending a fresh empty SequenceBlock directly (the
+        # add_block(Quantity) path silently drops zero-duration input).
+        feelmri_sim_seq.add_block(SequenceBlock(
+          dur=Quantity(0.0, 'ms'),
+          dt=placeholder_dt,
+          empty=True,
+          store_magnetization=False,
+        ))
+      readout_sim_block_indices.append(i)
+    else:
+      feelmri_sim_seq.add_block(blk)
+
   return PulseqImport(
     feelmri_seq=feelmri_seq,
     pulseq_seq=pulseq_seq,
+    feelmri_sim_seq=feelmri_sim_seq,
     readouts=readouts,
     prep_block_indices=prep_block_indices,
     adc_block_indices=adc_block_indices,
     prep_storage_blocks=prep_storage_blocks,
     prep_storage_indices=prep_storage_indices,
     block_labels=block_labels,
+    readout_sim_block_indices=readout_sim_block_indices,
   )
 
 

@@ -23,7 +23,7 @@ except ImportError:
 import numpy as np
 from pint import Quantity as Q_
 
-from feelmri.Bloch import BlochSolver, Sequence, SequenceBlock
+from feelmri.Bloch import BlochSolver, Sequence
 from feelmri.IO import XDMFFile
 from feelmri.Motion import POD
 from feelmri.MPIUtilities import MPI_print, MPI_rank, gather_data
@@ -111,70 +111,124 @@ if __name__ == '__main__':
   Nb_frames = np.floor(u_times.m_as('ms').max()/parameters.Imaging.TimeSpacing.m_as('ms')).astype(np.int32) if not FAST_MODE else 1
   Mxy_spamm = np.zeros((phantom.local_nodes.shape[0], Nb_frames, 1), dtype=np.complex64)
 
-  # Import the Pulseq sequence and extract the k-space trajectory
+  # Import the Pulseq sequence and extract the k-space trajectory.
+  # `readout_set_values=(3,)` instructs the adapter to collapse every
+  # block carrying SET=3 (the writer convention for the EPI readout
+  # train) into an empty delay of identical duration on
+  # `imp.feelmri_sim_seq`. Block indices and storage flags survive the
+  # substitution, so SET-based lookups stay valid on the simulation
+  # sequence.
   seq_path = script_path / 'pulseq/epi_pypulseq.seq'
-  imp  = import_pulseq(seq_path)
+  imp  = import_pulseq(seq_path, readout_set_values=(3,))
   traj = kspace_trajectory(imp.pulseq_seq)
+  sim  = imp.feelmri_sim_seq
 
   # Diagnostic: report which blocks each SET category covers.
   for s, name in [(0, 'prepx'), (1, 'prepy'), (100, 'spoiler'), (2, 'excitation'), (3, 'readout')]:
-    idx = imp.filter_blocks(SET=s)
     n = len(imp.filter_blocks(SET=s))
     MPI_print(f"  SET={s} ({name}): {n} block(s)")
 
+  # Block-index groups, sourced from the running LABELSET state.
+  prep_x_idx  = imp.filter_blocks(SET=0)
+  prep_y_idx  = imp.filter_blocks(SET=1)
+  excite_idx  = imp.filter_blocks(SET=2)
+  readout_idx = imp.filter_blocks(SET=3)
+  spoiler_idx = imp.filter_blocks(SET=100)
+
+  def _first_contiguous_group(indices):
+    """Return the longest run of consecutive integers at the start of
+    ``indices``. The writer emits one excitation + one rephaser as two
+    adjacent SET=2 blocks per slice; this picks slice 0's pair without
+    having to know ``n_slices`` at runtime."""
+    if not indices:
+      return []
+    out = [indices[0]]
+    for j in indices[1:]:
+      if j == out[-1] + 1:
+        out.append(j)
+      else:
+        break
+    return out
+
+  ex_group_idx    = _first_contiguous_group(excite_idx)
+  ro_group_idx    = _first_contiguous_group(readout_idx)
+  sp_template_idx = spoiler_idx[0] if spoiler_idx else None
+
+  def _block_total_dur(indices):
+    total = Q_(0.0, 'ms')
+    for j in indices:
+      total = total + sim.blocks[j].dur.to('ms')
+    return total
+
+  ex_dur = _block_total_dur(ex_group_idx)
+  ro_dur = _block_total_dur(ro_group_idx)
+  sp_dur = sim.blocks[sp_template_idx].dur.to('ms') if sp_template_idx is not None else Q_(0.0, 'ms')
+
   # Create sequence object
-  seq = Sequence()
+  seq    = Sequence()
   dt_seq = Q_(1e-2, 'ms')  # Time step for sequence blocks (10 us)
 
-  # Excitation block
-  tmp1 = imp.feelmri_seq.blocks[imp.filter_blocks(SET=2)[0]]
-  tmp2 = imp.feelmri_seq.blocks[imp.filter_blocks(SET=2)[1]]
-  ex = SequenceBlock(gradients=tmp1.S_gradients+tmp2.S_gradients,
-                     rf_pulses=tmp1.rf_pulses, 
-                     store_magnetization=True,
-                     dt=dt_seq)
+  def _copy_clean(idx):
+    """Deep-copy a sim-seq block and clear any auto-set storage flag.
+    Storage flags are added explicitly by the runner where they matter
+    (one snapshot per imaging frame), so any flag stamped by the
+    adapter on prep / readout-anchor blocks is dropped here."""
+    b = sim.blocks[idx].copy()
+    b.store_magnetization = False
+    return b
 
-  # Readout block
-  ro_grads = []
-  for i in imp.filter_blocks(SET=3):
-    ro_grads += imp.feelmri_seq.blocks[i].gradients
-  ro = SequenceBlock(gradients=ro_grads)
+  def _spoiler_copy():
+    """Spoiler block copy with the multi-isochromat dephasing path
+    enabled (`_spoiler=True` triggers ``BlochSolver``'s isochromat
+    expansion). All SET=100 blocks in the writer are built from the
+    same gradient events, so the first one suffices as a template."""
+    if sp_template_idx is None:
+      return None
+    b = _copy_clean(sp_template_idx)
+    b._spoiler = True
+    return b
 
-  # Spoiler block
-  spoiler = imp.feelmri_seq.blocks[imp.filter_blocks(SET=100)[0]]
-  spoiler._spoiler = True
-
-  # Create dummy block to reach steady state
-  dummy = ex.copy()
-  dummy.store_magnetization = False
-
-  # Add dummy blocks to the sequence to reach steady state
-  time_spacing = (parameters.Imaging.TimeSpacing - ex.dur - ro.dur - spoiler.dur).to('ms')
+  # Time spacing between frames, computed from sim-seq block durations.
+  time_spacing = (parameters.Imaging.TimeSpacing - ex_dur - ro_dur - sp_dur).to('ms')
   print("Time spacing between frames: {:.2f} ms".format(time_spacing.m_as('ms')))
-  for i in range(dummy_pulses):
-    seq.add_block(dummy)
-    seq.add_block(ro.dur.to('ms'), dt=Q_(1, 'ms'))
-    seq.add_block(spoiler.dur.to('ms'), dt=dt_seq)
-    seq.add_block(time_spacing, dt=Q_(1, 'ms'))
-    # seq.plot(figsize=(4, 6), tight_layout=True)
 
-  # Add and additional block to synchronize the sequence with the cardiac cycle
+  # Dummy steady-state pulses: real excitation, then duration-only
+  # placeholders for readout and spoiler. This mirrors the original
+  # runner's performance shortcut (no need to evolve the spoiler or
+  # readout physics during steady-state convergence).
+  for _ in range(dummy_pulses):
+    for j in ex_group_idx:
+      seq.add_block(_copy_clean(j), dt=dt_seq)
+    seq.add_block(ro_dur, dt=Q_(1, 'ms'))
+    seq.add_block(sp_dur, dt=dt_seq)
+    seq.add_block(time_spacing, dt=Q_(1, 'ms'))
+
+  # Sync the sequence to the cardiac-cycle boundary.
   seq.add_block(u_times[-1] - seq.blocks[-1].time_extent[1] % u_times[-1], dt=Q_(1, 'ms'))
 
-  # Build sequence by concatenating blocks from the imported Pulseq sequence, using the SET label to identify the block categories. The time spacing between frames is set to match the SPAMM time spacing in the original Pulseq sequence.
-  # Tagging prepulses
-  [seq.add_block(imp.feelmri_seq.blocks[i], dt=dt_seq) for i in imp.filter_blocks(SET=0)]
-  seq.add_block(spoiler, dt=dt_seq) # Spoiler after prepulses
-  [seq.add_block(imp.feelmri_seq.blocks[i], dt=dt_seq) for i in imp.filter_blocks(SET=1)]
-  seq.add_block(spoiler, dt=dt_seq) # Spoiler after prepulses
+  # Tagging prepulses (X then Y) each followed by a spoiler. Prep
+  # blocks come straight from the simulation skeleton; they carry no
+  # readout content.
+  for j in prep_x_idx:
+    seq.add_block(_copy_clean(j), dt=dt_seq)
+  seq.add_block(_spoiler_copy(), dt=dt_seq)
+  for j in prep_y_idx:
+    seq.add_block(_copy_clean(j), dt=dt_seq)
+  seq.add_block(_spoiler_copy(), dt=dt_seq)
 
-  # Add imaging blocks to the sequence
+  # Imaging frames: real excitation (snapshot Mxy at the end of the
+  # excitation group), then readout-as-delay (already collapsed on
+  # `sim`), then real spoiler with multi-isochromat dephasing, then
+  # the per-frame timing gap.
   for fr in range(Nb_frames):
-    seq.add_block(ex, dt=dt_seq)
-    seq.add_block(ro.dur.to('ms'), dt=Q_(1, 'ms'))
-    seq.add_block(spoiler, dt=dt_seq)
-    # seq.plot(blocks=slice(-4, None), figsize=(4, 6), tight_layout=True)
-    seq.add_block(time_spacing, dt=Q_(1, 'ms'))  # Time spacing between frames
+    ex_blks = [_copy_clean(j) for j in ex_group_idx]
+    if ex_blks:
+      ex_blks[-1].store_magnetization = True
+    for b in ex_blks:
+      seq.add_block(b, dt=dt_seq)
+    seq.add_block(ro_dur, dt=Q_(1, 'ms'))
+    seq.add_block(_spoiler_copy(), dt=dt_seq)
+    seq.add_block(time_spacing, dt=Q_(1, 'ms'))
 
   # Bloch solver.
   # Note: perfect_spoiling=False is required here. The script marks

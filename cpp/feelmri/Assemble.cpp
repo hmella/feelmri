@@ -187,6 +187,9 @@ Eigen::SparseMatrix<T> basixMassAssemble(
     const int nb_nodes   = nodes.rows();
     const int nb_nodes_e = elems.cols();
 
+    // Reorder to Basix DOF order; used for both element geometry and triplet indices.
+    const Eigen::MatrixXi elems_b = permute_meshio_to_basix(elems, meshio_type);
+
     // Basix setup
     const auto fe_info = get_fe_info(meshio_type);
     const auto variant = basix::element::lagrange_variant::equispaced;
@@ -228,7 +231,7 @@ Eigen::SparseMatrix<T> basixMassAssemble(
 
     for (int e = 0; e < nb_elems; ++e)
     {
-        const auto elem = elems.row(e);
+        const auto elem = elems_b.row(e);
 
         for (int i = 0; i < nb_nodes_e; ++i)
             elem_nodes.row(i) = nodes.row(elem(i));

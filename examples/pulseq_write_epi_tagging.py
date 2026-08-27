@@ -4,8 +4,8 @@ Demo low-performance EPI sequence without ramp-sampling.
 
 import sys
 
-import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
 
 try:
   import pypulseq as pp
@@ -21,10 +21,11 @@ except ImportError:
 
 from pathlib import Path
 
-from feelmri.MRObjects import Gradient, Scanner
 from feelmri.MRImaging import PositionEncoding
+from feelmri.MRObjects import Gradient, Scanner
 from feelmri.Parameters import ParameterHandler, PVSMParser
 from pint import Quantity as Q_
+
 
 def main(
     plot: bool = False,

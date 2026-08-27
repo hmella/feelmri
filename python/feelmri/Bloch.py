@@ -526,6 +526,10 @@ class BlochSolver:
         self.sequence = sequence
         self.scanner = scanner
         self.phantom = phantom
+        # The solver allocates per-node state sized by this partition. Mark the
+        # partition in use so a later repartition raises instead of leaving the
+        # solver inconsistent.
+        phantom._partition_bound = True
         self.M0 = M0
         self.T1 = Quantity(T1.m * ones, T1.units)
         self.T2 = Quantity(T2.m * ones, T2.units)
@@ -551,6 +555,41 @@ class BlochSolver:
         # Wall-clock cumulative time spent inside the C++ kernel across all
         # solve() calls; populated by solve(). Useful for benchmarking.
         self.bloch_elapsed = 0.0
+        # Cached contiguous per-component mode matrices, see _trajectory_modes.
+        self._modes_cache = None
+
+    def _trajectory_modes(self, nb_nodes):
+        """Contiguous ``(3 * nb_nodes, n_modes)`` mode matrix for the kernel.
+
+        The POD modes are static: ``POD.get_modes`` hands back the same array
+        on every call and only the *weights* move with time. Rebuilding the
+        kernel's view of them per block therefore repeats an identical copy for
+        every block of the sequence -- and on a ``PODSum`` the
+        ``np.concatenate`` of the two mode sets is repeated too. Both are
+        hoisted here and cached until the trajectory object or the local node
+        count changes.
+
+        The ``(N, 3, M)`` tensor is flattened to ``(3N, M)`` rather than split
+        into three ``(N, M)`` component matrices, so the kernel deforms the
+        mesh with one GEMV over a single stream instead of three. It is
+        returned in Fortran order because the kernel takes it column-major:
+        the GEMV is then ``M`` long axpy passes over ``3N`` contiguous floats
+        rather than an ``M``-long dot product per output element, which is 6%
+        faster on the free-running block. Handing pybind11 the layout it
+        declares also avoids a 23 MB transpose on every kernel call.
+        """
+        cache = self._modes_cache
+        if cache is not None:
+            pod_ref, n_ref, mat = cache
+            if pod_ref is self.pod_trajectory and n_ref == nb_nodes:
+                return mat
+
+        modes = self.pod_trajectory.get_modes(nb_nodes)
+        mat = np.asfortranarray(
+            modes.reshape(3 * nb_nodes, -1), dtype=self._np_real
+        )
+        self._modes_cache = (self.pod_trajectory, nb_nodes, mat)
+        return mat
 
     def solve(self, start: int = 0, end: int = None):
         # Current machine time
@@ -625,20 +664,16 @@ class BlochSolver:
                 weights = self.pod_trajectory.get_weights(discrete_times - self.pod_trajectory.timeshift)
 
                 # Get the static modes mapped to the original local nodes
-                modes = self.pod_trajectory.get_modes(nb_nodes)
-                modes_x = np.ascontiguousarray(modes[:, 0, :], dtype=self._np_real)
-                modes_y = np.ascontiguousarray(modes[:, 1, :], dtype=self._np_real)
-                modes_z = np.ascontiguousarray(modes[:, 2, :], dtype=self._np_real)
+                # (built once and cached -- they do not change between blocks)
+                modes = self._trajectory_modes(nb_nodes)
 
                 # Format weights securely for PyBind11
-                total_modes = modes_x.shape[1]
+                total_modes = modes.shape[1]
                 weights = np.ascontiguousarray(weights.reshape(-1, total_modes), dtype=self._np_real)
             else:
                 # Dummies
                 weights = np.empty((0, 0), dtype=self._np_real)
-                modes_x = np.empty((0, 0), dtype=self._np_real)
-                modes_y = np.empty((0, 0), dtype=self._np_real)
-                modes_z = np.empty((0, 0), dtype=self._np_real)
+                modes = np.empty((0, 0), dtype=self._np_real, order='F')
 
             # Seed Magnus state (Bz_old per node, rf_old shared) from the
             # field at the start of this block. Without this seed, the very
@@ -649,19 +684,12 @@ class BlochSolver:
             # blocks may have arbitrary deadtime between them.
             if self._order > 0:
                 if has_traj and weights.size > 0:
-                    w0 = weights[0]
-                    cx0 = x[:, 0] + modes_x @ w0
-                    cy0 = x[:, 1] + modes_y @ w0
-                    cz0 = x[:, 2] + modes_z @ w0
+                    c0 = x + (modes @ weights[0]).reshape(-1, 3)
                 else:
-                    cx0 = x[:, 0]
-                    cy0 = x[:, 1]
-                    cz0 = x[:, 2]
-                Gx0 = gradients[0, 0]
-                Gy0 = gradients[0, 1]
-                Gz0 = gradients[0, 2]
-                Bz_old = (cx0 * Gx0 + cy0 * Gy0 + cz0 * Gz0
-                          + delta_B.reshape(-1)).astype(self._np_real, copy=False)
+                    c0 = x
+                G0 = gradients[0, :]
+                Bz_old = (c0 @ G0 + delta_B.reshape(-1)).astype(
+                    self._np_real, copy=False)
                 rf_old = self._py_cplx(rf_pulses[0, 0])
 
             # Solve
@@ -683,11 +711,14 @@ class BlochSolver:
                 # CRITICAL FIX: Expand modes and Magnus state to match the
                 # duplicated nodes in x_big!
                 if has_traj:
-                    m_x_big = np.ascontiguousarray(np.repeat(modes_x, K, axis=0))
-                    m_y_big = np.ascontiguousarray(np.repeat(modes_y, K, axis=0))
-                    m_z_big = np.ascontiguousarray(np.repeat(modes_z, K, axis=0))
+                    # (3N, M) -> (N, 3, M), repeat per node, flatten back, so
+                    # the expansion matches create_multi_isochromats' node
+                    # ordering (each node duplicated K times consecutively).
+                    modes_big = np.asfortranarray(
+                        np.repeat(np.asarray(modes).reshape(nb_nodes, 3, -1),
+                                  K, axis=0).reshape(3 * nb_nodes * K, -1))
                 else:
-                    m_x_big, m_y_big, m_z_big = modes_x, modes_y, modes_z
+                    modes_big = modes
                 Bz_old_big = np.ascontiguousarray(
                     np.repeat(Bz_old, K, axis=0), dtype=self._np_real
                 )
@@ -697,7 +728,7 @@ class BlochSolver:
                 Mxy_hist, Mz_hist, Bz_old_big_out, rf_old_out = solve_kernel(
                     x_big, T1_big, T2_big, deltaB_big, self.M0, gamma,
                     rf_pulses, gradients, dt, regime_idx, Mxy_big, Mz_big,
-                    m_x_big, m_y_big, m_z_big, weights, has_traj,
+                    modes_big, weights, has_traj,
                     self._order, Bz_old_big, rf_old,
                 )
                 self.bloch_elapsed += time.perf_counter() - t_call
@@ -728,7 +759,7 @@ class BlochSolver:
                     x, T1, T2, delta_B, self.M0, gamma,
                     rf_pulses, gradients, dt, regime_idx,
                     initial_Mxy, initial_Mz,
-                    modes_x, modes_y, modes_z, weights, has_traj,
+                    modes, weights, has_traj,
                     self._order, Bz_old, rf_old,
                 )
                 self.bloch_elapsed += time.perf_counter() - t_call
@@ -756,8 +787,13 @@ class BlochSolver:
 
             initial_Mxy[:, 0] = next_Mxy
             initial_Mz[:, 0]  = Mz_[:, -1]
-            self.initial_Mxy[:, 0] = next_Mxy.astype(self._np_cplx, copy=False)
-            self.initial_Mz[:, 0]  = Mz_[:, -1].astype(self._np_real, copy=False)
+
+        # Keep the public attributes in step with the working copies. They are
+        # normally the very same buffers -- np.ascontiguousarray is a no-op
+        # when dtype and layout already match -- so rebinding only does
+        # anything when a dtype conversion forced a copy above.
+        self.initial_Mxy = initial_Mxy
+        self.initial_Mz = initial_Mz
 
         # Persist final Magnus state for the next solve() call.
         self._Bz_old = Bz_old

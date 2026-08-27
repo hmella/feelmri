@@ -50,15 +50,15 @@ dev = [
 # kspace_trajectory / kspace_to_signal_inputs bridges and by the
 # examples/pulseq_*.py scripts. The library builds, imports, and tests
 # (with '-m "not pulseq"') without it. Version range matches the
-# supported .seq formats documented in CLAUDE.md.
+# supported .seq formats.
 pulseq = [
   "pypulseq>=1.2,<1.6",
 ]
 
 [tool.scikit-build]
 wheel.packages = ["python/feelmri"]
-cmake.minimum-version = "3.18"
-cmake.verbose = true
+cmake.version = ">=3.18"
+build.verbose = true
 build-dir = "build"
 ninja.make-fallback = true
 sdist.include = [

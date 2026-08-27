@@ -4,8 +4,6 @@ os.environ["OPENBLAS_NUM_THREADS"] = "1" # export OPENBLAS_NUM_THREADS=1
 from pathlib import Path
 
 import numpy as np
-from pint import Quantity as Q_
-
 from feelmri.Bloch import BlochSolver, Sequence, SequenceBlock
 from feelmri.KSpaceTraj import CartesianStack
 from feelmri.Motion import POD
@@ -16,6 +14,7 @@ from feelmri.Parameters import ParameterHandler, PVSMParser
 from feelmri.Phantom import FEMPhantom
 from feelmri.Plotter import MRIPlotter
 from feelmri.Recon import CartesianRecon
+from pint import Quantity as Q_
 
 # Enable fast mode for testing if the environment variable is set
 FAST_MODE = os.getenv("FEELMRI_FAST_TEST", "0") == "1"

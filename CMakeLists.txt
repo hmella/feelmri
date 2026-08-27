@@ -52,42 +52,86 @@ set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)  # Enable LTO if supported
 
 # ------------------------------------------------------------
-# Conditional optimization flags (architecture and LTO)
+# Optimization flags (architecture, fast math, LTO)
+#
+# Every flag is probed with check_cxx_compiler_flag before use, so this
+# configures on x86-64 with or without AVX2 and on ARM64. Nothing here is
+# hardcoded to the development machine: -march=native already enables whatever
+# SIMD the host supports, so naming -mavx2/-mfma explicitly would only break
+# hosts that lack them.
 # ------------------------------------------------------------
 include(CheckCXXCompilerFlag)
 
-function(add_supported_flag flag)
-    string(REPLACE "-" "_" flag_var "${flag}")
-    string(REPLACE "=" "_" flag_var "${flag_var}")
-    check_cxx_compiler_flag("${flag}" HAS_${flag_var})
-    if (HAS_${flag_var})
-        add_compile_options(${flag})
+option(FEELMRI_NATIVE_ARCH
+       "Tune for the building machine (-march=native). Produces binaries that \
+are NOT redistributable -- turn OFF for wheels/conda packages." ON)
+option(FEELMRI_FAST_MATH
+       "Enable -Ofast/-ffast-math. Turn OFF for IEEE semantics when \
+reproducing published numbers across compilers." ON)
+
+# Collect the flags this compiler actually accepts.
+set(FEELMRI_OPT_FLAGS "")
+function(feelmri_try_flag flag)
+    string(MAKE_C_IDENTIFIER "FEELMRI_HAS_${flag}" flag_var)
+    check_cxx_compiler_flag("${flag}" ${flag_var})
+    if (${flag_var})
+        set(FEELMRI_OPT_FLAGS ${FEELMRI_OPT_FLAGS} ${flag} PARENT_SCOPE)
     endif()
 endfunction()
 
-set(CPU_TUNING_FLAG_PAIRS
-    "-march=raptorlake;-mtune=raptorlake"
-    "-march=native;-mtune=native"
-)
-
-set(USED_CPU_FLAGS "")
-
-foreach(pair ${CPU_TUNING_FLAG_PAIRS})
-    string(REPLACE ";" " " candidate_flags "${pair}")
-    list(GET pair 0 march_flag)
-    check_cxx_compiler_flag("${march_flag}" HAS_MARCH)
-    if (HAS_MARCH)
-        message(STATUS "Using CPU tuning flags: ${candidate_flags}")
-        set(USED_CPU_FLAGS ${candidate_flags})
-        break()
+# ---- CPU tuning ----
+if (FEELMRI_NATIVE_ARCH)
+    # Each candidate needs its OWN cache variable: check_cxx_compiler_flag
+    # caches by variable name and silently skips the test when the variable is
+    # already set, so reusing one name here made the fallback unreachable on
+    # every machine that rejects the first candidate.
+    # "|" as the intra-pair separator: CMake flattens semicolons inside list
+    # items, which would iterate flag-by-flag and drop the -mtune half.
+    set(CPU_TUNING_CANDIDATES "-march=raptorlake|-mtune=raptorlake"
+                              "-march=native|-mtune=native"
+                              "-mtune=native")
+    set(USED_CPU_FLAGS "")
+    foreach(pair ${CPU_TUNING_CANDIDATES})
+        string(REPLACE "|" ";" pair_list "${pair}")
+        list(GET pair_list 0 probe_flag)
+        string(MAKE_C_IDENTIFIER "FEELMRI_HAS_${probe_flag}" probe_var)
+        check_cxx_compiler_flag("${probe_flag}" ${probe_var})
+        if (${probe_var})
+            string(REPLACE "|" " " candidate_flags "${pair}")
+            message(STATUS "Using CPU tuning flags: ${candidate_flags}")
+            set(USED_CPU_FLAGS ${pair_list})
+            break()
+        endif()
+    endforeach()
+    if (USED_CPU_FLAGS)
+        list(APPEND FEELMRI_OPT_FLAGS ${USED_CPU_FLAGS})
+    else()
+        message(WARNING "No supported CPU tuning flags found - using generic tuning.")
     endif()
-endforeach()
-
-if (USED_CPU_FLAGS)
-    add_compile_options(${USED_CPU_FLAGS})
 else()
-    message(WARNING "⚠️ No supported CPU tuning flags found — using generic tuning.")
+    message(STATUS "FEELMRI_NATIVE_ARCH=OFF - portable build, no -march/-mtune.")
 endif()
+
+# ---- Fast math ----
+if (FEELMRI_FAST_MATH)
+    foreach(flag -Ofast -ffast-math -fno-math-errno -fno-trapping-math -ffp-contract=fast)
+        feelmri_try_flag(${flag})
+    endforeach()
+    list(APPEND FEELMRI_OPT_FLAGS -DEIGEN_FAST_MATH)
+else()
+    feelmri_try_flag(-O3)
+    message(STATUS "FEELMRI_FAST_MATH=OFF - IEEE semantics, results will differ "
+                   "slightly from the fast-math build.")
+endif()
+
+# ---- Always-on, still probed ----
+foreach(flag -fvisibility=hidden -fPIC -funroll-loops -fopenmp-simd)
+    feelmri_try_flag(${flag})
+endforeach()
+list(APPEND FEELMRI_OPT_FLAGS -DNDEBUG -DEIGEN_NO_DEBUG -DEIGEN_DONT_PARALLELIZE)
+
+string(REPLACE ";" " " _flags_pretty "${FEELMRI_OPT_FLAGS}")
+message(STATUS "feelmri optimization flags: ${_flags_pretty}")
 
 # ------------------------------------------------------------
 # FEniCS Basix (C++) automatic compilation via FetchContent
@@ -174,24 +218,8 @@ foreach(mod ${MODULES})
 
     target_link_libraries(${mod} PRIVATE basix)
 
-    # Apply high-performance compile flags
-    target_compile_options(${mod} PRIVATE
-        -Ofast
-        -ffast-math
-        -fno-math-errno
-        -fno-trapping-math
-        -ffp-contract=fast
-        -fvisibility=hidden
-        -fPIC
-        -funroll-loops
-        -fopenmp-simd
-        -mavx2
-        -mfma
-        -DNDEBUG
-        -DEIGEN_NO_DEBUG
-        -DEIGEN_FAST_MATH
-        -DEIGEN_DONT_PARALLELIZE
-    )
+    # Apply the probed optimization flags (see the block above)
+    target_compile_options(${mod} PRIVATE ${FEELMRI_OPT_FLAGS})
 
     set_target_properties(${mod} PROPERTIES OUTPUT_NAME ${mod})
     install(TARGETS ${mod} DESTINATION feelmri)
@@ -211,5 +239,7 @@ message(STATUS "  Pybind11 includes:   ${pybind11_INCLUDE_DIRS}")
 message(STATUS "  Eigen include dir:   ${EIGEN_INCLUDE_DIR}")
 message(STATUS "  Eigen unsupported:   ${EIGEN_UNSUPPORTED_DIR}")
 message(STATUS "  LTO enabled:         ${CMAKE_INTERPROCEDURAL_OPTIMIZATION}")
+message(STATUS "  Native arch:         ${FEELMRI_NATIVE_ARCH}")
+message(STATUS "  Fast math:           ${FEELMRI_FAST_MATH}")
 message(STATUS "  ccache enabled:      ${CCACHE_PROGRAM}")
 message(STATUS "------------------------------------------------------------")

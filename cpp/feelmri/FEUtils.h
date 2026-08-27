@@ -22,6 +22,9 @@
 #include <string>
 #include <unordered_map>
 #include <stdexcept>
+#include <array>
+#include <vector>
+#include <mutex>
 #include <basix/cell.h>
 #include <basix/element-families.h>
 #include <basix/finite-element.h>
@@ -63,6 +66,147 @@ inline const FEInfo& get_fe_info(const std::string& meshio_type) {
     return it->second;
 }
 
+// -----------------------------------------------------------------------------
+// 1b. MESHIO -> BASIX DOF ORDERING
+// -----------------------------------------------------------------------------
+
+/**
+ * @brief Reference-cell coordinates of each element node, in meshio/VTK order.
+ *
+ * meshio and Basix both list vertex DOFs before edge/face DOFs, but order them
+ * differently within those blocks: VTK walks the bottom face of a hexahedron
+ * cyclically where Basix uses a tensor-product lattice, and the two number
+ * tetrahedron edges differently.
+ *
+ * The permutation is derived from these coordinates at run time (see
+ * @ref meshio_to_basix_permutation) rather than hard-coded as indices, so it remains
+ * valid if Basix changes its DOF numbering; supporting a new cell type requires only
+ * adding its reference coordinates here. Components beyond the cell's topological
+ * dimension are ignored.
+ */
+static const std::unordered_map<std::string, std::vector<std::array<double, 3>>>
+meshio_reference_points = {
+    {"triangle",   {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}}},
+    {"tetra",      {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}}},
+    // 4 vertices, then edge midpoints (0,1) (1,2) (0,2) (0,3) (1,3) (2,3)
+    {"tetra10",    {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1},
+                    {0.5, 0, 0}, {0.5, 0.5, 0}, {0, 0.5, 0},
+                    {0, 0, 0.5}, {0.5, 0, 0.5}, {0, 0.5, 0.5}}},
+    // bottom face walked cyclically, then the top face
+    {"hexahedron", {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0},
+                    {0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}}},
+    {"wedge",      {{0, 0, 0}, {1, 0, 0}, {0, 1, 0},
+                    {0, 0, 1}, {1, 0, 1}, {0, 1, 1}}},
+};
+
+/**
+ * @brief Permutation taking meshio DOF order to Basix DOF order.
+ *
+ * ``perm[j]`` is the meshio-order index of the node that Basix expects at its own
+ * DOF ``j``, i.e. ``elems_basix.col(j) == elems_meshio.col(perm[j])``.
+ *
+ * Each Basix interpolation point is matched against @ref meshio_reference_points by
+ * position. Reference nodes are separated by far more than @c tol, so a match within
+ * @c tol is unique; the bijectivity check guards against a malformed table.
+ *
+ * @param meshio_type Meshio element-type string (see @ref fe_from_meshio).
+ * @return            Const reference to the cached permutation, length ``ndofs``.
+ * @throws std::runtime_error If the type is unregistered, the DOF counts disagree,
+ *                            or any Basix point fails to match a reference node.
+ */
+inline const std::vector<int>& meshio_to_basix_permutation(const std::string& meshio_type)
+{
+    static std::unordered_map<std::string, std::vector<int>> cache;
+    static std::mutex cache_mutex;
+    std::lock_guard<std::mutex> lock(cache_mutex);
+
+    if (auto it = cache.find(meshio_type); it != cache.end()) return it->second;
+
+    auto ref_it = meshio_reference_points.find(meshio_type);
+    if (ref_it == meshio_reference_points.end())
+        throw std::runtime_error(
+            "No meshio reference coordinates registered for element type: " + meshio_type);
+    const std::vector<std::array<double, 3>>& ref = ref_it->second;
+
+    const FEInfo& fe_info = get_fe_info(meshio_type);
+    auto fe = basix::create_element<double>(
+        fe_info.family, fe_info.cell, fe_info.degree,
+        basix::element::lagrange_variant::equispaced,
+        basix::element::dpc_variant::unset, false);
+
+    const auto& [pts, shape] = fe.points();
+    const std::size_t ndofs = shape[0];
+    const std::size_t tdim  = shape[1];
+
+    if (ndofs != ref.size())
+        throw std::runtime_error(
+            "Element type '" + meshio_type + "': Basix reports " + std::to_string(ndofs)
+            + " DOFs but the meshio reference table lists " + std::to_string(ref.size()));
+
+    constexpr double tol = 1e-10;
+    std::vector<int>  perm(ndofs, -1);
+    std::vector<bool> used(ndofs, false);
+
+    for (std::size_t j = 0; j < ndofs; ++j)          // Basix DOF index
+    {
+        int match = -1;
+        for (std::size_t i = 0; i < ndofs; ++i)      // meshio node index
+        {
+            double d2 = 0.0;
+            for (std::size_t k = 0; k < tdim; ++k)
+            {
+                const double d = ref[i][k] - static_cast<double>(pts[j * tdim + k]);
+                d2 += d * d;
+            }
+            if (d2 <= tol * tol) { match = static_cast<int>(i); break; }
+        }
+        if (match < 0)
+            throw std::runtime_error(
+                "Element type '" + meshio_type + "': Basix DOF " + std::to_string(j)
+                + " matches no node in the meshio reference table");
+        if (used[match])
+            throw std::runtime_error(
+                "Element type '" + meshio_type + "': meshio node " + std::to_string(match)
+                + " matched by more than one Basix DOF (duplicate reference coordinates)");
+        used[match] = true;
+        perm[j] = match;
+    }
+
+    return cache.emplace(meshio_type, std::move(perm)).first->second;
+}
+
+/**
+ * @brief Reorder element connectivity columns from meshio DOF order to Basix order.
+ *
+ * Apply once, before any Basix tabulation, and use the returned connectivity for the
+ * global assembly indices as well, so the geometry map and the node numbering agree.
+ * Python-side connectivity stays in meshio order, as XDMF output expects.
+ *
+ * @param elems       Connectivity in meshio order, shape ``(n_elem, n_nodes_per_elem)``.
+ * @param meshio_type Meshio element-type string.
+ * @return            Connectivity in Basix order (the input itself when they agree).
+ */
+inline Eigen::MatrixXi permute_meshio_to_basix(const Eigen::MatrixXi& elems,
+                                               const std::string& meshio_type)
+{
+    const std::vector<int>& perm = meshio_to_basix_permutation(meshio_type);
+
+    if (static_cast<std::size_t>(elems.cols()) != perm.size())
+        throw std::runtime_error(
+            "Connectivity has " + std::to_string(elems.cols()) + " nodes per element but '"
+            + meshio_type + "' expects " + std::to_string(perm.size()));
+
+    bool identity = true;
+    for (std::size_t j = 0; j < perm.size(); ++j)
+        if (perm[j] != static_cast<int>(j)) { identity = false; break; }
+    if (identity) return elems;
+
+    Eigen::MatrixXi out(elems.rows(), elems.cols());
+    for (std::size_t j = 0; j < perm.size(); ++j)
+        out.col(static_cast<Eigen::Index>(j)) = elems.col(perm[j]);
+    return out;
+}
+
 template <typename T, std::size_t d>
 using mdspan_t = basix::md::mdspan<T, basix::md::dextents<std::size_t, d>>;
 
@@ -97,7 +241,8 @@ struct FEQuadratureCache
  *
  * @tparam T Floating-point scalar type (``float`` or ``double``).
  *
- * @param elems             Element connectivity, shape ``(n_elem, n_nodes_per_elem)``.
+ * @param elems             Element connectivity, shape ``(n_elem, n_nodes_per_elem)``,
+ *                          already in **Basix** DOF order (see @ref permute_meshio_to_basix).
  * @param nodes             Node coordinates, shape ``(n_nodes, 3)`` (m).
  * @param meshio_type       Meshio element-type string (see @ref fe_from_meshio).
  * @param quadrature_degree Polynomial degree of exactness for the quadrature rule.

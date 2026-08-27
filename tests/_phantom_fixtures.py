@@ -120,3 +120,67 @@ def make_2d_disk_mesh(path: Path, radius: float = 5e-3,
   meshio.write_points_cells(str(path), pts, [('tetra', cells_arr)])
   volume = float(np.pi * radius * radius * thickness)
   return path, volume
+
+
+def make_cube_mesh(path: Path, cell_type: str, n: int = 2,
+                   scale: float = 2e-3) -> Tuple[Path, float]:
+  """Structured mesh of a cube, in any of the 3-D cell types the assembler
+  supports (``tetra``, ``tetra10``, ``hexahedron``, ``wedge``).
+
+  All four discretise the *same* domain with straight edges, so any
+  volume integral over them must agree. That makes them a direct check
+  on the meshio -> Basix DOF ordering, which differs per cell type.
+
+  Returns the file path and the exact cube volume ``(n * scale) ** 3``.
+  """
+  import meshio
+  c = np.arange(n + 1, dtype=np.float64) * scale
+  pts = [[x, y, z] for z in c for y in c for x in c]
+
+  def idx(i, j, k):
+    return i + (n + 1) * (j + (n + 1) * k)
+
+  # VTK hexahedron: bottom face walked cyclically, then the top face.
+  hexes = [[idx(i, j, k), idx(i + 1, j, k), idx(i + 1, j + 1, k), idx(i, j + 1, k),
+            idx(i, j, k + 1), idx(i + 1, j, k + 1),
+            idx(i + 1, j + 1, k + 1), idx(i, j + 1, k + 1)]
+           for k in range(n) for j in range(n) for i in range(n)]
+  volume = float((n * scale) ** 3)
+
+  if cell_type == 'hexahedron':
+    cells = hexes
+  elif cell_type == 'wedge':
+    # Cut each cube along the bottom-face diagonal into two prisms.
+    cells = []
+    for h in hexes:
+      cells.append([h[0], h[1], h[2], h[4], h[5], h[6]])
+      cells.append([h[0], h[2], h[3], h[4], h[6], h[7]])
+  else:
+    # Six-tetrahedron decomposition of each cube.
+    tets = []
+    for h in hexes:
+      for a, b, cc, d in ((0, 1, 2, 6), (0, 2, 3, 6), (0, 3, 7, 6),
+                          (0, 7, 4, 6), (0, 4, 5, 6), (0, 5, 1, 6)):
+        tets.append([h[a], h[b], h[cc], h[d]])
+    if cell_type == 'tetra':
+      cells = tets
+    elif cell_type == 'tetra10':
+      # Append edge midpoints in VTK edge order (0,1)(1,2)(0,2)(0,3)(1,3)(2,3).
+      midpoints = {}
+
+      def mid(u, v):
+        key = (min(u, v), max(u, v))
+        if key not in midpoints:
+          midpoints[key] = len(pts)
+          pts.append(list(0.5 * (np.asarray(pts[u]) + np.asarray(pts[v]))))
+        return midpoints[key]
+
+      cells = [list(t) + [mid(t[0], t[1]), mid(t[1], t[2]), mid(t[0], t[2]),
+                          mid(t[0], t[3]), mid(t[1], t[3]), mid(t[2], t[3])]
+               for t in tets]
+    else:
+      raise ValueError(f'unsupported cell type: {cell_type}')
+
+  meshio.write_points_cells(str(path), np.asarray(pts, dtype=np.float64),
+                            [(cell_type, np.asarray(cells, dtype=np.int64))])
+  return path, volume
