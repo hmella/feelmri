@@ -706,7 +706,7 @@ class FEMPhantom:
 
     def enable_dual_partition(self, voxel_size, lorder=1, horder=1,
                               nodal_approximation=False, lumped=True,
-                              cost_ratio=47.0, overdecompose=2):
+                              cost_ratio=47.0, overdecompose=2, node_weight=None):
         """Build two partitions once: one for the Bloch solve, one for k-space.
 
         ``'bloch'`` balances nodes (the Bloch solve and the nodal signal paths cost
@@ -721,6 +721,20 @@ class FEMPhantom:
         Call this **instead of** :meth:`set_assembler`, and before constructing the
         POD trajectory or the BlochSolver.
 
+        Parameters
+        ----------
+        node_weight : float, optional
+            Weight of the node term when building the signal layout. Defaults to
+            ``1.0 if nodal_approximation else 0.0``, which is the right choice for
+            :meth:`mri_signal`: with the nodal approximation the small-element
+            group runs through :meth:`signal_nodal` and costs O(nodes), and
+            without it every group integrates and the cost is O(quadrature
+            points).
+
+            Pass 1.0 when calling :meth:`signal_sum` or :meth:`signal_nodal`
+            directly. Those cost O(local nodes) whatever ``nodal_approximation``
+            says, so the inferred 0.0 balances the wrong quantity and leaves the
+            node counts badly spread across ranks.
         """
         if getattr(self, '_partition_bound', False):
             raise RuntimeError(
@@ -742,12 +756,10 @@ class FEMPhantom:
         weights = self.quadrature_cost_weights(
             voxel_size, lorder, horder, cost_ratio,
             nodal_approximation=nodal_approximation)
-        # With nodal_approximation the small-element group runs through signal_nodal,
-        # whose cost is O(nodes) -- so the node term belongs in the objective. Without
-        # it the signal phase is purely O(quadrature points) and including the node
-        # term lets it dominate, leaving the quadrature barely balanced at all.
+        if node_weight is None:
+            node_weight = 1.0 if nodal_approximation else 0.0
         self.distribute_mesh(elem_weights=weights, overdecompose=overdecompose,
-                             node_weight=1.0 if nodal_approximation else 0.0)
+                             node_weight=float(node_weight))
         self._partitions['signal'] = self._capture_partition()
         self._active_partition = 'signal'
 
