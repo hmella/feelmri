@@ -110,7 +110,8 @@ jobs:
         run: |
           coverage erase
           # 'pulseq' marker excludes tests that depend on the optional
-          # 'pypulseq' package; CI does not install it. Register and apply
+          # 'pypulseq' package. They run in the separate pulseq-tests job
+          # below, once per supported pypulseq version. Register and apply
           # the marker as documented in tests/conftest.py.
           coverage run --rcfile=.coveragerc -m pytest tests/ -m "not pulseq"
 
@@ -152,3 +153,67 @@ jobs:
           flags: unittests
           name: feelmri
           fail_ci_if_error: true
+
+  # ------------------------------------------------------------
+  # The optional Pulseq adapter, once per supported pypulseq.
+  #
+  # pypulseq reads only up to its own .seq format version, and the v1.5
+  # layout is not backward readable, so the v1.5 fixtures skip themselves
+  # under 1.4 (tests/conftest.py::skip_if_pypulseq_too_old). Both versions
+  # must stay green: the declared range is >=1.2,<1.6.
+  # ------------------------------------------------------------
+  pulseq-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    strategy:
+      fail-fast: false
+      matrix:
+        pypulseq: ["1.4.2.post1", "1.5.0.post1"]
+
+    env:
+      PYTHONPATH: ${{ github.workspace }}/python
+      MPLBACKEND: Agg
+      FEELMRI_FAST_TEST: "1"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: "pip"
+
+      - name: Cache build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            build/
+          key: pulseq-${{ runner.os }}-${{ matrix.pypulseq }}-${{ hashFiles('setup.cfg', 'pyproject.toml', '**/CMakeLists.txt') }}
+          restore-keys: |
+            pulseq-${{ runner.os }}-${{ matrix.pypulseq }}-
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential python3-dev cmake ninja-build git \
+            libopenmpi-dev libblas-dev liblapack-dev
+          sudo apt-get clean
+
+      - name: Install FEelMRI with the pulseq extra
+        run: |
+          python -m pip install --upgrade pip
+          pip install git+https://github.com/hmella/pyevtk.git
+          pip install -e .[dev,pulseq] pytest pytest-timeout
+          pip install "pypulseq==${{ matrix.pypulseq }}"
+
+      - name: Report the versions under test
+        run: |
+          python -c "import pypulseq; print('pypulseq', pypulseq.__version__)"
+
+      - name: Run the Pulseq test suite
+        run: pytest tests/ -m "pulseq" -v

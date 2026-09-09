@@ -1633,6 +1633,39 @@ def _convert_adc(adc: "ADC", scanner: Scanner) -> Optional[feelmriADC]:
 # K-space trajectory extraction
 # ---------------------------------------------------------------------------
 
+def pypulseq_version() -> Optional[Version]:
+  """Version of the installed pypulseq, or None when it is not importable."""
+  try:
+    import pypulseq as pp
+  except ImportError:
+    return None
+  raw = str(getattr(pp, '__version__', '') or '')
+  parts = raw.split('.')[:3]
+  try:
+    nums = [int(''.join(c for c in p if c.isdigit()) or 0) for p in parts]
+  except ValueError:  # pragma: no cover - defensive
+    return None
+  while len(nums) < 3:
+    nums.append(0)
+  return Version(*nums[:3])
+
+
+def pypulseq_can_read(file_version: Version) -> bool:
+  """Whether the installed pypulseq can read a file of this Pulseq version.
+
+  pypulseq reads only formats up to its own, and the v1.5 layout is not
+  backward readable: 1.4.x silently mis-parses a v1.5 file and then fails
+  inside ``calculate_kspace``. FEelMRI's own reader handles both, but the
+  trajectory comes from pypulseq, so a v1.5 file with an ADC needs
+  pypulseq >= 1.5.
+  """
+  installed = pypulseq_version()
+  if installed is None:
+    return False
+  return (installed.major, installed.minor) >= (file_version.major,
+                                                file_version.minor)
+
+
 def _read_with_pypulseq(filename):  # pragma: no cover (optional dep)
   """Read ``filename`` into a ``pp.Sequence``.
 
@@ -2237,8 +2270,20 @@ def import_pulseq(
       k_traj_adc = np.asarray(k_traj_adc, dtype=float)
       t_adc = np.asarray(t_adc, dtype=float)
     except Exception as exc:  # pragma: no cover - surfaced as hard error
+      file_version = pulseq_seq.DEF.get('PulseqVersion')
+      hint = ''
+      if file_version is not None and not pypulseq_can_read(file_version):
+        installed = pypulseq_version()
+        hint = (
+            f" The file declares Pulseq v{file_version.major}."
+            f"{file_version.minor}.{file_version.revision} and the installed "
+            f"pypulseq is {installed and f'{installed.major}.{installed.minor}'}"
+            f", which cannot read that layout. FEelMRI's own reader handles "
+            f"it, but the k-space trajectory comes from pypulseq, so a file "
+            f"with an ADC needs pypulseq >= "
+            f"{file_version.major}.{file_version.minor}.")
       raise RuntimeError(
-          f"Failed to compute k-space trajectory for {filename!s}: {exc}"
+          f"Failed to compute k-space trajectory for {filename!s}: {exc}.{hint}"
       ) from exc
   else:
     k_traj_adc = np.zeros((3, 0), dtype=float)

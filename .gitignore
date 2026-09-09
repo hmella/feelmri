@@ -18,4 +18,9 @@ meshes/*.msh
 *.xml
 .coverage*
 *old*
+# ... but 'golden' matches '*old*'. The reference summaries and their test
+# are tracked on purpose.
+!tests/data/golden/
+!tests/data/golden/*.json
+!tests/test_pulseq_golden.py
 *new*

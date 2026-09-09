@@ -18,6 +18,8 @@ import numpy as np
 import pytest
 from pint import Quantity
 
+from conftest import skip_if_pypulseq_too_old
+
 
 # The whole module exercises the PulseqAdapter, whose end-to-end paths
 # (kspace_trajectory, calculate_kspace bridge) require the optional
@@ -593,6 +595,7 @@ def test_rf_ppm_offsets_are_consumed(adapter):
   0.25 rad/MHz."""
   if not PPM_SEQ.exists():
     pytest.skip('run tests/data/generate_seq_fixtures.py to build ppm_v15.seq')
+  skip_if_pypulseq_too_old(PPM_SEQ)
   scale = _ppm_to_hz()
   imp = adapter.import_pulseq(PPM_SEQ)
   sat = [b.rf_pulses[0] for b in imp.feelmri_seq.blocks
@@ -608,6 +611,7 @@ def test_adc_ppm_offsets_and_phase_modulation_are_consumed(adapter):
   phase_id column resolves to a per-sample phase shape."""
   if not PPM_SEQ.exists():
     pytest.skip('run tests/data/generate_seq_fixtures.py to build ppm_v15.seq')
+  skip_if_pypulseq_too_old(PPM_SEQ)
   scale = _ppm_to_hz()
   imp = adapter.import_pulseq(PPM_SEQ)
   adcs = [b.adc for b in imp.feelmri_seq.blocks if b.adc is not None]
@@ -748,6 +752,7 @@ def test_check_timing_is_reported(adapter, tmp_path):
   src = DATA_DIR / 'gre_v15.seq'
   if not src.exists():
     pytest.skip('run tests/data/generate_seq_fixtures.py to build gre_v15.seq')
+  skip_if_pypulseq_too_old(src)
   assert adapter.import_pulseq(src).timing_errors == ()
 
   # Halve one block's stored duration so its events no longer fit.
@@ -795,6 +800,7 @@ def test_readout_anchors_agree_with_calculate_kspace(adapter, seq_path):
   """_identify_readout_groups picks a coherence anchor from the RF use
   labels; calculate_kspace resets or reflects k at the same pulses. Every
   window's anchor block must therefore hold one of those pulses."""
+  skip_if_pypulseq_too_old(seq_path)
   pp = pytest.importorskip('pypulseq')
   ref = pp.Sequence()
   ref.read(str(seq_path), detect_rf_use=False)
@@ -834,6 +840,7 @@ def test_simulate_pulseq_end_to_end(adapter, tmp_path):
   seq_path = DATA_DIR / 'gre_v15.seq'
   if not seq_path.exists():
     pytest.skip('run tests/data/generate_seq_fixtures.py to build gre_v15.seq')
+  skip_if_pypulseq_too_old(seq_path)
 
   mesh_path = tmp_path / 'minimal_tet.vtu'
   _write_minimal_tet_mesh(mesh_path)

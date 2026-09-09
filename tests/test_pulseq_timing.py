@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 from pathlib import Path
 
+from conftest import skip_if_pypulseq_too_old
 from feelmri.PulseqAdapter import import_pulseq
 
 # Timings of the imported sequence must match the Pulseq file. pypulseq is the
@@ -43,6 +44,10 @@ def pulseq_sequences():
 
 def _reference(sequences, seq_path):
     if seq_path not in sequences:
+        # Two distinct reasons pypulseq may refuse a file: it is too old for
+        # the format (say so precisely), or the file uses an extension it does
+        # not implement at all -- ROTATIONS, which it has no support for.
+        skip_if_pypulseq_too_old(seq_path)
         pytest.skip(f'pypulseq does not implement an extension used by '
                     f'{seq_path.name}; no reference available')
     return sequences[seq_path]
@@ -91,6 +96,7 @@ def test_total_duration_matches(seq_path, pulseq_sequences):
 
 @pytest.mark.parametrize('seq_path', SEQ_FILES, ids=_ids(SEQ_FILES))
 def test_every_block_is_integrated(seq_path):
+    skip_if_pypulseq_too_old(seq_path)
     # A block needs at least two raster points, otherwise the kernel takes no
     # step and the block evolves the magnetization not at all. Delays with no
     # events are the usual case, and in a spin echo they carry the T2 weighting.

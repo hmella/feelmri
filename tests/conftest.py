@@ -25,3 +25,26 @@ def pytest_configure(config):
         "pulseq: marks tests that depend on the optional 'pypulseq' package "
         "(opt-out in CI via '-m \"not pulseq\"')",
     )
+
+
+def skip_if_pypulseq_too_old(seq_path):
+    """Skip when the installed pypulseq cannot read this .seq file's format.
+
+    pypulseq reads only up to its own format version, and the v1.5 layout is
+    not backward readable -- 1.4.x mis-parses a v1.5 file and dies inside
+    calculate_kspace. FEelMRI's own reader handles both, so the combination is
+    unsupported rather than broken, and CI exercises both versions.
+    """
+    pytest.importorskip("pypulseq")
+    from feelmri.PulseqAdapter import read_seq, pypulseq_can_read, pypulseq_version
+
+    file_version = read_seq(str(seq_path)).DEF.get("PulseqVersion")
+    if file_version is None:
+        return
+    if not pypulseq_can_read(file_version):
+        installed = pypulseq_version()
+        pytest.skip(
+            f"{os.path.basename(str(seq_path))} is Pulseq v{file_version.major}."
+            f"{file_version.minor} and the installed pypulseq is "
+            f"{installed.major}.{installed.minor}, which cannot read it"
+        )
