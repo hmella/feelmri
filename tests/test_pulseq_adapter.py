@@ -49,15 +49,30 @@ def parsed_imports(adapter):
   mprage_pypulseq.seq alone takes ~80s to convert (5940 SequenceBlocks
   with per-block Quantity work), so caching across all parametrised
   tests is essential to keep total runtime reasonable.
+
+  A file the installed pypulseq is too old to read is left out of the cache;
+  the tests that consume it already skip on a missing key.
   """
   cache = {}
   for path in SEQ_FILES:
-    cache[path.name] = adapter.import_pulseq(path)
+    try:
+      cache[path.name] = adapter.import_pulseq(path)
+    except RuntimeError:
+      continue
   return cache
 
 
 def _seq_id(p):
   return p.name
+
+
+def _imp(parsed_imports, seq_path):
+  """The parsed import for one fixture, skipping when the installed pypulseq
+  cannot read that file's format."""
+  if seq_path.name not in parsed_imports:
+    skip_if_pypulseq_too_old(seq_path)
+    pytest.skip(f'{seq_path.name} could not be parsed')
+  return parsed_imports[seq_path.name]
 
 
 # ---------------------------------------------------------------------------
@@ -68,7 +83,7 @@ def _seq_id(p):
 def test_parse_returns_populated_sequences(parsed_imports, seq_path):
   from feelmri.Bloch import Sequence
 
-  imp = parsed_imports[seq_path.name]
+  imp = _imp(parsed_imports, seq_path)
   assert isinstance(imp.feelmri_seq, Sequence)
   assert len(imp.feelmri_seq.blocks) > 0
   assert len(imp.pulseq_seq) == len(imp.feelmri_seq.blocks)
@@ -80,7 +95,7 @@ def test_parse_returns_populated_sequences(parsed_imports, seq_path):
 def test_block_units_are_correct(parsed_imports, seq_path):
   from feelmri.Bloch import SequenceBlock
 
-  imp = parsed_imports[seq_path.name]
+  imp = _imp(parsed_imports, seq_path)
   inspected = 0
   for blk in imp.feelmri_seq.blocks:
     if not isinstance(blk, SequenceBlock):
@@ -104,7 +119,7 @@ def test_block_units_are_correct(parsed_imports, seq_path):
 
 @pytest.mark.parametrize('seq_path', SEQ_FILES, ids=_seq_id)
 def test_kspace_trajectory_well_formed(adapter, parsed_imports, seq_path):
-  imp = parsed_imports[seq_path.name]
+  imp = _imp(parsed_imports, seq_path)
   traj = adapter.kspace_trajectory(imp.pulseq_seq)
   n = traj['times'].size
   if n == 0:
@@ -122,7 +137,7 @@ def test_kspace_trajectory_well_formed(adapter, parsed_imports, seq_path):
 
 @pytest.mark.parametrize('seq_path', SEQ_FILES, ids=_seq_id)
 def test_pulseq_version_supported(adapter, parsed_imports, seq_path):
-  imp = parsed_imports[seq_path.name]
+  imp = _imp(parsed_imports, seq_path)
   ver = imp.pulseq_seq.DEF['PulseqVersion']
   assert ver.major == 1
   assert ver >= adapter.Version(1, 2, 0)
@@ -137,7 +152,7 @@ def test_pulseq_version_supported(adapter, parsed_imports, seq_path):
 
 @pytest.mark.parametrize('seq_path', SEQ_FILES, ids=_seq_id)
 def test_import_pulseq_partitions_blocks(parsed_imports, seq_path):
-  imp = parsed_imports[seq_path.name]
+  imp = _imp(parsed_imports, seq_path)
   n = len(imp.pulseq_seq)
   prep = set(imp.prep_block_indices)
   adc = set(imp.adc_block_indices)
@@ -174,7 +189,7 @@ def test_import_pulseq_partitions_blocks(parsed_imports, seq_path):
 
 @pytest.mark.parametrize('seq_path', SEQ_FILES, ids=_seq_id)
 def test_readout_windows_match_flat_trajectory(adapter, parsed_imports, seq_path):
-  imp = parsed_imports[seq_path.name]
+  imp = _imp(parsed_imports, seq_path)
   flat = adapter.kspace_trajectory(imp.pulseq_seq)
 
   if not imp.readouts:
@@ -337,7 +352,7 @@ def test_feelmri_sim_seq_default_matches_seq(parsed_imports, seq_path):
   sequence has identical block count and absolute duration as
   ``feelmri_seq``. Per-block durations match exactly so the global
   timing grid is preserved across the substitution."""
-  imp = parsed_imports[seq_path.name]
+  imp = _imp(parsed_imports, seq_path)
   assert len(imp.feelmri_sim_seq.blocks) == len(imp.feelmri_seq.blocks)
   durs_o = np.array([b.dur.m_as('ms') for b in imp.feelmri_seq.blocks])
   durs_s = np.array([b.dur.m_as('ms') for b in imp.feelmri_sim_seq.blocks])
@@ -354,7 +369,7 @@ def test_feelmri_sim_seq_storage_flag_carryover(parsed_imports, seq_path):
   """``store_magnetization`` flags on non-readout blocks survive the
   substitution. Readout-tagged blocks themselves never carry storage
   flags by construction (the anchor block is the preceding RF)."""
-  imp = parsed_imports[seq_path.name]
+  imp = _imp(parsed_imports, seq_path)
   flags_o = [b.store_magnetization for b in imp.feelmri_seq.blocks]
   flags_s = [b.store_magnetization for b in imp.feelmri_sim_seq.blocks]
   assert flags_o == flags_s
@@ -367,6 +382,7 @@ def test_feelmri_sim_seq_collapses_set3(adapter):
   epi = PULSEQ_DIR / 'epi_pypulseq.seq'
   if not epi.exists():
     pytest.skip(f'{epi.name} not bundled')
+  skip_if_pypulseq_too_old(epi)
   imp = adapter.import_pulseq(epi)
   set3 = set(imp.filter_blocks(SET=3))
   assert set(imp.readout_sim_block_indices) == set3
@@ -388,6 +404,7 @@ def test_feelmri_sim_seq_optout(adapter):
   epi = PULSEQ_DIR / 'epi_pypulseq.seq'
   if not epi.exists():
     pytest.skip(f'{epi.name} not bundled')
+  skip_if_pypulseq_too_old(epi)
   imp = adapter.import_pulseq(epi, readout_set_values=())
   assert imp.readout_sim_block_indices == []
   durs_o = np.array([b.dur.m_as('ms') for b in imp.feelmri_seq.blocks])
@@ -662,6 +679,7 @@ def test_import_reads_with_the_scanner_gamma(adapter):
   multiplies back, or every encoding phase is off by their ratio."""
   from feelmri.MRObjects import Scanner
   seq_path = SEQ_FILES[0]
+  skip_if_pypulseq_too_old(seq_path)
   scanner = Scanner(field_strength=Quantity(3.0, 'T'))
   default = adapter.read_seq(str(seq_path))
   matched = adapter.read_seq(str(seq_path),
@@ -678,6 +696,7 @@ def test_pulseq_import_disables_perfect_spoiling(adapter):
   """A .seq file spells out its own spoilers, so BlochSolver must not zero
   Mxy between blocks on top of them. The flag rides on the Sequence and is
   resolved when perfect_spoiling is left at its None default."""
+  skip_if_pypulseq_too_old(SEQ_FILES[0])
   imp = adapter.import_pulseq(SEQ_FILES[0])
   assert imp.feelmri_seq.explicit_spoiling is True
   assert imp.feelmri_sim_seq.explicit_spoiling is True

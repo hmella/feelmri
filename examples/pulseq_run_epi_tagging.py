@@ -253,9 +253,14 @@ if __name__ == '__main__':
   kspace_points = (traj['kx'].reshape((-1, 1, 1)).astype(np.float32),
                   traj['ky'].reshape((-1, 1, 1)).astype(np.float32),
                   traj['kz'].reshape((-1, 1, 1)).astype(np.float32))
-  # traj['times'] is already in ms, which is what mri_signal expects: T2 is
-  # passed as ms and phi_dB0 as rad/ms.
-  kspace_times = traj['times'].reshape((-1, 1, 1)).astype(np.float32)
+  # traj['times'] is in ms, which is what mri_signal expects (T2 is passed as
+  # ms and phi_dB0 as rad/ms), but it is measured from the start of the .seq
+  # file. The exponentials exp(-t/T2) and exp(i*phi*t) are applied to the
+  # magnetization captured at the excitation, so t has to be measured from the
+  # start of the readout. Same convention as gradient_spoiling.py, which
+  # subtracts traj.t_start.
+  kspace_times = (traj['times'] - traj['times'].min())
+  kspace_times = kspace_times.reshape((-1, 1, 1)).astype(np.float32)
 
   # k-space buffer matches the (N, 1, 1, 1) shape that mri_signal returns
   # for the default as_signal_inputs layout; an additional leading axis
