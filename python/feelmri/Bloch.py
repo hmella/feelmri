@@ -52,14 +52,30 @@ class ADC:
         Frequency offset applied to the ADC samples (Hz). Default 0 Hz.
     phase_offset : Quantity, optional
         Phase offset applied to the ADC samples (rad). Default 0 rad.
+    phase_modulation : np.ndarray or None, optional
+        Per-sample phase added on top of ``phase_offset`` (rad), one entry
+        per ADC sample. Pulseq v1.5 carries it as a shape referenced by the
+        ADC event; used for phase-cycled and CAIPI-style acquisitions.
+        Default None.
+
+    Notes
+    -----
+    The three offsets are demodulation parameters. ``BlochSolver`` does not
+    sample the ADC -- readout is synthesized from the k-space trajectory by
+    :meth:`~feelmri.Phantom.FEMPhantom.mri_signal` -- so applying them is the
+    caller's job.
     """
 
     def __init__(self, times: np.ndarray,
                  freq_offset: Quantity = Quantity(0.0, 'Hz'),
-                 phase_offset: Quantity = Quantity(0.0, 'rad')):
+                 phase_offset: Quantity = Quantity(0.0, 'rad'),
+                 phase_modulation: np.ndarray | None = None):
         self.times = Quantity(times, 'ms')
         self.freq_offset = freq_offset.to('Hz')
         self.phase_offset = phase_offset.to('rad')
+        self.phase_modulation = (
+            None if phase_modulation is None
+            else Quantity(np.asarray(phase_modulation, dtype=float), 'rad'))
 
 
 class SequenceBlock:
@@ -130,6 +146,9 @@ class SequenceBlock:
         m_gr = np.sum([g(t) for g in self.M_gradients], axis=0)
         p_gr = np.sum([g(t) for g in self.P_gradients], axis=0)
         s_gr = np.sum([g(t) for g in self.S_gradients], axis=0)
+        # Informational: which of the requested times are ADC samples. The
+        # solver does not consume it -- readout is synthesized from the
+        # k-space trajectory, not from the magnetization time course.
         if self.adc is not None:
             adc_mask = np.isin(t, self.adc.times.m_as('ms'))
         else:
@@ -304,6 +323,11 @@ class Sequence:
     def __init__(self, blocks: list = []):
         self.blocks = blocks
         self.Nb_blocks = len(self.blocks)
+        # True when the blocks already carry the spoiler gradients and RF
+        # phase cycling the sequence relies on, so the solver must not zero
+        # Mxy between blocks on top of them. Set by import_pulseq; see
+        # BlochSolver's perfect_spoiling argument.
+        self.explicit_spoiling = False
         self.time_extent = self._get_extent()
         self.dur = self.time_extent[1] - self.time_extent[0]
         self.non_empty = [~block.empty for block in self.blocks if block is not None]
@@ -498,6 +522,18 @@ class BlochSolver:
     initial_Mxy : np.ndarray or float, optional
         Initial transverse magnetization (complex, nodal or scalar).
         Default is 0.0.
+    perfect_spoiling : bool or None, optional
+        Zero the transverse magnetization between non-empty blocks. This
+        stands in for gradient or RF spoiling, which a coarse mesh cannot
+        dephase properly: the intra-voxel phase spread the spoiler is meant
+        to produce is not resolved by the element size. It also destroys
+        every coherence pathway that survives a block boundary, so it is
+        wrong for FLASH, bSSFP, EPI echo trains and anything driven by a
+        stimulated echo. ``None`` (the default) resolves to ``False`` when
+        the sequence sets ``Sequence.explicit_spoiling`` -- which
+        :func:`~feelmri.PulseqAdapter.import_pulseq` does, since a ``.seq``
+        file spells its spoilers out -- and ``True`` otherwise. Pass a bool
+        to override.
     """
 
     def __init__(self, sequence: Sequence,
@@ -510,7 +546,7 @@ class BlochSolver:
                  pod_trajectory: POD | None = None,
                  initial_Mxy: np.ndarray | float = 0.0,
                  initial_Mz: np.ndarray | float = None,
-                 perfect_spoiling: bool = True,
+                 perfect_spoiling: bool | None = None,
                  isochromat_K: int = 25,
                  isochromat_distribution: str = 'sobol',
                  isochromat_seed: int | None = 0,
@@ -549,7 +585,9 @@ class BlochSolver:
         self.initial_Mxy = initial_Mxy * ones.astype(self._np_cplx)
         self.initial_Mz = initial_Mz * ones if initial_Mz is not None else M0 * ones
         self.pod_trajectory = pod_trajectory
-        self.perfect_spoiling = perfect_spoiling
+        if perfect_spoiling is None:
+            perfect_spoiling = not getattr(sequence, 'explicit_spoiling', False)
+        self.perfect_spoiling = bool(perfect_spoiling)
         # Multi-isochromat dephasing controls for blocks with _spoiler=True.
         # K          -- number of isochromats per local FE node.
         # distribution -- 'uniform' (Monte-Carlo, ~1/sqrt(K) residual) or
@@ -658,7 +696,10 @@ class BlochSolver:
             n_steps = discrete_times.shape[0]
             rf_pulses = np.zeros((n_steps, 1), dtype=self._np_cplx)
             gradients = np.zeros((n_steps, 3), dtype=self._np_real)
-            rf, G, adc_mask = block(discrete_times)
+            # The ADC mask is discarded: the solver evolves magnetization and
+            # does not sample it. Readout is synthesized afterwards from the
+            # k-space trajectory by Phantom.mri_signal.
+            rf, G, _ = block(discrete_times)
             rf_pulses[:, 0] = rf
             gradients[:, 0] = G[0]
             gradients[:, 1] = G[1]
@@ -789,10 +830,11 @@ class BlochSolver:
             if block.empty is True:
                 next_Mxy = Mxy_[:, -1]
             else:
-                # TODO: verify if there is a better way to know beforehand if the sequence will contain spoilers
                 if self.perfect_spoiling is True:
-                    # This is done because gradient or RF spoiling cannot be applied on coarse meshes.
-                    # Therefore, we need to artificially spoil the magnetization.
+                    # Stand-in for gradient or RF spoiling, which a coarse mesh
+                    # cannot dephase. A sequence that carries its own spoilers
+                    # sets Sequence.explicit_spoiling and lands here with the
+                    # flag already False.
                     next_Mxy = np.zeros_like(Mxy_[:, -1])
                 else:
                     next_Mxy = Mxy_[:, -1]

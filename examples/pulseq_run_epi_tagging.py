@@ -231,15 +231,13 @@ if __name__ == '__main__':
     seq.add_block(time_spacing, dt=Q_(1, 'ms'))
 
   # Bloch solver.
-  # Note: perfect_spoiling=False is required here. The script marks
-  # store_magnetization=True on the rephaser/encoder block (the last
-  # block of `ex`, which is RF-free per write_epi_tagging.py:160-161),
-  # so the transverse magnetization created by the preceding RF block
-  # must survive across the block boundary. With perfect_spoiling=True
-  # (BlochSolver's default, Bloch.py:495) the solver zeros initial_Mxy
-  # on every non-empty block (Bloch.py:642-645), and the captured Mxy
-  # comes out identically zero while Mz still shows a credible
-  # slice-selective profile.
+  # perfect_spoiling=False is passed explicitly because `seq` is rebuilt here
+  # from individual blocks, so it does not carry the explicit_spoiling flag
+  # import_pulseq sets on the sequences it returns. It is required either
+  # way: the script marks store_magnetization=True on the rephaser/encoder
+  # block, which is RF-free, so the transverse magnetization created by the
+  # preceding RF block must survive the block boundary. Zeroing it leaves the
+  # captured Mxy identically zero while Mz still looks credible.
   solver = BlochSolver(seq, phantom,
                        scanner=scanner,
                        M0=1e+9,
@@ -286,7 +284,9 @@ if __name__ == '__main__':
   kspace_points = (traj['kx'].reshape((-1, 1, 1)).astype(np.float32),
                   traj['ky'].reshape((-1, 1, 1)).astype(np.float32),
                   traj['kz'].reshape((-1, 1, 1)).astype(np.float32))
-  kspace_times = 1e-3 * traj['times'].reshape((-1, 1, 1)).astype(np.float32)
+  # traj['times'] is already in ms, which is what mri_signal expects: T2 is
+  # passed as ms and phi_dB0 as rad/ms.
+  kspace_times = traj['times'].reshape((-1, 1, 1)).astype(np.float32)
 
   # k-space buffer matches the (N, 1, 1, 1) shape that mri_signal returns
   # for the default as_signal_inputs layout; an additional leading axis
