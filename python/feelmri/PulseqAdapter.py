@@ -1700,6 +1700,33 @@ def kspace_trajectory(pulseq_seq: "PulseqSequence") -> Dict[str, np.ndarray]:
   }
 
 
+def _reshape_signal_inputs(kx, ky, kz, times_ms, shape):
+  """Cast a flat trajectory to the rank-3 float32 tensors mri_signal takes.
+
+  The C++ ``SignalAssembler`` kernels want ``kloc`` as
+  ``std::vector<Eigen::Tensor<float, 3>>`` and ``t`` as one rank-3 float
+  tensor of matching shape ``(nb_meas, nb_lines, nb_kz)``, so the flat
+  arrays need a reshape and a dtype / contiguity cast. ``shape`` defaults to
+  ``(N, 1, 1)``, the per-readout pattern used everywhere else in FEelMRI.
+  """
+  n = int(np.asarray(times_ms).size)
+  if shape is None:
+    shape = (n, 1, 1)
+  shape = tuple(int(d) for d in shape)
+  if int(np.prod(shape)) != n:
+    raise ValueError(
+      f'requested shape {shape} (prod={int(np.prod(shape))}) does not '
+      f'match N={n} ADC samples'
+    )
+  points = tuple(
+    np.ascontiguousarray(np.asarray(a).reshape(shape), dtype=np.float32)
+    for a in (kx, ky, kz)
+  )
+  times = np.ascontiguousarray(
+    np.asarray(times_ms).reshape(shape), dtype=np.float32)
+  return points, times
+
+
 def as_signal_inputs(traj: Dict[str, np.ndarray],
                      shape: Optional[Tuple[int, ...]] = None
                      ) -> Tuple[Tuple[np.ndarray, np.ndarray, np.ndarray],
@@ -1732,23 +1759,8 @@ def as_signal_inputs(traj: Dict[str, np.ndarray],
       ndarrays (one per axis); ``kspace_times`` is a single float32
       C-contiguous rank-3 ndarray of the same shape.
   """
-  n = int(traj['times'].size)
-  if shape is None:
-    shape = (n, 1, 1)
-  shape = tuple(int(d) for d in shape)
-  if int(np.prod(shape)) != n:
-    raise ValueError(
-      f'requested shape {shape} (prod={int(np.prod(shape))}) does not '
-      f'match N={n} ADC samples'
-    )
-  points = tuple(
-    np.ascontiguousarray(traj[axis].reshape(shape), dtype=np.float32)
-    for axis in ('kx', 'ky', 'kz')
-  )
-  times = np.ascontiguousarray(
-    traj['times'].reshape(shape), dtype=np.float32
-  )
-  return points, times
+  return _reshape_signal_inputs(
+      traj['kx'], traj['ky'], traj['kz'], traj['times'], shape)
 
 
 def kspace_to_signal_inputs(  # pragma: no cover (optional dep)
@@ -1790,23 +1802,8 @@ def kspace_to_signal_inputs(  # pragma: no cover (optional dep)
   k_traj_adc, _k_full, _t_exc, _t_ref, t_adc = pp_seq.calculate_kspace()
   k_traj_adc = np.asarray(k_traj_adc, dtype=float)
   t_adc = np.asarray(t_adc, dtype=float)
-  n = int(t_adc.size)
-  if shape is None:
-    shape = (n, 1, 1)
-  shape = tuple(int(d) for d in shape)
-  if int(np.prod(shape)) != n:
-    raise ValueError(
-      f'requested shape {shape} (prod={int(np.prod(shape))}) does not '
-      f'match N={n} ADC samples'
-    )
-  points = tuple(
-    np.ascontiguousarray(k_traj_adc[axis].reshape(shape), dtype=np.float32)
-    for axis in range(3)
-  )
-  times = np.ascontiguousarray(
-    (t_adc * 1e3).reshape(shape), dtype=np.float32
-  )
-  return points, times
+  return _reshape_signal_inputs(
+      k_traj_adc[0], k_traj_adc[1], k_traj_adc[2], t_adc * 1e3, shape)
 
 
 # ---------------------------------------------------------------------------
@@ -1942,6 +1939,55 @@ class PulseqImport:
       if ok:
         matches.append(i)
     return matches
+
+  @staticmethod
+  def contiguous_groups(indices: List[int]) -> List[List[int]]:
+    """Split block indices into runs of consecutive integers.
+
+    A writer emits the blocks of one shot or one slice adjacently, so a
+    label query returns several such runs concatenated:
+    ``filter_blocks(SET=2)`` on a two-slice sequence gives
+    ``[4, 5, 11, 12]`` and this returns ``[[4, 5], [11, 12]]``. Take
+    ``[0]`` for the first shot without needing to know the slice count.
+    """
+    groups: List[List[int]] = []
+    for i in sorted(indices):
+      if groups and i == groups[-1][-1] + 1:
+        groups[-1].append(i)
+      else:
+        groups.append([i])
+    return groups
+
+  def duration_of(self, indices: List[int], *, sim: bool = True) -> Quantity:
+    """Total duration of the given blocks, in ms.
+
+    Use it to size a placeholder delay that stands in for blocks whose
+    physics is not being evolved -- a readout train during steady-state
+    convergence, say -- so the timeline still adds up.
+    """
+    seq = self.feelmri_sim_seq if sim else self.feelmri_seq
+    total = Quantity(0.0, 'ms')
+    for i in indices:
+      total = total + seq.blocks[i].dur.to('ms')
+    return total
+
+  def copy_block(self, index: int, *, sim: bool = True,
+                 store_magnetization: bool = False,
+                 spoiler: bool = False) -> SequenceBlock:
+    """Return an independent copy of one block, ready to be assembled into
+    a hand-built :class:`~feelmri.Bloch.Sequence`.
+
+    ``store_magnetization`` is set explicitly rather than inherited: the
+    import stamps it on prep and readout-anchor blocks for its own
+    ``m_storage_idx`` bookkeeping, and a caller rebuilding the sequence
+    wants its own snapshot points, not those. ``spoiler`` turns on the
+    solver's multi-isochromat dephasing for the block.
+    """
+    seq = self.feelmri_sim_seq if sim else self.feelmri_seq
+    block = seq.blocks[index].copy()
+    block.store_magnetization = bool(store_magnetization)
+    block.spoiler = bool(spoiler)
+    return block
 
 
 # RF use labels that anchor a coherence period. ADC blocks following one
@@ -2311,6 +2357,131 @@ def import_pulseq(
     readout_sim_block_indices=readout_sim_block_indices,
     timing_errors=timing_errors,
   )
+
+
+# ---------------------------------------------------------------------------
+# One-call simulation
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class PulseqSimulation:
+  """Result of :func:`simulate_pulseq`.
+
+  Attributes
+  ----------
+  kspace : list of np.ndarray
+      One complex array per :class:`ReadoutWindow`, shaped
+      ``(N_samples, 1, 1, n_coils)`` as ``Phantom.mri_signal`` returns it.
+      Under MPI these are reduced onto rank 0 unless ``gather=False``, in
+      which case each rank holds its own partial sum.
+  times : list of np.ndarray
+      Absolute sample times (ms) matching each ``kspace`` entry.
+  Mxy, Mz : np.ndarray
+      The solver's stored magnetization columns, one per block flagged
+      ``store_magnetization``. ``ReadoutWindow.m_storage_idx`` indexes them.
+  imp : PulseqImport
+      The parsed sequence, so callers can reach the readout windows, the
+      label state and the timing report without importing twice.
+  """
+  kspace: List[np.ndarray]
+  times: List[np.ndarray]
+  Mxy: np.ndarray
+  Mz: np.ndarray
+  imp: PulseqImport
+
+  @property
+  def kspace_flat(self) -> np.ndarray:
+    """Every readout concatenated along the sample axis."""
+    if not self.kspace:
+      return np.zeros((0, 1, 1, 1), dtype=np.complex64)
+    return np.concatenate(self.kspace, axis=0)
+
+  @property
+  def times_flat(self) -> np.ndarray:
+    """Sample times matching :attr:`kspace_flat`, in ms."""
+    if not self.times:
+      return np.zeros((0,), dtype=np.float64)
+    return np.concatenate(self.times)
+
+
+def simulate_pulseq(seq_path,
+                    phantom,
+                    *,
+                    scanner: Optional[Scanner] = None,
+                    pod=None,
+                    gather: bool = True,
+                    import_kwargs: Optional[Dict[str, Any]] = None,
+                    **solver_kwargs) -> PulseqSimulation:
+  """Import a ``.seq``, evolve the magnetization and assemble its k-space.
+
+  This is the dual-path workflow in one call: :func:`import_pulseq`, one
+  :class:`~feelmri.Bloch.BlochSolver` pass over the whole sequence, then per
+  readout window ``phantom.update_magnetization`` followed by
+  ``phantom.mri_signal``. The readout is not evolved by the solver -- it is
+  synthesized from the k-space trajectory -- which is why one solve serves
+  every window.
+
+  ``phantom`` must already have ``set_assembler`` and ``set_static_fields``
+  called on it. Those carry modelling decisions (voxel size, quadrature
+  order, the T2 and off-resonance maps) that no wrapper should guess.
+
+  Parameters
+  ----------
+  seq_path : str or Path
+      The Pulseq file.
+  phantom : FEMPhantom
+      Configured as above.
+  scanner : Scanner, optional
+      Passed to both the import and the solver, so the gamma the file is
+      read with is the gamma the solver integrates. Default 1.5 T.
+  pod : POD or PODSum or None
+      Motion trajectory handed to ``mri_signal``. To move the spins during
+      the Bloch evolution as well, pass it as ``pod_trajectory=`` too.
+  gather : bool, optional
+      Reduce each readout's signal onto rank 0 with
+      :func:`~feelmri.MPIUtilities.gather_data`. Default True. ``mri_signal``
+      has no collective of its own, so with ``gather=False`` every rank
+      returns only its own nodes' contribution.
+  import_kwargs : dict, optional
+      Forwarded to :func:`import_pulseq` (``readout_set_values``,
+      ``placeholder_dt``, ``validate``).
+  **solver_kwargs
+      Forwarded to :class:`~feelmri.Bloch.BlochSolver` -- ``M0``, ``T1``,
+      ``T2``, ``delta_B``, ``pod_trajectory``, ``method``, ``dtype`` and the
+      isochromat controls. ``perfect_spoiling`` is left at its default,
+      which resolves to False for an imported sequence.
+
+  Returns
+  -------
+  PulseqSimulation
+  """
+  from feelmri.Bloch import BlochSolver
+  from feelmri.MPIUtilities import gather_data
+
+  if scanner is None:
+    scanner = Scanner()
+  imp = import_pulseq(seq_path, scanner=scanner, **(import_kwargs or {}))
+
+  solver = BlochSolver(sequence=imp.feelmri_seq, phantom=phantom,
+                       scanner=scanner, **solver_kwargs)
+  Mxy, Mz = solver.solve()
+
+  kspace: List[np.ndarray] = []
+  times: List[np.ndarray] = []
+  for rw in imp.readouts:
+    if rw.m_storage_idx < 0:
+      logger.warning(
+          "readout blocks %d-%d have no coherence anchor and are skipped",
+          rw.first_block, rw.last_block)
+      continue
+    phantom.update_magnetization(Mxy[:, rw.m_storage_idx])
+    points, t = _reshape_signal_inputs(
+        rw.kspace[:, 0], rw.kspace[:, 1], rw.kspace[:, 2], rw.times, None)
+    signal = phantom.mri_signal(list(points), t, pod)
+    kspace.append(gather_data(signal) if gather else signal)
+    times.append(rw.times)
+
+  return PulseqSimulation(kspace=kspace, times=times, Mxy=Mxy, Mz=Mz, imp=imp)
 
 
 # ---------------------------------------------------------------------------

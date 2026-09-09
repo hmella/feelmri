@@ -106,7 +106,7 @@ if __name__ == '__main__':
                           rf_pulses=[], 
                           dt_gr=Q_(1e-2, 'ms'), 
                           store_magnetization=False)
-  spoiler._spoiler = True
+  spoiler.spoiler = True
 
   # Generate kspace trajectory
   traj = CartesianStack(FOV=planning.FOV.to('m'),

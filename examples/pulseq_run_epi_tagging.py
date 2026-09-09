@@ -135,58 +135,27 @@ if __name__ == '__main__':
   readout_idx = imp.filter_blocks(SET=3)
   spoiler_idx = imp.filter_blocks(SET=100)
 
-  def _first_contiguous_group(indices):
-    """Return the longest run of consecutive integers at the start of
-    ``indices``. The writer emits one excitation + one rephaser as two
-    adjacent SET=2 blocks per slice; this picks slice 0's pair without
-    having to know ``n_slices`` at runtime."""
-    if not indices:
-      return []
-    out = [indices[0]]
-    for j in indices[1:]:
-      if j == out[-1] + 1:
-        out.append(j)
-      else:
-        break
-    return out
-
-  ex_group_idx    = _first_contiguous_group(excite_idx)
-  ro_group_idx    = _first_contiguous_group(readout_idx)
+  # The writer emits one excitation + one rephaser as two adjacent SET=2
+  # blocks per slice, so the first contiguous run is slice 0's pair and the
+  # slice count never has to be known here.
+  ex_group_idx    = imp.contiguous_groups(excite_idx)[0]
+  ro_group_idx    = imp.contiguous_groups(readout_idx)[0]
   sp_template_idx = spoiler_idx[0] if spoiler_idx else None
 
-  def _block_total_dur(indices):
-    total = Q_(0.0, 'ms')
-    for j in indices:
-      total = total + sim.blocks[j].dur.to('ms')
-    return total
-
-  ex_dur = _block_total_dur(ex_group_idx)
-  ro_dur = _block_total_dur(ro_group_idx)
-  sp_dur = sim.blocks[sp_template_idx].dur.to('ms') if sp_template_idx is not None else Q_(0.0, 'ms')
+  ex_dur = imp.duration_of(ex_group_idx)
+  ro_dur = imp.duration_of(ro_group_idx)
+  sp_dur = imp.duration_of([sp_template_idx] if sp_template_idx is not None else [])
 
   # Create sequence object
   seq    = Sequence()
   dt_seq = Q_(1e-2, 'ms')  # Time step for sequence blocks (10 us)
 
-  def _copy_clean(idx):
-    """Deep-copy a sim-seq block and clear any auto-set storage flag.
-    Storage flags are added explicitly by the runner where they matter
-    (one snapshot per imaging frame), so any flag stamped by the
-    adapter on prep / readout-anchor blocks is dropped here."""
-    b = sim.blocks[idx].copy()
-    b.store_magnetization = False
-    return b
-
   def _spoiler_copy():
-    """Spoiler block copy with the multi-isochromat dephasing path
-    enabled (`_spoiler=True` triggers ``BlochSolver``'s isochromat
-    expansion). All SET=100 blocks in the writer are built from the
-    same gradient events, so the first one suffices as a template."""
+    # All SET=100 blocks come from the same gradient events, so the first is
+    # a valid template for every spoiler in the sequence.
     if sp_template_idx is None:
       return None
-    b = _copy_clean(sp_template_idx)
-    b._spoiler = True
-    return b
+    return imp.copy_block(sp_template_idx, spoiler=True)
 
   # Time spacing between frames, computed from sim-seq block durations.
   time_spacing = (parameters.Imaging.TimeSpacing - ex_dur - ro_dur - sp_dur).to('ms')
@@ -198,7 +167,7 @@ if __name__ == '__main__':
   # readout physics during steady-state convergence).
   for _ in range(dummy_pulses):
     for j in ex_group_idx:
-      seq.add_block(_copy_clean(j), dt=dt_seq)
+      seq.add_block(imp.copy_block(j), dt=dt_seq)
     seq.add_block(ro_dur, dt=Q_(1, 'ms'))
     seq.add_block(sp_dur, dt=dt_seq)
     seq.add_block(time_spacing, dt=Q_(1, 'ms'))
@@ -210,10 +179,10 @@ if __name__ == '__main__':
   # blocks come straight from the simulation skeleton; they carry no
   # readout content.
   for j in prep_x_idx:
-    seq.add_block(_copy_clean(j), dt=dt_seq)
+    seq.add_block(imp.copy_block(j), dt=dt_seq)
   seq.add_block(_spoiler_copy(), dt=dt_seq)
   for j in prep_y_idx:
-    seq.add_block(_copy_clean(j), dt=dt_seq)
+    seq.add_block(imp.copy_block(j), dt=dt_seq)
   seq.add_block(_spoiler_copy(), dt=dt_seq)
 
   # Imaging frames: real excitation (snapshot Mxy at the end of the
@@ -221,7 +190,7 @@ if __name__ == '__main__':
   # `sim`), then real spoiler with multi-isochromat dephasing, then
   # the per-frame timing gap.
   for fr in range(Nb_frames):
-    ex_blks = [_copy_clean(j) for j in ex_group_idx]
+    ex_blks = [imp.copy_block(j) for j in ex_group_idx]
     if ex_blks:
       ex_blks[-1].store_magnetization = True
     for b in ex_blks:
@@ -336,6 +305,11 @@ if __name__ == '__main__':
     mode='adjoint',
     combine=None,
   )
+  # reconstruct_nufft drops the channel axis when there is only one, which is
+  # the single-frame case. Put it back before moving it to the end.
+  Im = np.asarray(Im)
+  if Im.ndim == len(RES):
+    Im = Im[np.newaxis, ...]
   Im = Im.transpose((1,2,3,0)).reshape((RES[0], RES[1], RES[2], 1, -1))  # (Nx, Ny, Nz, enc, C)
   print(Im.shape)
 

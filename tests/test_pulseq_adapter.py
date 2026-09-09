@@ -813,3 +813,50 @@ def test_readout_anchors_agree_with_calculate_kspace(adapter, seq_path):
     assert np.any((anchors >= t0 - 1e-12) & (anchors <= t1 + 1e-12)), (
         f'anchor block {rw.m_storage_block} [{t0:.6g}, {t1:.6g}] s holds no '
         f'pulse that calculate_kspace treats as an anchor')
+
+
+# ---------------------------------------------------------------------------
+# One-call simulation
+# ---------------------------------------------------------------------------
+
+def test_simulate_pulseq_end_to_end(adapter, tmp_path):
+  """simulate_pulseq is the dual-path workflow in one call: import, one
+  Bloch pass, then per-readout update_magnetization + mri_signal. Run it on
+  a 2-tet phantom and check it lines up with the readout windows."""
+  pytest.importorskip('mpi4py')
+  pytest.importorskip('pymetis')
+  try:
+    from feelmri.MRObjects import Scanner
+    from feelmri.Phantom import FEMPhantom
+  except ImportError as exc:
+    pytest.skip(f'feelmri C++ extensions not available: {exc}')
+
+  seq_path = DATA_DIR / 'gre_v15.seq'
+  if not seq_path.exists():
+    pytest.skip('run tests/data/generate_seq_fixtures.py to build gre_v15.seq')
+
+  mesh_path = tmp_path / 'minimal_tet.vtu'
+  _write_minimal_tet_mesh(mesh_path)
+  phantom = FEMPhantom(path=str(mesh_path))
+  phantom.set_assembler(voxel_size=5e-3, lorder=1, horder=2,
+                        nodal_approximation=True, lumped=True)
+  n = phantom.local_nodes.shape[0]
+  phantom.set_static_fields(T2=np.full(n, 100.0, dtype=np.float32),
+                            phi_dB0=np.zeros(n, dtype=np.float32))
+
+  sim = adapter.simulate_pulseq(seq_path, phantom, scanner=Scanner())
+
+  assert len(sim.kspace) == len(sim.imp.readouts) > 0
+  assert sim.Mxy.shape[0] == n
+  for k, t, rw in zip(sim.kspace, sim.times, sim.imp.readouts):
+    assert k.shape[:3] == (rw.times.size, 1, 1)
+    assert np.all(np.isfinite(k))
+    assert t.size == rw.times.size
+
+  # The flattened views must cover exactly the file's ADC samples.
+  pp = pytest.importorskip('pypulseq')
+  ref = pp.Sequence()
+  ref.read(str(seq_path), detect_rf_use=False)
+  ref_times = np.sort(ref.adc_times()[0] * 1e3)
+  assert sim.kspace_flat.shape[0] == ref_times.size
+  assert np.abs(np.sort(sim.times_flat) - ref_times).max() < 1e-6

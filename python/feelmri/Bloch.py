@@ -110,6 +110,12 @@ class SequenceBlock:
     store_magnetization : bool, optional
         If True, the Bloch solver stores the magnetization at the end of
         this block. Default is False.
+    spoiler : bool, optional
+        If True, the Bloch solver runs its multi-isochromat dephasing path
+        over this block, expanding each local node into ``isochromat_K``
+        offset positions so the block's gradient actually dephases within a
+        voxel. Without it a coarse mesh cannot resolve the intra-voxel phase
+        spread a spoiler produces. Default is False.
     """
 
     def __init__(self, gradients: list = [],
@@ -120,7 +126,8 @@ class SequenceBlock:
                  dt: Quantity = Quantity(10, 'ms'),
                  dur: Quantity = Quantity(-1, 'ms'),
                  empty: bool = False,
-                 store_magnetization: bool = False):
+                 store_magnetization: bool = False,
+                 spoiler: bool = False):
         self.gradients = gradients
         self.M_gradients = [g for g in self.gradients if g.axis == 0]
         self.P_gradients = [g for g in self.gradients if g.axis == 1]
@@ -136,7 +143,16 @@ class SequenceBlock:
         self.Nb_times = len(self.discrete_times)
         self.empty = empty
         self.store_magnetization = store_magnetization
-        self._spoiler = False
+        self._spoiler = bool(spoiler)
+
+    @property
+    def spoiler(self) -> bool:
+        """Whether the solver runs its multi-isochromat dephasing path here."""
+        return self._spoiler
+
+    @spoiler.setter
+    def spoiler(self, value: bool):
+        self._spoiler = bool(value)
 
     def copy(self):
         return copy.deepcopy(self)
@@ -588,7 +604,7 @@ class BlochSolver:
         if perfect_spoiling is None:
             perfect_spoiling = not getattr(sequence, 'explicit_spoiling', False)
         self.perfect_spoiling = bool(perfect_spoiling)
-        # Multi-isochromat dephasing controls for blocks with _spoiler=True.
+        # Multi-isochromat dephasing controls for blocks with spoiler=True.
         # K          -- number of isochromats per local FE node.
         # distribution -- 'uniform' (Monte-Carlo, ~1/sqrt(K) residual) or
         #                 'sobol'/'halton' (QMC, ~(log K)^d / K residual).
@@ -746,7 +762,7 @@ class BlochSolver:
                 rf_old = self._py_cplx(rf_pulses[0, 0])
 
             # Solve
-            if block._spoiler is True:
+            if block.spoiler is True:
                 K = self.isochromat_K
                 elem_size = self.phantom.global_elem_size.min()
                 (x_big, T1_big, T2_big,

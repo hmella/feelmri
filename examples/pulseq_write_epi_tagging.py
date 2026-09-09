@@ -2,6 +2,7 @@
 Demo low-performance EPI sequence without ramp-sampling.
 """
 
+import os
 import sys
 
 import matplotlib.pyplot as plt
@@ -243,9 +244,18 @@ if __name__ == '__main__':
                             transform_name='Transform1',
                             length_units=parameters.Formatting.units)
 
-    main(plot=True,
+    # The checked-in epi_pypulseq.seq is a v1.4.2 fixture the adapter tests
+    # read, so overwriting it from a test run would silently change what they
+    # measure. Write next to it instead when running under the test harness.
+    if os.getenv('FEELMRI_FAST_TEST', '0') == '1':
+      seq_out = script_path/'output'/'epi_pypulseq_generated.seq'
+      seq_out.parent.mkdir(parents=True, exist_ok=True)
+    else:
+      seq_out = script_path/'pulseq/epi_pypulseq.seq'
+
+    main(plot=os.getenv('FEELMRI_FAST_TEST', '0') != '1',
          write_seq=True,
-         seq_filename=script_path/'pulseq/epi_pypulseq.seq',
+         seq_filename=seq_out,
          fov = tuple(2*planning.FOV[:-1].m_as('m')),
          n_x = parameters.Imaging.RES[0],
          n_y = parameters.Imaging.RES[1],
