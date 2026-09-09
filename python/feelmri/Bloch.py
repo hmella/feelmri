@@ -147,27 +147,33 @@ class SequenceBlock:
         return len(self.gradients) + len(self.rf_pulses)
 
     def _get_extent(self):
+        # float64 throughout. The extents are absolute sequence times and every
+        # block is chained off the end of the previous one, so a float32 rounding
+        # here accumulates into the start time of every later block.
+        extents = []
+
         # Get (t_min, t_max) for each gradient
         if self.gradients:
-            time_extent_gr = Quantity(
-                np.array([(g.time.m, (g.time + g.dur).m) for g in self.gradients], dtype=np.float32),
+            extents.append(Quantity(
+                np.array([(g.time.m, (g.time + g.dur).m) for g in self.gradients], dtype=np.float64),
                 units=self.gradients[0].timings.u,
-            )
-        else:
-            time_extent_gr = Quantity(np.array([(0, 0)], dtype=np.float32), units='ms')
+            ).m_as('ms'))
 
         # Get (t_min, t_max) for each RF pulse
         if self.rf_pulses:
-            time_extent_rf = Quantity(
-                np.array([((rf.time - rf.ref).m, (rf.time - rf.ref + rf.dur).m) for rf in self.rf_pulses], dtype=np.float32),
+            extents.append(Quantity(
+                np.array([((rf.time - rf.ref).m, (rf.time - rf.ref + rf.dur).m) for rf in self.rf_pulses], dtype=np.float64),
                 units=self.rf_pulses[0].ref.u,
-            )
-        else:
-            time_extent_rf = Quantity(np.array([(0, 0)], dtype=np.float32), units='ms')
+            ).m_as('ms'))
+
+        # An empty list contributes nothing. Adding a (0, 0) placeholder instead
+        # would pull t_min down to zero for a block whose only event starts later.
+        if not extents:
+            extents.append(np.array([(0.0, 0.0)], dtype=np.float64))
 
         # Time extent
-        t_min = np.min([time_extent_gr.m_as('ms').min(axis=0), time_extent_rf.m_as('ms').min(axis=0)])
-        t_max = np.max([time_extent_gr.m_as('ms').max(axis=0), time_extent_rf.m_as('ms').max(axis=0)])
+        t_min = float(np.min([e.min(axis=0) for e in extents]))
+        t_max = float(np.max([e.max(axis=0) for e in extents]))
         if (t_max - t_min) < self.dur.m_as('ms'):
             t_max += self.dur.m_as('ms') - (t_max - t_min)
 
@@ -228,8 +234,14 @@ class SequenceBlock:
         else:
             adc_times = np.array([])
 
+        # The block ends at time_extent[1], which np.arange never reaches. Without
+        # it the last interval of every block is dropped, and a block whose only
+        # timings come from that arange (an event-free delay shorter than dt) is
+        # left with a single point and is not integrated at all.
+        block_ends = np.array([self.time_extent[0].m, self.time_extent[1].m])
+
         # Concatenate all timings, sort them and remove duplicates
-        all_timings = np.concatenate((gr_timings, rf_timings, seq_timings, adc_times))
+        all_timings = np.concatenate((gr_timings, rf_timings, seq_timings, adc_times, block_ends))
         all_timings = np.unique(np.sort(all_timings))
 
         return Quantity(all_timings, units='ms')

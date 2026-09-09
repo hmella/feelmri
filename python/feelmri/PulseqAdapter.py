@@ -1695,7 +1695,7 @@ class ReadoutWindow:
       Shape (N, 3) float32 array of (kx, ky, kz) at every ADC sample
       inside the window, in 1/m.
   times : np.ndarray
-      Shape (N,) float32 absolute sequence time of each ADC sample, in ms.
+      Shape (N,) float64 absolute sequence time of each ADC sample, in ms.
   adc_freq_offset : float
       Hz; constant within window (assumed identical across blocks).
   adc_phase_offset : float
@@ -1997,7 +1997,10 @@ def import_pulseq(
     t_end = float(block_end_s[last])
     mask = (t_adc >= t_start - 1e-12) & (t_adc < t_end + 1e-12)
     kspace = k_traj_adc[:, mask].T.astype(np.float32, copy=False)
-    times_arr = (t_adc[mask] * 1e3).astype(np.float32, copy=False)
+    # float64: these are absolute sequence times, and float32 only resolves
+    # about 6e-6 ms at 100 ms. The signal assembler takes float32, so callers
+    # cast at that boundary, usually after subtracting the window start.
+    times_arr = np.ascontiguousarray(t_adc[mask] * 1e3, dtype=np.float64)
 
     head_adc = pulseq_seq.ADC[first]
     readouts.append(ReadoutWindow(
