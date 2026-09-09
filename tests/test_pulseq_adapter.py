@@ -680,3 +680,136 @@ def test_pulseq_import_disables_perfect_spoiling(adapter):
 
   from feelmri.Bloch import Sequence
   assert Sequence().explicit_spoiling is False
+
+
+# ---------------------------------------------------------------------------
+# Sections and extension lists the reader must survive
+# ---------------------------------------------------------------------------
+
+def test_unhandled_extension_section_is_consumed(adapter, tmp_path):
+  """A section the reader only warns about still has to have its body read.
+  Otherwise the next line of that body is taken for a section header and the
+  file dies with 'Unknown section code'."""
+  src = DATA_DIR / 'gre_v15.seq'
+  if not src.exists():
+    pytest.skip('run tests/data/generate_seq_fixtures.py to build gre_v15.seq')
+  txt = src.read_text()
+  assert '# Sequence Shapes' in txt
+  injected = 'extension DELAYS 7\n1 100\n2 200\n\n# Sequence Shapes'
+  out = tmp_path / 'with_delays.seq'
+  out.write_text(txt.replace('# Sequence Shapes', injected, 1))
+
+  ps = adapter.read_seq(str(out))
+  assert len(ps) == len(adapter.read_seq(str(src)))
+
+  # Same for a section name the reader has never heard of.
+  injected = 'extension NOSUCHTHING 8\n1 0 0\n\n# Sequence Shapes'
+  out2 = tmp_path / 'with_unknown.seq'
+  out2.write_text(txt.replace('# Sequence Shapes', injected, 1))
+  assert len(adapter.read_seq(str(out2))) == len(ps)
+
+
+def test_cyclic_extension_list_terminates(adapter):
+  """The extension list is walked by next_id, which a file is free to make
+  cyclic. The walk must stop instead of hanging."""
+  extension_library = {
+    1: {'data': [1, 1, 2]},
+    2: {'data': [1, 2, 1]},   # points back at 1
+  }
+  extension_type = {1: {'data': 'LABELSET'}}
+  labelset_library = {1: {'data': [3, 'SET']}, 2: {'data': [4, 'LIN']}}
+
+  out = adapter.read_extension(extension_library, extension_type, {},
+                               labelset_library, {}, idx=1)
+  assert [(e.label, e.value) for e in out] == [('SET', 3), ('LIN', 4)]
+
+
+def test_dangling_extension_reference_is_reported(adapter):
+  """A next_id that is not in the library stops the walk rather than raising
+  a KeyError out of the parser."""
+  extension_library = {1: {'data': [1, 1, 99]}}
+  extension_type = {1: {'data': 'LABELSET'}}
+  labelset_library = {1: {'data': [3, 'SET']}}
+  out = adapter.read_extension(extension_library, extension_type, {},
+                               labelset_library, {}, idx=1)
+  assert len(out) == 1
+  assert adapter.read_extension(extension_library, extension_type, {},
+                                labelset_library, {}, idx=42) == []
+
+
+# ---------------------------------------------------------------------------
+# The in-house parser against the pypulseq APIs that cover the same ground
+# ---------------------------------------------------------------------------
+
+def test_check_timing_is_reported(adapter, tmp_path):
+  """import_pulseq runs check_timing and surfaces what it finds. A file that
+  fails it still imports -- the violations are what a scanner would reject,
+  not what the simulator cannot handle."""
+  src = DATA_DIR / 'gre_v15.seq'
+  if not src.exists():
+    pytest.skip('run tests/data/generate_seq_fixtures.py to build gre_v15.seq')
+  assert adapter.import_pulseq(src).timing_errors == ()
+
+  # Halve one block's stored duration so its events no longer fit.
+  lines = src.read_text().splitlines()
+  i = lines.index('[BLOCKS]')
+  row = lines[i + 3].split()
+  row[1] = str(max(1, int(row[1]) // 2))
+  lines[i + 3] = ' '.join(row)
+  bad = tmp_path / 'short_block.seq'
+  bad.write_text('\n'.join(lines) + '\n')
+
+  imp = adapter.import_pulseq(bad)
+  assert imp.timing_errors
+  assert any('BLOCK_DURATION_MISMATCH' in e for e in imp.timing_errors)
+  assert adapter.import_pulseq(bad, validate=False).timing_errors == ()
+
+
+def test_block_labels_match_evaluate_labels(adapter, tmp_path):
+  """_compute_block_labels reimplements what pypulseq's evaluate_labels does.
+  They must agree, with one documented difference: pypulseq back-fills a
+  label with 0 on the blocks before it first appears, while block_labels
+  leaves the key out (filter_blocks never matches a missing label)."""
+  pp = pytest.importorskip('pypulseq')
+  seq_path = _build_labelset_seq(tmp_path)
+  ref = pp.Sequence()
+  ref.read(str(seq_path), detect_rf_use=False)
+  expected = ref.evaluate_labels(evolution='blocks')
+  assert expected, 'fixture carries no labels'
+
+  imp = adapter.import_pulseq(seq_path)
+  assert len(imp.block_labels) == len(ref.block_durations)
+  for label, values in expected.items():
+    values = np.atleast_1d(values)
+    got = [state.get(label, 0) for state in imp.block_labels]
+    assert got == list(values), f'label {label}: {got} != {list(values)}'
+
+
+# The v1.5 fixtures alongside the examples: they carry the use labels the
+# anchor logic keys on, which the v1.4 example does not.
+ANCHOR_SEQ_FILES = sorted(DATA_DIR.glob('*_v15.seq')) + SEQ_FILES
+
+
+@pytest.mark.parametrize('seq_path', ANCHOR_SEQ_FILES, ids=lambda p: p.stem)
+def test_readout_anchors_agree_with_calculate_kspace(adapter, seq_path):
+  """_identify_readout_groups picks a coherence anchor from the RF use
+  labels; calculate_kspace resets or reflects k at the same pulses. Every
+  window's anchor block must therefore hold one of those pulses."""
+  pp = pytest.importorskip('pypulseq')
+  ref = pp.Sequence()
+  ref.read(str(seq_path), detect_rf_use=False)
+  _k, _kf, t_exc, t_ref, _t = ref.calculate_kspace()
+  anchors = np.sort(np.concatenate([np.atleast_1d(t_exc).ravel(),
+                                    np.atleast_1d(t_ref).ravel()]))
+  imp = adapter.import_pulseq(seq_path)
+  if not imp.readouts:
+    pytest.skip('no ADC in this sequence')
+  assert anchors.size, 'sequence has readouts but no excitation or refocusing'
+  for rw in imp.readouts:
+    assert rw.m_storage_block >= 0
+    block = imp.feelmri_seq.blocks[rw.m_storage_block]
+    t0 = block.time_extent[0].m_as('ms') * 1e-3
+    t1 = block.time_extent[1].m_as('ms') * 1e-3
+    assert np.any((anchors >= t0 - 1e-12) & (anchors <= t1 + 1e-12)), (
+        f'anchor block {rw.m_storage_block} [{t0:.6g}, {t1:.6g}] s holds no '
+        f'pulse that calculate_kspace treats as an anchor')
