@@ -196,3 +196,39 @@ def test_block_adc_times_match(seq_path, pulseq_sequences):
     expected = np.sort(ref.adc_times()[0] * 1e3)
     assert got.size == expected.size
     assert np.abs(got - expected).max() < 1e-6
+
+
+@pytest.mark.parametrize('seq_path', SEQ_FILES, ids=_ids(SEQ_FILES))
+def test_rf_waveforms_match(seq_path, pulseq_sequences):
+    # The last leg of the in-house-parser-vs-pypulseq comparison. RF has the
+    # same half-raster convention that the gradients do: read_RF shifts the
+    # delay by dt_rf/2 for a uniform raster, and this is what pins it.
+    from feelmri.MRObjects import Scanner
+    gammabar = Scanner().gammabar.m_as('Hz/T')
+
+    ref = _reference(pulseq_sequences, seq_path)
+    imp = import_pulseq(seq_path)
+
+    n_checked = 0
+    for i in range(1, len(ref.block_durations) + 1):
+        rf = getattr(ref.get_block(i), 'rf', None)
+        if rf is None:
+            continue
+        block = imp.feelmri_seq.blocks[i - 1]
+        assert block.rf_pulses, f'block {i - 1} lost its RF pulse'
+        got = block.rf_pulses[0]
+        t0 = block.time_extent[0].m_as('ms') * 1e-3
+        t_got = got.timings.m_as('ms') * 1e-3 - t0
+        # feelmri carries B1 in mT, pypulseq in Hz.
+        a_got = got.waveform.m_as('mT') * 1e-3 * gammabar
+        t_expected = np.asarray(rf.delay + rf.t, dtype=float)
+        a_expected = np.asarray(rf.signal, dtype=complex)
+
+        assert t_got.size == t_expected.size
+        assert np.abs(t_got - t_expected).max() < 1e-12
+        peak = max(float(np.abs(a_expected).max()), 1.0)
+        assert np.abs(a_got - a_expected).max() < 1e-9 * peak
+        n_checked += 1
+
+    if n_checked == 0:
+        pytest.skip('no RF in this sequence')

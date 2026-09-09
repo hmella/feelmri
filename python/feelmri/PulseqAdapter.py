@@ -354,6 +354,31 @@ def read_labels(io, event_library: Optional[Dict[int, Dict[str, Any]]] = None
     return event_library
 
 
+def skip_section(io) -> int:
+    """Consume the body of a section we do not handle, up to the blank line
+    that separates it from the next one. Returns the number of lines dropped.
+
+    Every other reader consumes its own body, so a section that only warns
+    leaves its data lines in the stream. The next iteration of read_seq's
+    section loop then reads one of them as a section header and raises
+    ``Unknown section code``.
+    """
+    dropped = 0
+    while True:
+        pos = io.tell()
+        line = io.readline()
+        if not line:
+            break
+        if not line.strip():
+            break
+        if line.lstrip().startswith('['):
+            # A section header with no blank line before it: put it back.
+            io.seek(pos)
+            break
+        dropped += 1
+    return dropped
+
+
 def read_extension_blocks(io, event_library: Optional[Dict[int, Dict[str, Any]]] = None
                           ) -> Dict[int, Dict[str, Any]]:
     """
@@ -1066,8 +1091,15 @@ def read_extension(extension_library: Dict[int, Dict[str, Any]],
 
     result: List[Extension] = []
 
-    # Each entry in extension_library is: [type, ref, next_id]
-    type_id, ref, next_id = extension_library[idx]["data"]
+    # Each entry in extension_library is: [type, ref, next_id]. The chain is
+    # walked by next_id, which the file is free to make cyclic, so track what
+    # has been visited rather than trusting it to terminate.
+    entry = extension_library.get(idx)
+    if entry is None:
+        logger.warning("Extension list #%d does not exist", idx)
+        return []
+    type_id, ref, next_id = entry["data"]
+    visited = {idx}
 
     while True:
         if type_id not in extension_type:
@@ -1100,7 +1132,17 @@ def read_extension(extension_library: Dict[int, Dict[str, Any]],
 
         if next_id == 0:
             break
-        type_id, ref, next_id = extension_library[next_id]["data"]
+        if next_id in visited:
+            logger.warning(
+                "Extension list #%d is cyclic at entry #%d; stopping the walk",
+                idx, next_id)
+            break
+        entry = extension_library.get(next_id)
+        if entry is None:
+            logger.warning("Extension list entry #%d does not exist", next_id)
+            break
+        visited.add(next_id)
+        type_id, ref, next_id = entry["data"]
 
     return result
 
@@ -1257,9 +1299,15 @@ def read_seq(filename: str, gamma: float = GAMMA) -> PulseqSequence:
                             io, [1.0] * 9, event_library=rotation_library
                         )
                     elif extension_name.startswith("DELAYS"):
-                        logger.warning("DELAYS extension is not handled")
+                        n_dropped = skip_section(io)
+                        logger.warning(
+                            "DELAYS extension is not handled; %d row(s) ignored",
+                            n_dropped)
                     else:
-                        logger.warning("Ignoring unknown extension: %s", extension_name)
+                        n_dropped = skip_section(io)
+                        logger.warning(
+                            "Ignoring unknown extension %s (%d row(s))",
+                            extension_name, n_dropped)
                 else:
                     raise RuntimeError(f"Unknown section code: {section}")
 
@@ -1585,6 +1633,19 @@ def _convert_adc(adc: "ADC", scanner: Scanner) -> Optional[feelmriADC]:
 # K-space trajectory extraction
 # ---------------------------------------------------------------------------
 
+def _read_with_pypulseq(filename):  # pragma: no cover (optional dep)
+  """Read ``filename`` into a ``pp.Sequence``.
+
+  One read serves three purposes -- the k-space trajectory, ``check_timing``
+  and the excitation / refocusing anchor times -- and costs milliseconds even
+  on a 231-block file, so it is not worth doing more than once.
+  """
+  pp = _require_pypulseq('import_pulseq')
+  pp_seq = pp.Sequence()
+  pp_seq.read(str(filename), detect_rf_use=False)
+  return pp_seq
+
+
 def _calculate_kspace_via_pypulseq(  # pragma: no cover (optional dep)
     filename,
 ) -> Tuple[np.ndarray, np.ndarray]:
@@ -1604,10 +1665,8 @@ def _calculate_kspace_via_pypulseq(  # pragma: no cover (optional dep)
   Re-implementing this locally would force us to duplicate the
   use-label bookkeeping that pypulseq already encodes correctly.
   """
-  pp = _require_pypulseq('kspace_trajectory')
-  pp_seq = pp.Sequence()
-  pp_seq.read(str(filename), detect_rf_use=False)
-  k_traj_adc, _k_full, _t_exc, _t_ref, t_adc = pp_seq.calculate_kspace()
+  k_traj_adc, _k_full, _t_exc, _t_ref, t_adc = (
+      _read_with_pypulseq(filename).calculate_kspace())
   return (
       np.asarray(k_traj_adc, dtype=float),
       np.asarray(t_adc, dtype=float),
@@ -1824,6 +1883,13 @@ class PulseqImport:
   Use :meth:`filter_blocks` to query block indices that match a
   particular label state.
 
+  ``timing_errors`` holds whatever ``pp.Sequence.check_timing`` reported
+  for the file, as strings, and is empty both when the file is clean and
+  when the check could not run (no pypulseq, or a file pypulseq refuses).
+  The errors are raster and dead-time violations the scanner would reject;
+  they are surfaced rather than raised because a file that fails them still
+  simulates.
+
   ``feelmri_sim_seq`` is a parallel :class:`feelmriSequence` with the
   same block count and indices as ``feelmri_seq``, except that every
   block whose running ``SET`` label value matches the
@@ -1845,6 +1911,7 @@ class PulseqImport:
   prep_storage_indices: List[int]
   block_labels: List[Dict[str, int]]
   readout_sim_block_indices: List[int]
+  timing_errors: Tuple[str, ...] = ()
 
   def filter_blocks(self, **labels: int) -> List[int]:
     """Return block indices whose running LABELSET/LABELINC state matches
@@ -1984,6 +2051,7 @@ def import_pulseq(
     filename,
     *,
     scanner: Optional[Scanner] = None,
+    validate: bool = True,
     readout_set_values: Tuple[int, ...] = (3,),
     placeholder_dt: Quantity = Quantity(1.0, 'ms'),
 ) -> PulseqImport:
@@ -2001,6 +2069,10 @@ def import_pulseq(
       offsets, which the ``.seq`` file does not carry. Default is
       :class:`~feelmri.MRObjects.Scanner`'s 1.5 T; pass a matching scanner
       when reading a sequence written for another field.
+  validate : bool, optional
+      Run ``pp.Sequence.check_timing`` on the file and report what it finds
+      on :attr:`PulseqImport.timing_errors`. Default True; the check costs
+      milliseconds even on a few hundred blocks.
   readout_set_values : tuple of int, optional
       ``SET`` label values that mark readout-train blocks. Every block
       whose running ``LABELSET`` state has ``SET`` in this set is
@@ -2026,6 +2098,27 @@ def import_pulseq(
   # and Scanner.gammabar (42.58 MHz/T) differ by 9.4e-5 relative, which would
   # otherwise appear as that much error in every encoding phase.
   pulseq_seq = read_seq(str(filename), gamma=scanner.gammabar.m_as('Hz/T'))
+
+  # One pypulseq read serves the trajectory below and the timing check here.
+  # It is best-effort: a file using an extension pypulseq does not implement
+  # (ROTATIONS) still imports, it just goes unvalidated -- and if it also has
+  # an ADC the trajectory step below raises, since that one is not optional.
+  pp_seq = None
+  timing_errors: Tuple[str, ...] = ()
+  try:
+    pp_seq = _read_with_pypulseq(filename)
+  except Exception as exc:
+    logger.info("%s: pypulseq could not read the file (%s); timings are not "
+                "validated", filename, exc)
+  if pp_seq is not None and validate:
+    ok, errors = pp_seq.check_timing()
+    if not ok:
+      timing_errors = tuple(str(e) for e in errors)
+      logger.warning(
+          "%s: check_timing reports %d violation(s), which a scanner would "
+          "reject: %s%s", filename, len(timing_errors),
+          '; '.join(timing_errors[:3]),
+          '...' if len(timing_errors) > 3 else '')
   ppm_to_hz = _ppm_to_hz(scanner)
   feelmri_seq = feelmriSequence()
   # A .seq file spells out its spoiler gradients and RF phase cycling, so the
@@ -2091,7 +2184,12 @@ def import_pulseq(
 
   if adc_block_indices:
     try:
-      k_traj_adc, t_adc = _calculate_kspace_via_pypulseq(filename)
+      if pp_seq is None:
+        # Re-raise whatever the read failed with, rather than a bare None.
+        pp_seq = _read_with_pypulseq(filename)
+      k_traj_adc, _k_full, _t_exc, _t_ref, t_adc = pp_seq.calculate_kspace()
+      k_traj_adc = np.asarray(k_traj_adc, dtype=float)
+      t_adc = np.asarray(t_adc, dtype=float)
     except Exception as exc:  # pragma: no cover - surfaced as hard error
       raise RuntimeError(
           f"Failed to compute k-space trajectory for {filename!s}: {exc}"
@@ -2211,6 +2309,7 @@ def import_pulseq(
     prep_storage_indices=prep_storage_indices,
     block_labels=block_labels,
     readout_sim_block_indices=readout_sim_block_indices,
+    timing_errors=timing_errors,
   )
 
 
