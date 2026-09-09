@@ -31,6 +31,12 @@ pytestmark = pytest.mark.timeout(240)
     "trajectories.py",    
     "spamm.py",
     "water_and_fat.py",
+    # Both exit 0 with a message when pypulseq is absent, so they are safe to
+    # list unconditionally. The writer redirects its .seq under
+    # FEELMRI_FAST_TEST so it cannot overwrite the tracked fixture the
+    # adapter tests read.
+    "pulseq_write_epi_tagging.py",
+    "pulseq_run_epi_tagging.py",
 ])
 def test_example_runs(script):
     """
