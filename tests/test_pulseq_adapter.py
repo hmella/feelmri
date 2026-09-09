@@ -204,7 +204,10 @@ def test_rotation_extension_round_trip(adapter):
   ps = imp.pulseq_seq
   assert len(ps) == 1
   gx, gy, gz = ps.GR[0]
-  expected = 1_000_000.0 / adapter.GAMMA  # T/m, after Pulseq 1/GAMMA scale.
+  # import_pulseq reads with the scanner's gammabar, not the module default,
+  # so that gamma * B in the solver reproduces the file's Hz/m.
+  from feelmri.MRObjects import Scanner
+  expected = 1_000_000.0 / Scanner().gammabar.m_as('Hz/T')  # T/m
 
   assert np.isclose(float(gx.A), 0.0, atol=1e-12)
   assert np.isclose(float(gy.A), expected, rtol=1e-6)
@@ -567,3 +570,113 @@ def test_dual_path_phase_contrast_radial2d(parsed_imports, tmp_path):
     assert sig.shape[0] == n
     readouts_checked += 1
   assert readouts_checked > 0
+
+
+# ---------------------------------------------------------------------------
+# v1.5 event fields the solver consumes
+# ---------------------------------------------------------------------------
+
+DATA_DIR = Path(__file__).resolve().parent / 'data'
+PPM_SEQ = DATA_DIR / 'ppm_v15.seq'
+ARB_SEQ = DATA_DIR / 'arb_v15.seq'
+
+
+def _ppm_to_hz():
+  from feelmri.MRObjects import Scanner
+  s = Scanner()
+  return s.gammabar.m_as('Hz/T') * s.field_strength.m_as('T') * 1e-6
+
+
+def test_rf_ppm_offsets_are_consumed(adapter):
+  """freq_ppm and phase_ppm reach the RF's Hz / rad offsets, scaled by the
+  Larmor frequency. The fixture's saturation pulse carries -3.3 ppm and
+  0.25 rad/MHz."""
+  if not PPM_SEQ.exists():
+    pytest.skip('run tests/data/generate_seq_fixtures.py to build ppm_v15.seq')
+  scale = _ppm_to_hz()
+  imp = adapter.import_pulseq(PPM_SEQ)
+  sat = [b.rf_pulses[0] for b in imp.feelmri_seq.blocks
+         if b.rf_pulses and b.rf_pulses[0].use == 'saturation']
+  assert sat, 'fixture has no saturation pulse'
+  for rf in sat:
+    assert rf.frequency_offset.m_as('Hz') == pytest.approx(-3.3 * scale)
+    assert rf.phase_offset.m_as('rad') == pytest.approx(0.25 * scale)
+
+
+def test_adc_ppm_offsets_and_phase_modulation_are_consumed(adapter):
+  """The ADC's ppm offsets are folded in the same way, and the v1.5
+  phase_id column resolves to a per-sample phase shape."""
+  if not PPM_SEQ.exists():
+    pytest.skip('run tests/data/generate_seq_fixtures.py to build ppm_v15.seq')
+  scale = _ppm_to_hz()
+  imp = adapter.import_pulseq(PPM_SEQ)
+  adcs = [b.adc for b in imp.feelmri_seq.blocks if b.adc is not None]
+  assert adcs
+  for adc in adcs:
+    assert adc.freq_offset.m_as('Hz') == pytest.approx(1.5 * scale)
+    assert adc.phase_offset.m_as('rad') == pytest.approx(-0.5 * scale)
+    assert adc.phase_modulation is not None
+    mod = adc.phase_modulation.m_as('rad')
+    assert mod.size == adc.times.m.size
+    assert mod == pytest.approx(np.linspace(0.0, np.pi, mod.size), abs=1e-5)
+
+  for rw in imp.readouts:
+    assert rw.adc_freq_offset == pytest.approx(1.5 * scale)
+    assert rw.adc_phase_offset == pytest.approx(-0.5 * scale)
+    assert rw.adc_phase_modulation is not None
+
+
+def test_arbitrary_gradient_carries_boundary_samples(adapter):
+  """A v1.5 arbitrary gradient on the regular raster has its samples at
+  raster centres; the amplitudes at the block boundaries come from the
+  file's first/last columns. Without them the waveform is shifted half a
+  raster and starts and ends at the wrong value."""
+  if not ARB_SEQ.exists():
+    pytest.skip('run tests/data/generate_seq_fixtures.py to build arb_v15.seq')
+  ps = adapter.read_seq(str(ARB_SEQ))
+  shaped = [g for gr in ps.GR for g in gr
+            if isinstance(g.A, np.ndarray) and not isinstance(g.T, np.ndarray)
+            and np.any(np.abs(g.A) > 0)]
+  assert shaped, 'fixture has no regular-raster arbitrary gradient'
+  g = shaped[0]
+  # A half raster of shoulder on each side, and boundary values that are the
+  # waveform extrapolated back by half a sample.
+  assert g.rise == pytest.approx(g.fall)
+  assert g.first == pytest.approx(g.A[0] - 0.5 * (g.A[1] - g.A[0]))
+  assert g.last == pytest.approx(g.A[-1] + 0.5 * (g.A[-1] - g.A[-2]))
+
+  t_s, a = adapter._shaped_waveform_seconds(g)
+  assert t_s.size == g.A.size + 2
+  assert t_s[0] == pytest.approx(g.delay)
+  assert t_s[-1] == pytest.approx(g.delay + g.rise + g.T + g.fall)
+  assert a[0] == pytest.approx(g.first)
+  assert a[-1] == pytest.approx(g.last)
+
+
+def test_import_reads_with_the_scanner_gamma(adapter):
+  """The Hz/m in the file must be divided by the same gamma the solver
+  multiplies back, or every encoding phase is off by their ratio."""
+  from feelmri.MRObjects import Scanner
+  seq_path = SEQ_FILES[0]
+  scanner = Scanner(field_strength=Quantity(3.0, 'T'))
+  default = adapter.read_seq(str(seq_path))
+  matched = adapter.read_seq(str(seq_path),
+                             gamma=scanner.gammabar.m_as('Hz/T'))
+  ratio = adapter.GAMMA / scanner.gammabar.m_as('Hz/T')
+  for (gx_d, _, _), (gx_m, _, _) in zip(default.GR, matched.GR):
+    if isinstance(gx_d.A, np.ndarray) or gx_d.A == 0.0:
+      continue
+    assert gx_m.A == pytest.approx(gx_d.A * ratio, rel=1e-12)
+    break
+
+
+def test_pulseq_import_disables_perfect_spoiling(adapter):
+  """A .seq file spells out its own spoilers, so BlochSolver must not zero
+  Mxy between blocks on top of them. The flag rides on the Sequence and is
+  resolved when perfect_spoiling is left at its None default."""
+  imp = adapter.import_pulseq(SEQ_FILES[0])
+  assert imp.feelmri_seq.explicit_spoiling is True
+  assert imp.feelmri_sim_seq.explicit_spoiling is True
+
+  from feelmri.Bloch import Sequence
+  assert Sequence().explicit_spoiling is False
