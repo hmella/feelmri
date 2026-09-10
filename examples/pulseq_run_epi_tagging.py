@@ -124,13 +124,14 @@ if __name__ == '__main__':
   sim  = imp.feelmri_sim_seq
 
   # Diagnostic: report which blocks each SET category covers.
-  for s, name in [(0, 'prep'), (100, 'spoiler'), (2, 'excitation'),
-                  (4, 'prephaser'), (3, 'readout')]:
+  for s, name in [(0, 'prep x'), (1, 'prep y'), (100, 'spoiler'),
+                  (2, 'excitation'), (4, 'prephaser'), (3, 'readout')]:
     n = len(imp.filter_blocks(SET=s))
     MPI_print(f"  SET={s} ({name}): {n} block(s)")
 
   # Block-index groups, sourced from the running LABELSET state.
-  prep_idx    = imp.filter_blocks(SET=0)
+  prep_x_idx  = imp.filter_blocks(SET=0)
+  prep_y_idx  = imp.filter_blocks(SET=1)
   excite_idx  = imp.filter_blocks(SET=2)
   prephas_idx = imp.filter_blocks(SET=4)
   readout_idx = imp.filter_blocks(SET=3)
@@ -179,11 +180,13 @@ if __name__ == '__main__':
   # Sync the sequence to the cardiac-cycle boundary.
   seq.add_block(u_times[-1] - seq.blocks[-1].time_extent[1] % u_times[-1], dt=Q_(1, 'ms'))
 
-  # Tagging preparation followed by a spoiler. The writer plays a single
-  # SPAMM module along x, so the tag is a set of parallel lines rather than a
-  # grid. Prep blocks come straight from the simulation skeleton; they carry
-  # no readout content.
-  for j in prep_idx:
+  # Tagging preparation: one SPAMM module along x, then one along y, each
+  # followed by a spoiler. Together they give a tag grid. Prep blocks come
+  # straight from the simulation skeleton; they carry no readout content.
+  for j in prep_x_idx:
+    seq.add_block(imp.copy_block(j), dt=dt_seq)
+  seq.add_block(_spoiler_copy(), dt=dt_seq)
+  for j in prep_y_idx:
     seq.add_block(imp.copy_block(j), dt=dt_seq)
   seq.add_block(_spoiler_copy(), dt=dt_seq)
 
@@ -226,8 +229,8 @@ if __name__ == '__main__':
                        delta_B=delta_B0.m_as('mT').reshape((-1, 1)),
                        pod_trajectory=pod_trajectory,
                        perfect_spoiling=False,
-                       isochromat_K=100,
-                       method='magnus2')
+                       isochromat_K=200,
+                       method='cayley_klein')
 
   # Solve for x and y directions
   Mxy, Mz = solver.solve()

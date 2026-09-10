@@ -103,9 +103,21 @@ def main(
         delay=system.rf_dead_time
     )
 
-    # Closing pulse of the single SPAMM module.
+    # Closing pulses, one per SPAMM module. Each is built with the flip angle
+    # it needs: make_block_pulse computes rf.signal at construction, so
+    # assigning rf.flip_angle afterwards does NOT recompute it and both
+    # modules would silently close with the same pulse.
     rf_prep2 = pp.make_block_pulse(
         flip_angle=np.deg2rad(-90),
+        system=system,
+        duration=1000e-6,
+        time_bw_product=4,
+        use='preparation',
+        delay=system.rf_dead_time
+    )
+
+    rf_prep3 = pp.make_block_pulse(
+        flip_angle=np.deg2rad(90),
         system=system,
         duration=1000e-6,
         time_bw_product=4,
@@ -118,6 +130,7 @@ def main(
     tag_frequency = 1 / tag_spacing # 1/m
     area = tag_frequency
     g_tag_x = pp.make_trapezoid(channel='x', system=system, area=area)
+    g_tag_y = pp.make_trapezoid(channel='y', system=system, area=area)
 
     # Create 90 degree slice selection pulse and gradient
     rf, gz, _ = pp.make_sinc_pulse(
@@ -196,10 +209,12 @@ def main(
     # seq.add_block(pp.make_delay(system.rf_dead_time))
     seq.add_block(gx_spoil, gy_spoil, gz_spoil, pp.make_label(type='SET', label='SET', value=100))
 
-    # Only the x-direction module is played, so the tag is a set of parallel
-    # lines rather than a grid. One direction is easier to read off an image
-    # and to measure in a spectrum, which is what this example is for; the
-    # y module (SET=1, g_tag_y) is the second half of a SPAMM grid.
+    # Second SPAMM module, along y, applied to the already-tagged Mz. The two
+    # together give Mz ~ cos(kx x) cos(ky y): a tag grid.
+    seq.add_block(rf_prep1, pp.make_label(type='SET', label='SET', value=1))
+    seq.add_block(g_tag_y, pp.make_label(type='SET', label='SET', value=1))
+    seq.add_block(rf_prep3, pp.make_label(type='SET', label='SET', value=1))
+    seq.add_block(gx_spoil, gy_spoil, gz_spoil, pp.make_label(type='SET', label='SET', value=100))
 
     for i_slice in range(n_slices):
         rf.freq_offset = gz.amplitude * slice_thickness * (i_slice - (n_slices - 1) / 2)
