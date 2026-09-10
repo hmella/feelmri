@@ -124,13 +124,12 @@ if __name__ == '__main__':
   sim  = imp.feelmri_sim_seq
 
   # Diagnostic: report which blocks each SET category covers.
-  for s, name in [(0, 'prepx'), (1, 'prepy'), (100, 'spoiler'), (2, 'excitation'), (3, 'readout')]:
+  for s, name in [(0, 'prep'), (100, 'spoiler'), (2, 'excitation'), (3, 'readout')]:
     n = len(imp.filter_blocks(SET=s))
     MPI_print(f"  SET={s} ({name}): {n} block(s)")
 
   # Block-index groups, sourced from the running LABELSET state.
-  prep_x_idx  = imp.filter_blocks(SET=0)
-  prep_y_idx  = imp.filter_blocks(SET=1)
+  prep_idx    = imp.filter_blocks(SET=0)
   excite_idx  = imp.filter_blocks(SET=2)
   readout_idx = imp.filter_blocks(SET=3)
   spoiler_idx = imp.filter_blocks(SET=100)
@@ -175,13 +174,11 @@ if __name__ == '__main__':
   # Sync the sequence to the cardiac-cycle boundary.
   seq.add_block(u_times[-1] - seq.blocks[-1].time_extent[1] % u_times[-1], dt=Q_(1, 'ms'))
 
-  # Tagging prepulses (X then Y) each followed by a spoiler. Prep
-  # blocks come straight from the simulation skeleton; they carry no
-  # readout content.
-  for j in prep_x_idx:
-    seq.add_block(imp.copy_block(j), dt=dt_seq)
-  seq.add_block(_spoiler_copy(), dt=dt_seq)
-  for j in prep_y_idx:
+  # Tagging preparation followed by a spoiler. The writer plays a single
+  # SPAMM module along x, so the tag is a set of parallel lines rather than a
+  # grid. Prep blocks come straight from the simulation skeleton; they carry
+  # no readout content.
+  for j in prep_idx:
     seq.add_block(imp.copy_block(j), dt=dt_seq)
   seq.add_block(_spoiler_copy(), dt=dt_seq)
 
