@@ -103,6 +103,7 @@ def main(
         delay=system.rf_dead_time
     )
 
+    # Closing pulse of the single SPAMM module.
     rf_prep2 = pp.make_block_pulse(
         flip_angle=np.deg2rad(-90),
         system=system,
@@ -117,7 +118,6 @@ def main(
     tag_frequency = 1 / tag_spacing # 1/m
     area = tag_frequency
     g_tag_x = pp.make_trapezoid(channel='x', system=system, area=area)
-    g_tag_y = pp.make_trapezoid(channel='y', system=system, area=area)
 
     # Create 90 degree slice selection pulse and gradient
     rf, gz, _ = pp.make_sinc_pulse(
@@ -187,7 +187,7 @@ def main(
     gy_spoil = pp.make_trapezoid(channel='y', area=f * 2 * n_y * delta_ky, system=system)
     gz_spoil = pp.make_trapezoid(channel='z', area=f * 4 / slice_thickness, system=system)
 
-    # Loop over slices
+    # Tagging preparation: 90 - tag gradient - 90, then a spoiler.
     seq.add_block(rf_prep1, pp.make_label(type='SET', label='SET', value=0))
     # seq.add_block(pp.make_delay(system.rf_dead_time))
     seq.add_block(g_tag_x, pp.make_label(type='SET', label='SET', value=0))
@@ -196,14 +196,10 @@ def main(
     # seq.add_block(pp.make_delay(system.rf_dead_time))
     seq.add_block(gx_spoil, gy_spoil, gz_spoil, pp.make_label(type='SET', label='SET', value=100))
 
-    rf_prep2.flip_angle = np.deg2rad(90)
-    seq.add_block(rf_prep1, pp.make_label(type='SET', label='SET', value=1))
-    # seq.add_block(pp.make_delay(system.rf_dead_time))
-    seq.add_block(g_tag_y, pp.make_label(type='SET', label='SET', value=1))
-    # seq.add_block(pp.make_delay(system.rf_dead_time))
-    seq.add_block(rf_prep2, pp.make_label(type='SET', label='SET', value=1))
-    # seq.add_block(pp.make_delay(system.rf_dead_time))
-    seq.add_block(gx_spoil, gy_spoil, gz_spoil, pp.make_label(type='SET', label='SET', value=100))
+    # Only the x-direction module is played, so the tag is a set of parallel
+    # lines rather than a grid. One direction is easier to read off an image
+    # and to measure in a spectrum, which is what this example is for; the
+    # y module (SET=1, g_tag_y) is the second half of a SPAMM grid.
 
     for i_slice in range(n_slices):
         rf.freq_offset = gz.amplitude * slice_thickness * (i_slice - (n_slices - 1) / 2)
