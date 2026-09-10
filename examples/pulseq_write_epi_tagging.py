@@ -203,8 +203,17 @@ def main(
 
     for i_slice in range(n_slices):
         rf.freq_offset = gz.amplitude * slice_thickness * (i_slice - (n_slices - 1) / 2)
+        # The slice rephaser is played on its own, and the in-plane prephasers
+        # follow it as SET=4. That puts a block boundary where the gradient
+        # moment measured from the excitation is exactly zero on all three
+        # axes, which is the only instant at which the magnetization can be
+        # snapshotted for the k-space integral: calculate_kspace resets k=0 at
+        # the RF, so any moment already accumulated when the snapshot is taken
+        # gets applied a second time by the assembler. Playing gz_reph and the
+        # prephasers together, as one block, leaves no such boundary.
         seq.add_block(rf, gz, pp.make_label(type='SET', label='SET', value=2))
-        seq.add_block(gx_pre, gy_pre, gz_reph, pp.make_label(type='SET', label='SET', value=2))
+        seq.add_block(gz_reph, pp.make_label(type='SET', label='SET', value=2))
+        seq.add_block(gx_pre, gy_pre, pp.make_label(type='SET', label='SET', value=4))
         for _ in range(n_y):
             seq.add_block(gx, adc, pp.make_label(type='SET', label='SET', value=3))  # Read one line of k-space
             seq.add_block(gy, pp.make_label(type='SET', label='SET', value=3))  # Phase blip
