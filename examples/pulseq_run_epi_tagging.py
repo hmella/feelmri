@@ -124,13 +124,15 @@ if __name__ == '__main__':
   sim  = imp.feelmri_sim_seq
 
   # Diagnostic: report which blocks each SET category covers.
-  for s, name in [(0, 'prep'), (100, 'spoiler'), (2, 'excitation'), (3, 'readout')]:
+  for s, name in [(0, 'prep'), (100, 'spoiler'), (2, 'excitation'),
+                  (4, 'prephaser'), (3, 'readout')]:
     n = len(imp.filter_blocks(SET=s))
     MPI_print(f"  SET={s} ({name}): {n} block(s)")
 
   # Block-index groups, sourced from the running LABELSET state.
   prep_idx    = imp.filter_blocks(SET=0)
   excite_idx  = imp.filter_blocks(SET=2)
+  prephas_idx = imp.filter_blocks(SET=4)
   readout_idx = imp.filter_blocks(SET=3)
   spoiler_idx = imp.filter_blocks(SET=100)
 
@@ -138,11 +140,13 @@ if __name__ == '__main__':
   # blocks per slice, so the first contiguous run is slice 0's pair and the
   # slice count never has to be known here.
   ex_group_idx    = imp.contiguous_groups(excite_idx)[0]
+  pre_group_idx   = imp.contiguous_groups(prephas_idx)[0] if prephas_idx else []
   ro_group_idx    = imp.contiguous_groups(readout_idx)[0]
   sp_template_idx = spoiler_idx[0] if spoiler_idx else None
 
-  ex_dur = imp.duration_of(ex_group_idx)
-  ro_dur = imp.duration_of(ro_group_idx)
+  ex_dur  = imp.duration_of(ex_group_idx)
+  pre_dur = imp.duration_of(pre_group_idx)
+  ro_dur  = imp.duration_of(ro_group_idx)
   sp_dur = imp.duration_of([sp_template_idx] if sp_template_idx is not None else [])
 
   # Create sequence object
@@ -157,7 +161,8 @@ if __name__ == '__main__':
     return imp.copy_block(sp_template_idx, spoiler=True)
 
   # Time spacing between frames, computed from sim-seq block durations.
-  time_spacing = (parameters.Imaging.TimeSpacing - ex_dur - ro_dur - sp_dur).to('ms')
+  time_spacing = (parameters.Imaging.TimeSpacing
+                  - ex_dur - pre_dur - ro_dur - sp_dur).to('ms')
   print("Time spacing between frames: {:.2f} ms".format(time_spacing.m_as('ms')))
 
   # Dummy steady-state pulses: real excitation, then duration-only
@@ -165,7 +170,7 @@ if __name__ == '__main__':
   # runner's performance shortcut (no need to evolve the spoiler or
   # readout physics during steady-state convergence).
   for _ in range(dummy_pulses):
-    for j in ex_group_idx:
+    for j in ex_group_idx + pre_group_idx:
       seq.add_block(imp.copy_block(j), dt=dt_seq)
     seq.add_block(ro_dur, dt=Q_(1, 'ms'))
     seq.add_block(sp_dur, dt=dt_seq)
@@ -187,11 +192,20 @@ if __name__ == '__main__':
   # `sim`), then real spoiler with multi-isochromat dephasing, then
   # the per-frame timing gap.
   for fr in range(Nb_frames):
+    # Snapshot at the end of the SET=2 group. The writer ends that group on
+    # the slice rephaser, where the gradient moment measured from the
+    # excitation is zero on all three axes -- the only instant at which the
+    # magnetization can be captured for the k-space integral, since
+    # calculate_kspace resets k=0 at the RF and the assembler then applies the
+    # whole trajectory itself. The in-plane prephasers are SET=4 and follow
+    # the snapshot, so their winding reaches the signal only through k.
     ex_blks = [imp.copy_block(j) for j in ex_group_idx]
     if ex_blks:
       ex_blks[-1].store_magnetization = True
     for b in ex_blks:
       seq.add_block(b, dt=dt_seq)
+    for j in pre_group_idx:
+      seq.add_block(imp.copy_block(j), dt=dt_seq)
     seq.add_block(ro_dur, dt=Q_(1, 'ms'))
     seq.add_block(_spoiler_copy(), dt=dt_seq)
     seq.add_block(time_spacing, dt=Q_(1, 'ms'))
