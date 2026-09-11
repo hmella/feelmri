@@ -698,14 +698,18 @@ def test_finite_bin_sets_revive_and_the_sizing_rule_holds():
 
 @pytest.fixture(scope='module')
 def wide_phantom(tmp_path_factory):
-  """A phantom spread over ~12 cm, so a term quadratic in position is
-  measurable -- `minimal_phantom` spans 1 cm, where it is not -- and with every
-  node at DISTINCT x, y and z.
+  """A phantom whose bounding box is 20 x 23 x 17 cm, so a term quadratic in
+  position is measurable -- `minimal_phantom` spans 1 cm, where it is not --
+  and with every node at DISTINCT x, y and z.
 
   The distinctness matters. `make_minimal_tet_mesh` puts four of its five nodes
   on the axes and the fifth at (s, s, s), so `x*z` and `y*z` are equal at every
   node: an x-vs-y position-index swap in the concomitant cross terms would be
   invisible. These coordinates are mutually incommensurate instead.
+
+  Both tetrahedra are positively oriented. The assembler takes |det J|, so the
+  orientation does not change any result here, but a mesh fixture that a reader
+  might reuse should not carry an inverted cell.
   """
   pytest.importorskip('mpi4py')
   pytest.importorskip('pymetis')
@@ -717,7 +721,7 @@ def wide_phantom(tmp_path_factory):
                      [0.04, 0.06, -0.10],
                      [-0.09, -0.08, 0.05],
                      [0.02, -0.11, -0.06]])
-  cells = np.array([[0, 1, 2, 3], [1, 2, 3, 4]])
+  cells = np.array([[0, 1, 2, 3], [1, 2, 4, 3]])
   _meshio.write(str(mesh_path), _meshio.Mesh(points, [('tetra', cells)]))
   return FEMPhantom(path=str(mesh_path))
 
@@ -814,6 +818,13 @@ def test_concomitant_phase_can_only_ever_retard(wide_phantom):
   `angle == 0`, which satisfies `<= 0`). Both halves are replaced: the sign is
   read off the SOLVER, and the test first requires the term to be doing
   something, so a silently disabled feature fails instead of passing.
+
+  What this does NOT catch is a sign error on either CROSS term: negating
+  `Gx*Gz*x*z` turns `(Gx*z - Gz*x/2)^2` into `(Gx*z + Gz*x/2)^2`, which is
+  still a sum of squares and still never advances the phase (measured: 0 of 4
+  gradients notice). That case belongs to
+  test_concomitant_phase_matches_the_maxwell_closed_form, which compares
+  against the factored form term by term.
   """
   rng = np.random.default_rng(5)
   scanner = Scanner()
@@ -836,8 +847,7 @@ def test_concomitant_phase_can_only_ever_retard(wide_phantom):
       f'would pass with the feature disabled')
     assert phase.max() <= 1e-9, (
       f'G={np.round(G, 1)}: the concomitant term ADVANCED the phase by '
-      f'{phase.max():.3e}. Bc is a sum of squares and can only retard it, so '
-      f'a cross-term sign is wrong.')
+      f'{phase.max():.3e}, which no sum of squares can do.')
 
 
 def _shaped_rf_block(scale, dur_ms=1.0, n=64, dt_ms=0.02):
@@ -1209,17 +1219,29 @@ def test_a_wrong_length_attribute_raises_instead_of_corrupting_the_heap(
   solver.solve()
 
   n_nodes = minimal_phantom.local_nodes.shape[0]
-  for attribute, value in (('initial_Mxy', 0.0 + 0.0j),
-                           ('initial_Mz', 1.0),
-                           ('delta_B', np.zeros((n_nodes + 3, 1)))):
-    fresh = BlochSolver(
-      seq, minimal_phantom, T1=Quantity(1e9, 'ms'), T2=Quantity(50.0, 'ms'),
-      initial_Mxy=1.0 + 0.0j, initial_Mz=0.0, perfect_spoiling=False,
-      dtype='float64')
-    fresh.solve()
-    setattr(fresh, attribute, value)
-    with pytest.raises(ValueError, match=attribute):
+  long = n_nodes + 3
+  cases = (('initial_Mxy', 0.0 + 0.0j),
+           ('initial_Mz', 1.0),
+           ('delta_B', np.zeros((long, 1))),
+           ('T1', Quantity(np.full((long, 1), 1e9), 'ms')),
+           ('T2', Quantity(np.full((long, 1), 50.0), 'ms')),
+           # Not a length but a column count: a rows-only test passes this.
+           ('delta_B', np.zeros((n_nodes, 5))))
+  # `x` is checked on the same loop and cannot be reached from here -- it comes
+  # from phantom.local_nodes, and the kernel's r0 is Matrix<T, Dynamic, 3>, so
+  # pybind refuses anything but three columns before the check runs.
+  for bins in (1, 8):
+    extra = ({} if bins == 1 else
+             dict(t2_prime=Quantity(12.0, 'ms'), spectral_bins=bins))
+    for attribute, value in cases:
+      fresh = BlochSolver(
+        seq, minimal_phantom, T1=Quantity(1e9, 'ms'), T2=Quantity(50.0, 'ms'),
+        initial_Mxy=1.0 + 0.0j, initial_Mz=0.0, perfect_spoiling=False,
+        dtype='float64', **extra)
       fresh.solve()
+      setattr(fresh, attribute, value)
+      with pytest.raises(ValueError, match=attribute):
+        fresh.solve()
 
 
 def test_a_failed_solve_does_not_tear_the_sub_ensemble(minimal_phantom):
@@ -1289,7 +1311,11 @@ def test_a_non_finite_b1_map_is_refused_by_the_kernel_too(minimal_phantom):
 
   solve_mri_f64(**args, b1_map=np.ones(n_nodes, dtype=complex))
   for poison in (np.nan, np.inf):
-    for component in (poison, 1 + poison * 1j):
+    # `1 + nan*1j` is nan in BOTH parts -- nan*0 is nan -- so the earlier
+    # version of this test never reached the `.imag()` half of the guard: the
+    # `||` short-circuited on the real part every time. complex() builds the
+    # one-sided cases explicitly.
+    for component in (complex(poison, 0.0), complex(1.0, poison)):
       bad = np.ones(n_nodes, dtype=complex)
       bad[1] = component
       with pytest.raises(Exception, match='non-finite'):

@@ -1618,6 +1618,16 @@ class BlochSolver:
         # Gyromagnetic constant
         gamma = self.scanner.gamma.m_as('rad/ms/mT')
 
+        # Checked once here on the PER-NODE arrays and again below on the
+        # expanded ones. Without this pass a wrong length surfaces inside the
+        # K-fold expansion instead, as `operands could not be broadcast
+        # together with shapes (64,1) (40,1)` -- which names neither the
+        # attribute nor the node count.
+        _check_rows((('T1', T1, 1), ('T2', T2, 1), ('delta_B', delta_B, 1),
+                     ('initial_Mxy', initial_Mxy, 1),
+                     ('initial_Mz', initial_Mz, 1)),
+                    nb_nodes, f"{nb_nodes} nodes")
+
         # Spectral sub-ensemble. Every per-node array grows K-fold through
         # np.repeat, so node n occupies rows [n*K : (n+1)*K] -- the same
         # consecutive-duplicate ordering create_multi_isochromats uses. Only
@@ -1687,27 +1697,13 @@ class BlochSolver:
         # `solver.initial_Mxy = 0.0 + 0j` between solves -- the exact spelling
         # the constructor accepts -- and `np.ascontiguousarray` of a scalar is
         # a 0-d array, which pybind hands the kernel as a length-1 vector.
-        n_rows = nb_nodes * n_bins
-        detail = (f"{nb_nodes} nodes x {n_bins} bins" if n_bins > 1
-                  else f"{nb_nodes} nodes")
-        # `x` carries three coordinates per row; everything else is one column.
-        # Checking the columns matters: a rows-only test passes an (n, 5) array.
-        for name, arr, n_cols in (('x', x, 3), ('T1', T1, 1), ('T2', T2, 1),
-                                  ('delta_B', delta_B, 1),
-                                  ('Bz_old', Bz_old, None),
-                                  ('initial_Mxy', initial_Mxy, 1),
-                                  ('initial_Mz', initial_Mz, 1)):
-            arr = np.asarray(arr)
-            want = f"({n_rows},)" if n_cols is None else f"({n_rows}, {n_cols})"
-            ok = (arr.ndim == (1 if n_cols is None else 2)
-                  and arr.shape[0] == n_rows
-                  and (n_cols is None or arr.shape[1] == n_cols))
-            if not ok:
-                raise ValueError(
-                    f"BlochSolver: {name} has shape {arr.shape}, expected "
-                    f"{want} = {detail}. Assigning a scalar or a wrongly-sized "
-                    f"array to a public solver attribute between solve() calls "
-                    f"is the usual cause.")
+        _check_rows(
+            (('x', x, 3), ('T1', T1, 1), ('T2', T2, 1),
+             ('delta_B', delta_B, 1), ('Bz_old', Bz_old, None),
+             ('initial_Mxy', initial_Mxy, 1), ('initial_Mz', initial_Mz, 1)),
+            nb_nodes * n_bins,
+            f"{nb_nodes} nodes x {n_bins} bins" if n_bins > 1
+            else f"{nb_nodes} nodes")
 
         def collapse_bins(arr):
             """Weighted sum over each node's bins, back to one row per node."""
@@ -1986,6 +1982,34 @@ class BlochSolver:
 
         self.bin_magnetization = bins_out
         return Mxy, Mz
+
+
+def _check_rows(arrays, n_rows, detail):
+  """Refuse a per-node array whose shape does not match the kernel's node count.
+
+  The kernel sizes everything from ``r0.rows()`` and validates no other length
+  (only ``b1_map``), so a wrong length is an out-of-bounds WRITE under
+  ``-DNDEBUG -DEIGEN_NO_DEBUG`` rather than an exception -- it corrupts the
+  heap. Every array here is reachable as a public attribute, and reassigning
+  one between solves is the way in: ``solver.initial_Mxy = 0.0 + 0j`` is the
+  exact spelling the constructor accepts, and ``np.ascontiguousarray`` of a
+  scalar is a 0-d array that pybind hands the kernel as a length-1 vector.
+
+  ``n_cols`` of ``None`` means the array is 1-D. Checking the column count
+  matters as well as the row count: a rows-only test passes an ``(n, 5)``
+  array.
+  """
+  for name, arr, n_cols in arrays:
+    arr = np.asarray(arr)
+    want = f"({n_rows},)" if n_cols is None else f"({n_rows}, {n_cols})"
+    ok = (arr.ndim == (1 if n_cols is None else 2)
+          and arr.shape[0] == n_rows
+          and (n_cols is None or arr.shape[1] == n_cols))
+    if not ok:
+      raise ValueError(
+        f"BlochSolver: {name} has shape {arr.shape}, expected {want} = "
+        f"{detail}. Assigning a scalar or a wrongly-sized array to a public "
+        f"solver attribute between solve() calls is the usual cause.")
 
 
 def _collective_raise(message):
