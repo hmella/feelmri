@@ -172,7 +172,7 @@ if __name__ == '__main__':
   # readout physics during steady-state convergence).
   for _ in range(dummy_pulses):
     for j in ex_group_idx + pre_group_idx:
-      seq.add_block(imp.copy_block(j), dt=dt_seq)
+      seq.add_block(imp.copy_block(j))
     seq.add_block(ro_dur, dt=Q_(1, 'ms'))
     seq.add_block(sp_dur, dt=dt_seq)
     seq.add_block(time_spacing, dt=Q_(1, 'ms'))
@@ -184,11 +184,11 @@ if __name__ == '__main__':
   # followed by a spoiler. Together they give a tag grid. Prep blocks come
   # straight from the simulation skeleton; they carry no readout content.
   for j in prep_x_idx:
-    seq.add_block(imp.copy_block(j), dt=dt_seq)
-  seq.add_block(_spoiler_copy(), dt=dt_seq)
+    seq.add_block(imp.copy_block(j))
+  seq.add_block(_spoiler_copy())
   for j in prep_y_idx:
-    seq.add_block(imp.copy_block(j), dt=dt_seq)
-  seq.add_block(_spoiler_copy(), dt=dt_seq)
+    seq.add_block(imp.copy_block(j))
+  seq.add_block(_spoiler_copy())
 
   # Imaging frames: real excitation (snapshot Mxy at the end of the
   # excitation group), then readout-as-delay (already collapsed on
@@ -206,11 +206,11 @@ if __name__ == '__main__':
     if ex_blks:
       ex_blks[-1].store_magnetization = True
     for b in ex_blks:
-      seq.add_block(b, dt=dt_seq)
+      seq.add_block(b)
     for j in pre_group_idx:
-      seq.add_block(imp.copy_block(j), dt=dt_seq)
+      seq.add_block(imp.copy_block(j))
     seq.add_block(ro_dur, dt=Q_(1, 'ms'))
-    seq.add_block(_spoiler_copy(), dt=dt_seq)
+    seq.add_block(_spoiler_copy())
     seq.add_block(time_spacing, dt=Q_(1, 'ms'))
 
   # Bloch solver.

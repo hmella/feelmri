@@ -44,6 +44,11 @@ def _summary(seq_path):
 
   k = np.concatenate([r.kspace for r in imp.readouts]) if imp.readouts \
       else np.zeros((0, 3))
+  # Both extents are pinned: kspace is snapshot-relative and is what callers
+  # hand to mri_signal, kspace_file is the trajectory as pypulseq computed it.
+  # A change in either one alone localises the regression.
+  kf = np.concatenate([r.kspace_file for r in imp.readouts]) if imp.readouts \
+      else np.zeros((0, 3))
   t = np.concatenate([r.times for r in imp.readouts]) if imp.readouts \
       else np.zeros((0,))
 
@@ -57,6 +62,8 @@ def _summary(seq_path):
     'n_adc_samples': int(t.size),
     'first_adc_ms': float(t.min()) if t.size else 0.0,
     'last_adc_ms': float(t.max()) if t.size else 0.0,
+    'kspace_file_min_1_per_m': kf.min(axis=0).tolist() if kf.size else [0.0, 0.0, 0.0],
+    'kspace_file_max_1_per_m': kf.max(axis=0).tolist() if kf.size else [0.0, 0.0, 0.0],
     'kspace_min_1_per_m': k.min(axis=0).tolist() if k.size else [0.0, 0.0, 0.0],
     'kspace_max_1_per_m': k.max(axis=0).tolist() if k.size else [0.0, 0.0, 0.0],
     'n_stored_columns': sum(1 for b in seq.blocks if b.store_magnetization),

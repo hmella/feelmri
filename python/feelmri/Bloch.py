@@ -23,11 +23,112 @@ import warnings
 
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
+
+
 import numpy as np
 from matplotlib.patches import Circle
 from pint import Quantity as Quantity
 
 from feelmri.BlochSimulator import solve_mri_f32, solve_mri_f64
+
+# Timings reaching the raster from different sources can name the same instant
+# and disagree in the last bits -- _get_extent pads t_max to honour a declared
+# dur, and a shifted waveform corner is recomputed rather than moved. np.unique
+# keeps both, and the kernel then takes a zero-length step there: harmless
+# numerically, but it re-exponentiates every node and invalidates the dt cache
+# twice (335 such steps on epi_v142.seq before this).
+#
+# 1e-6 ms is three orders below the 1 us finest raster Pulseq permits, but it is
+# only a CEILING: _raster_tolerance lowers it further for a block that asks for
+# finer steps, because a tolerance at or above the step size deletes the raster
+# instead of de-duplicating it.
+RASTER_TOL_MS = 1e-6
+
+# How far outside an RF pulse's support to place the guard point. The interval
+# arriving at the guard is charged full RF amplitude, so this length is a direct
+# flip-angle error of eps/dur; it must stay comfortably above the collapse
+# tolerance or the guard is removed again.
+RF_EDGE_GUARD_MS = 1e-5
+
+
+def _raster_tolerance(*steps):
+    """Collapse tolerance for a block, below every step it means to take.
+
+    A fixed tolerance is only safe while every real step is far above it. Ask
+    for dt_rf = 1e-7 ms against a fixed 1e-6 and EVERY point is within tolerance
+    of its neighbour, so the block collapses to a single time and is never
+    integrated -- a finer raster silently producing no raster at all.
+    """
+    positive = [float(s) for s in steps if s is not None and float(s) > 0.0]
+    return min([RASTER_TOL_MS] + [0.01 * min(positive)]) if positive \
+        else RASTER_TOL_MS
+
+
+def _sloped_segment_times(g, dt):
+    """Uniform sub-raster over the segments of a gradient whose amplitude moves.
+
+    Only needed under ``method='cayley_klein'``, whose end-of-interval rule
+    mis-charges a ramp; the default ``magnus2`` integrates a straight segment
+    exactly from its endpoints, which is why ``dt_gr`` defaults to disabled.
+    """
+    ts = g.timings.m_as('ms') if isinstance(g.timings, Quantity) else np.asarray(g.timings, dtype=np.float64)
+    amp = g.amplitudes.m_as('mT/m') if isinstance(g.amplitudes, Quantity) else np.asarray(g.amplitudes, dtype=np.float64)
+    ts = np.asarray(ts, dtype=np.float64)
+    amp = np.asarray(amp, dtype=np.float64)
+    if ts.size < 2 or not np.all(np.isfinite(ts)) or not np.all(np.isfinite(amp)):
+        # A non-finite timing would make np.arange raise with a message naming
+        # neither the block nor the axis; a non-finite amplitude would compare
+        # False below and be silently treated as flat.
+        if ts.size >= 2:
+            warnings.warn(
+                f"gradient on axis {getattr(g, 'axis', '?')} has non-finite "
+                f"timings or amplitudes; its ramps are not sub-sampled.")
+        return np.empty(0, dtype=np.float64)
+    # Relative to the event's own peak: an absolute threshold in mT/m is a
+    # different test for a 30 mT/m readout and a 1e-9 mT/m shim.
+    floor = 1e-12 * max(float(np.abs(amp).max()), 1.0)
+    out = []
+    for i in range(ts.size - 1):
+        seg = float(ts[i + 1]) - float(ts[i])
+        if seg <= dt or abs(float(amp[i + 1]) - float(amp[i])) <= floor:
+            # Already finer than the requested step, or flat: nothing to add.
+            continue
+        out.append(np.arange(float(ts[i]), float(ts[i + 1]), dt))
+    return np.concatenate(out) if out else np.empty(0, dtype=np.float64)
+
+
+def _rf_support_ms(rf):
+    """(start, end) of an RF pulse's support in ms, read from its own timings.
+
+    Authoritative on both construction paths: an analytic pulse builds timings
+    as linspace(time - ref, time - ref + dur) so this reproduces that pair,
+    while an imported pulse carries its delay only in timings -- _convert_rf
+    sets time = ref = 0 and dur to the support LENGTH, so the (time, dur) pair
+    describes [0, length] rather than [delay, delay + length].
+
+    Used for the raster only. _get_extent must NOT use it: a block spans
+    [0, dur] and its events sit inside, so taking the support as the extent
+    would move the block start to the first pulse's delay.
+    """
+    t = rf.timings
+    t = t.m_as('ms') if isinstance(t, Quantity) else np.asarray(t, dtype=np.float64)
+    return float(t[0]), float(t[-1])
+
+
+def _collapse_near_duplicates(sorted_t, tol=RASTER_TOL_MS):
+    """Drop entries within ``tol`` of their predecessor in a sorted array.
+
+    Sound only while ``tol`` is below every real step, which is what
+    :func:`_raster_tolerance` guarantees: then no two legitimate points are
+    within tolerance of each other and comparing against the predecessor is the
+    same as comparing against the last kept point.
+    """
+    if sorted_t.size < 2:
+        return sorted_t
+    keep = np.ones(sorted_t.size, dtype=bool)
+    keep[1:] = np.diff(sorted_t) > tol
+    return sorted_t[keep]
+
 
 _METHOD_TO_ORDER = {
   'cayley_klein': 0,
@@ -46,8 +147,12 @@ class ADC:
     Parameters
     ----------
     times : np.ndarray
-        1-D array of absolute ADC sampling times inside the parent
-        :class:`SequenceBlock` (ms).
+        1-D array of ADC sampling times (ms), measured from the START of the
+        parent :class:`SequenceBlock`, not from the start of the sequence.
+        ``_convert_adc`` builds them that way and
+        ``tests/test_pulseq_timing.py`` adds ``block.time_extent[0]`` to
+        recover absolute times; ``change_time`` deliberately leaves them alone
+        when the block is shifted.
     freq_offset : Quantity, optional
         Frequency offset applied to the ADC samples (Hz). Default 0 Hz.
     phase_offset : Quantity, optional
@@ -96,8 +201,14 @@ class SequenceBlock:
     dt_rf : Quantity, optional
         Time step for RF pulse discretization (ms). Default is 0.01 ms.
     dt_gr : Quantity, optional
-        Time step for gradient discretization (ms). Negative disables.
-        Default is -1 ms (disabled).
+        Sub-sample the SLOPED segments of each gradient at this step (ms).
+        Negative disables; default -1 (disabled), which is correct under the
+        default ``magnus2`` solver: its trapezoidal quadrature integrates a
+        piecewise-linear ramp exactly from the corners alone, measured 4.3e-7
+        rad against 3.6e-3 for ``cayley_klein`` on a 0.0123/0.0456 ms ramp
+        pair. Set it only when solving with ``method='cayley_klein'``, whose
+        end-of-interval rule leaves ``A*(rise - fall)/2`` per trapezoid; even
+        then sub-sampling only shrinks that bias, it does not remove it.
     dt : Quantity, optional
         Coarse time step for the remaining sequence timeline (ms).
         Default is 10 ms.
@@ -166,7 +277,20 @@ class SequenceBlock:
         # solver does not consume it -- readout is synthesized from the
         # k-space trajectory, not from the magnetization time course.
         if self.adc is not None:
-            adc_mask = np.isin(t, self.adc.times.m_as('ms'))
+            # adc.times are block-local (see the ADC docstring) while `t` is
+            # absolute, so the two must be brought onto the same origin before
+            # comparing -- np.isin against raw absolute times never matched and
+            # the mask came back all-False on every block.
+            adc_local = np.sort(np.asarray(self.adc.times.m_as('ms'),
+                                           dtype=np.float64))
+            rel = np.asarray(t, dtype=np.float64) - self.time_extent[0].m
+            # searchsorted, not an (n, m) isclose broadcast: a single-shot
+            # spiral ADC can carry tens of thousands of samples in one block,
+            # and n x m float64 plus np.isclose's temporaries runs to GB.
+            idx = np.clip(np.searchsorted(adc_local, rel), 0, adc_local.size - 1)
+            prev = np.clip(idx - 1, 0, adc_local.size - 1)
+            adc_mask = (np.abs(adc_local[idx] - rel) <= RASTER_TOL_MS) | \
+                       (np.abs(adc_local[prev] - rel) <= RASTER_TOL_MS)
         else:
             adc_mask = np.zeros_like(t, dtype=bool)
 
@@ -209,6 +333,13 @@ class SequenceBlock:
         # Time extent
         t_min = float(np.min([e.min(axis=0) for e in extents]))
         t_max = float(np.max([e.max(axis=0) for e in extents]))
+
+        # An ADC extends the block but must not move its START: a block spans
+        # [0, dur] with its events inside, and an ADC's times begin at its own
+        # delay. Without this an ADC-only block reports dur = 0 while its raster
+        # spans the whole acquisition, so the next block chains 0 ms later.
+        if self.adc is not None and np.size(self.adc.times):
+            t_max = max(t_max, t_min + float(np.max(self.adc.times.m_as('ms'))))
         if (t_max - t_min) < self.dur.m_as('ms'):
             t_max += self.dur.m_as('ms') - (t_max - t_min)
 
@@ -242,8 +373,18 @@ class SequenceBlock:
         if self.gradients:
             gr_timings = np.concatenate([g.timings.m for g in self.gradients])
             if self.dt_gr > 0:
+                # Sub-sample only the SLOPED segments. The kernel charges each
+                # interval the field at its end, so a flat top is already exact
+                # and a ramp is not: stored as bare corners, a trapezoid is
+                # over-charged by A*rise/2 on the way up and under-charged by
+                # A*fall/2 on the way down, leaving A*(rise - fall)/2 -- zero
+                # only while rise == fall, which is why symmetric trapezoids
+                # have never shown it. On a UNIFORM sub-raster the two errors
+                # are +A*dt/2 and -A*dt/2 and cancel exactly, whatever the ramps.
+                # Skipping flat tops costs x1.15-2.10 in raster size instead of
+                # x1.59-5.64 for the same result.
                 gr_timings = np.concatenate(
-                    [np.arange(g.timings[0].m, g.timings[-1].m, self.dt_gr.m) for g in self.gradients]
+                    [_sloped_segment_times(g, self.dt_gr.m_as('ms')) for g in self.gradients]
                     + [gr_timings]
                 )
         else:
@@ -251,11 +392,32 @@ class SequenceBlock:
 
         # Get RF timings while considering the dt_rf
         if self.rf_pulses:
-            rf_timings = np.concatenate([[(rf.time - rf.ref).m, (rf.time - rf.ref + rf.dur).m] for rf in self.rf_pulses])
+            rf_timings = np.concatenate([list(_rf_support_ms(rf)) for rf in self.rf_pulses])
             if self.dt_rf > 0:
+                # One step OUTSIDE each edge of the support as well. The kernel
+                # charges every interval the field at its END, so the interval
+                # arriving at a pulse edge is charged full RF amplitude however
+                # long it is: on ppm_v15 the raster jumped 0 -> 0.1 ms straight
+                # onto the pulse start and billed the whole gap as pulse,
+                # +1.25% of flip.
+                #
+                # The guard must sit a HAIR outside the support, not one dt_rf
+                # outside: the guarded interval is still charged full amplitude,
+                # so its length lands directly on the flip angle. At one dt_rf
+                # that is dt_rf/dur -- +10.0% on a 0.1 ms imported hard pulse,
+                # and magnus2 does not help because a pulse edge is a step, not
+                # a ramp. At RF_EDGE_GUARD_MS it is 1e-4 of the pulse.
+                guards = []
+                lo_blk, hi_blk = self.time_extent[0].m, self.time_extent[1].m
+                eps = min(RF_EDGE_GUARD_MS, float(self.dt_rf.m))
+                for rf in self.rf_pulses:
+                    lo, hi = _rf_support_ms(rf)
+                    guards.append(np.array(
+                        [max(lo - eps, lo_blk), min(hi + eps, hi_blk)],
+                        dtype=np.float64))
                 rf_timings = np.concatenate(
-                    [np.arange((rf.time - rf.ref).m, (rf.time - rf.ref + rf.dur).m, self.dt_rf.m) for rf in self.rf_pulses]
-                    + [rf_timings]
+                    [np.arange(*_rf_support_ms(rf), self.dt_rf.m) for rf in self.rf_pulses]
+                    + guards + [rf_timings]
                 )
         else:
             rf_timings = np.array([])
@@ -277,7 +439,15 @@ class SequenceBlock:
 
         # Concatenate all timings, sort them and remove duplicates
         all_timings = np.concatenate((gr_timings, rf_timings, seq_timings, adc_times, block_ends))
-        all_timings = np.unique(np.sort(all_timings))
+        # Keep the FIRST of each near-duplicate cluster, never the last, and do
+        # not snap the ends onto time_extent. The block end can sit an ulp above
+        # an event's last sample, and the interpolators are built with
+        # right=0.0, so a raster point pushed past that sample evaluates the
+        # event as zero: on a hard pulse defined by its two endpoints that costs
+        # half the final interval, and 2.5% of the flip angle.
+        tol = _raster_tolerance(self.dt.m_as('ms'), self.dt_rf.m_as('ms'),
+                                self.dt_gr.m_as('ms'))
+        all_timings = _collapse_near_duplicates(np.sort(all_timings), tol)
 
         return Quantity(all_timings, units='ms')
 
@@ -360,7 +530,18 @@ class Sequence:
     def __str__(self):
         return f"Sequence with {len(self.blocks)} blocks."
 
-    def add_block(self, block: SequenceBlock | Quantity, dt: Quantity = Quantity(10, 'ms')):
+    def add_block(self, block: SequenceBlock | Quantity, dt: Quantity = None):
+        # `dt` builds the raster of a DELAY block and is meaningless for the
+        # other two branches: a SequenceBlock's discrete_times are fixed at
+        # construction and only ever shifted, and a nested Sequence carries its
+        # blocks' own rasters.
+        if dt is None:
+            dt = Quantity(10, 'ms')
+        elif not isinstance(block, Quantity):
+            warnings.warn(
+                "add_block(dt=...) applies only when `block` is a Quantity "
+                "(a delay); the raster of an existing SequenceBlock is fixed "
+                "at construction. Pass dt to SequenceBlock(...) instead.")
         # Add a block to the sequence
         if isinstance(block, SequenceBlock):
             block = block.copy()  # Ensure we work with a copy
@@ -372,6 +553,20 @@ class Sequence:
             self.non_empty.append(not block.empty)
         elif isinstance(block, Quantity):
             # If a duration is provided, create a new block with that duration
+            if not np.isfinite(block.m_as('ms')):
+                raise ValueError(
+                    f"add_block was given a non-finite duration ({block}). A "
+                    f"NaN compares False against both 0 and itself, so it would "
+                    f"be dropped silently and shift every later block index.")
+            if block <= Quantity(0, 'ms'):
+                # Dropping it silently shifts every later block index by one,
+                # and the readout bookkeeping (first_block, m_storage_block,
+                # block_labels) is built on those indices.
+                warnings.warn(
+                    f"add_block ignored a non-positive duration ({block}); no "
+                    f"block was appended and every later index is unchanged. "
+                    f"Guard zero-duration blocks at the call site if index "
+                    f"alignment matters.")
             if block > Quantity(0, 'ms'):
                 block = SequenceBlock(dur=block.to('ms'), dt=dt, empty=True, store_magnetization=False)
                 block.change_time(self.time_extent[-1].to('ms'))
@@ -399,8 +594,17 @@ class Sequence:
             self.time_extent = self._get_extent()
             self.dur = self.time_extent[1] - self.time_extent[0]
             self.non_empty.extend(not c.empty for c in shifted)
+            # The flag lives on the Sequence, so a child that spells out its own
+            # spoilers would otherwise lose that on being appended and the
+            # solver would resolve perfect_spoiling back to True, zeroing Mxy at
+            # every block boundary.
+            if getattr(sequence, 'explicit_spoiling', False):
+                self.explicit_spoiling = True
         else:
-            warnings.warn("Only SequenceBlock or Quantity instances can be added to the sequence.")
+            warnings.warn(
+                f"add_block accepts a SequenceBlock, a Quantity (delay) or a "
+                f"Sequence; got {type(block).__name__}. Nothing was appended, "
+                f"so any duration already deducted for it is unaccounted for.")
 
     def flatten(self):
         # Flatten the sequence by creating a single block
@@ -524,8 +728,12 @@ class BlochSolver:
         FEM mesh phantom providing the local signal assembler.
     scanner : Scanner, optional
         Scanner hardware definition. Default is a standard 1.5 T scanner.
-    M0 : np.ndarray or float, optional
-        Equilibrium magnetization (nodal array or scalar). Default is 1.0.
+    M0 : float, optional
+        Scalar only -- the C++ kernel takes ``const T&``. A nodal array raises
+        ``TypeError`` from the pybind signature, and would in any case broadcast
+        ``M0 * ones((N, 1))`` to ``(N, N)``. For a spatially varying equilibrium
+        use ``initial_Mz``, which is a nodal ``(N, 1)`` array.
+        Default is 1.0.
     T1 : Quantity, optional
         Longitudinal relaxation time (ms). Default is 1000 ms.
     T2 : Quantity, optional
@@ -566,7 +774,7 @@ class BlochSolver:
                  isochromat_K: int = 25,
                  isochromat_distribution: str = 'sobol',
                  isochromat_seed: int | None = 0,
-                 method: str = 'cayley_klein',
+                 method: str = 'magnus2',
                  dtype: str = 'float32'):
         method_key = str(method).lower()
         if method_key not in _METHOD_TO_ORDER:
@@ -604,6 +812,17 @@ class BlochSolver:
         if perfect_spoiling is None:
             perfect_spoiling = not getattr(sequence, 'explicit_spoiling', False)
         self.perfect_spoiling = bool(perfect_spoiling)
+        # A block flagged spoiler=True pays the full K-isochromat cost and then
+        # has its Mxy zeroed anyway, so the two settings contradict each other.
+        # Only import_pulseq sets explicit_spoiling, so a natively built
+        # sequence using spoiler=True lands here by default.
+        if self.perfect_spoiling and any(
+                getattr(b, 'spoiler', False) for b in getattr(sequence, 'blocks', [])):
+            warnings.warn(
+                "the sequence has spoiler=True block(s) but perfect_spoiling is "
+                "on, so their isochromat dephasing is computed and then "
+                "discarded (Mxy is zeroed regardless). Pass "
+                "perfect_spoiling=False to keep it, or drop the spoiler flag.")
         # Multi-isochromat dephasing controls for blocks with spoiler=True.
         # K          -- number of isochromats per local FE node.
         # distribution -- 'uniform' (Monte-Carlo, ~1/sqrt(K) residual) or
@@ -665,6 +884,7 @@ class BlochSolver:
         x = np.ascontiguousarray(self.phantom.local_nodes, dtype=self._np_real)
 
         # Blocks to be solved
+        start_arg = start
         if start < 0:
             start += self.sequence.Nb_blocks
         if end is None:
@@ -683,7 +903,18 @@ class BlochSolver:
         nb_blocks = len(blocks)
 
         # List of indices indicating which blocks need to be stored
+        # These index into `blocks`, i.e. into the SLICE, while the readout
+        # bookkeeping in PulseqAdapter counts store_magnetization blocks over
+        # the WHOLE sequence. The two agree only for a whole-sequence solve.
         store_indices = [i for i, block in enumerate(blocks) if block.store_magnetization]
+        if start_arg > 0 and any(b.store_magnetization
+                                 for b in self.sequence.blocks[:start]):
+            warnings.warn(
+                f"solve(start={start_arg}) skips "
+                f"{sum(b.store_magnetization for b in self.sequence.blocks[:start])} "
+                f"block(s) already flagged store_magnetization, so the returned "
+                f"columns are numbered from `start` and no longer line up with "
+                f"ReadoutWindow.m_storage_idx, which counts from block 0.")
 
         # Allocate magnetizations
         Mxy = np.zeros((nb_nodes, nb_blocks), dtype=self._np_cplx)
@@ -764,7 +995,25 @@ class BlochSolver:
             # Solve
             if block.spoiler is True:
                 K = self.isochromat_K
+                # pos_jitter is the sphere RADIUS, while global_elem_size is
+                # cbrt(element volume) -- a full characteristic LENGTH. Passing
+                # it unhalved scattered isochromats over a sphere of that
+                # DIAMETER, spilling an element-width outside their own element.
+                # A sphere inscribed in a cell of side L has radius L/2.
+                #
+                # The .min() over the whole mesh is still crude: on a graded
+                # mesh the single smallest element sets the jitter everywhere,
+                # so large elements are under-dephased by size_min/size_local.
+                # Per-node radii need a vector pos_jitter through
+                # create_multi_isochromats; not done here.
                 elem_size = self.phantom.global_elem_size.min()
+                # A fixed seed draws the IDENTICAL point set in every spoiler
+                # block, so the residual is the same complex number each time
+                # and accumulates coherently instead of averaging down as
+                # 1/sqrt(n_blocks). Offsetting by the block index decorrelates
+                # them while keeping the whole solve reproducible.
+                block_seed = (None if self.isochromat_seed is None
+                              else int(self.isochromat_seed) + i)
                 (x_big, T1_big, T2_big,
                  deltaB_big, Mxy_big, Mz_big) = create_multi_isochromats(
                     x, T1, T2,
@@ -772,9 +1021,9 @@ class BlochSolver:
                     initial_Mxy,
                     initial_Mz,
                     K=K,
-                    pos_jitter=elem_size,
+                    pos_jitter=0.5 * elem_size,
                     distribution=self.isochromat_distribution,
-                    seed=self.isochromat_seed,
+                    seed=block_seed,
                 )
 
                 # CRITICAL FIX: Expand modes and Magnus state to match the
@@ -788,9 +1037,23 @@ class BlochSolver:
                                   K, axis=0).reshape(3 * nb_nodes * K, -1))
                 else:
                     modes_big = modes
-                Bz_old_big = np.ascontiguousarray(
-                    np.repeat(Bz_old, K, axis=0), dtype=self._np_real
-                )
+                # Re-derive the Magnus seed from the JITTERED positions.
+                # np.repeat(Bz_old, K) copies a field computed at the node
+                # centres, which carries none of the intra-voxel dephasing this
+                # block exists to produce, so the first trapezoidal step of
+                # every spoiler block averaged the correct field with one that
+                # had the spoiler's entire effect missing.
+                if self._order > 0:
+                    if has_traj and weights.size > 0:
+                        c0b = x_big + (modes_big @ weights[0]).reshape(-1, 3)
+                    else:
+                        c0b = x_big
+                    Bz_old_big = np.ascontiguousarray(
+                        c0b @ gradients[0, :] + deltaB_big.reshape(-1),
+                        dtype=self._np_real)
+                else:
+                    Bz_old_big = np.ascontiguousarray(
+                        np.repeat(Bz_old, K, axis=0), dtype=self._np_real)
 
                 # Solve for the expanded mesh
                 t_call = time.perf_counter()

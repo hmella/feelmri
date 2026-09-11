@@ -1,5 +1,5 @@
 {
-  "duration_ms": 1.2000000000000002,
+  "duration_ms": 1600.0,
   "first_adc_ms": 0.0,
   "kspace_file_max_1_per_m": [
     0.0,
@@ -23,18 +23,18 @@
   ],
   "last_adc_ms": 0.0,
   "n_adc_samples": 0,
-  "n_blocks": 1,
+  "n_blocks": 160,
   "n_gradients": [
     0,
-    1,
+    0,
     0
   ],
   "n_readouts": 0,
-  "n_rf": 0,
+  "n_rf": 80,
   "n_stored_columns": 0,
   "peak_gradient_mT_per_m": [
     0.0,
-    23.485204321277592,
+    0.0,
     0.0
   ],
   "timing_errors": 0

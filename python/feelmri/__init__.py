@@ -32,12 +32,16 @@ from feelmri.Phantom import FEMPhantom
 # Pulseq adapter and end-to-end simulator
 from feelmri.PulseqAdapter import (
     PulseqImport,
+    PulseqSimulation,
     ReadoutWindow,
     as_signal_inputs,
     import_pulseq,
     kspace_to_signal_inputs,
     kspace_trajectory,
+    pypulseq_can_read,
+    pypulseq_version,
     read_seq_feelmri,
+    simulate_pulseq,
 )
 
 # Motion models
@@ -98,9 +102,10 @@ __all__ = [
     # Phantom
     "FEMPhantom",
     # Pulseq adapter
-    "PulseqImport", "ReadoutWindow",
+    "PulseqImport", "PulseqSimulation", "ReadoutWindow",
     "import_pulseq", "read_seq_feelmri", "kspace_trajectory",
     "as_signal_inputs", "kspace_to_signal_inputs",
+    "simulate_pulseq", "pypulseq_version", "pypulseq_can_read",
     # Motion
     "RespiratoryMotion", "POD", "PODVelocity", "PODSum",
     "pod_energy_spectrum", "modes_for_energy", "pod_frame_errors",

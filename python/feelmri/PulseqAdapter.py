@@ -1879,6 +1879,17 @@ class ReadoutWindow:
       Per-sample phase (rad) from the leading block's Pulseq v1.5 phase
       shape, or None. All three are demodulation parameters and are applied
       by the caller, not by the solver.
+  kspace_file : np.ndarray
+      The trajectory exactly as ``calculate_kspace`` reports it, measured
+      from the excitation. ``kspace`` is this minus ``k_at_anchor``.
+  k_at_anchor : np.ndarray, shape (3,)
+      Gradient moment (1/m) already carried by the magnetization at
+      ``m_storage_block``. It is subtracted from ``kspace`` because the
+      assembler would otherwise wind it a second time.
+  t_anchor : float
+      Absolute time (ms) of the snapshot, i.e. the end of the anchor block.
+      ``times - t_anchor`` is the elapsed time the assembler's
+      ``exp(-t/T2)`` and ``exp(i*phi*t)`` expect.
   """
   first_block: int
   last_block: int
@@ -1889,6 +1900,53 @@ class ReadoutWindow:
   adc_freq_offset: float
   adc_phase_offset: float
   adc_phase_modulation: Optional[np.ndarray] = None
+  kspace_file: Optional[np.ndarray] = None
+  k_at_anchor: Optional[np.ndarray] = None
+  t_anchor: float = 0.0
+
+  def demodulation_phase(self) -> np.ndarray:
+    """Receiver phase Pulseq specifies for this window's samples, in rad.
+
+    ``2*pi*freq_offset*t + phase_offset + phase_modulation``, with ``t``
+    measured from the window's FIRST SAMPLE -- the ADC event's own origin,
+    which is what the offsets are referenced to.
+
+    An EPI train collapses many ADC events into one window and the window
+    carries the offsets of its HEAD event only, so for such a window this is
+    exact just when every event shares them (the usual case, since the offsets
+    come from one `make_adc` call).
+    """
+    t = np.asarray(self.times, dtype=float)
+    t = (t - t.min()) * 1e-3 if t.size else t                    # ms -> s
+    phase = 2.0 * np.pi * float(self.adc_freq_offset) * t
+    phase = phase + float(self.adc_phase_offset)
+    if self.adc_phase_modulation is not None:
+      pm = np.asarray(self.adc_phase_modulation, dtype=float).reshape(-1)
+      if pm.size == phase.size:
+        phase = phase + pm
+      else:
+        logger.warning(
+            "readout blocks %d-%d: adc_phase_modulation has %d entries for %d "
+            "samples; the per-sample phase is not applied",
+            self.first_block, self.last_block, pm.size, phase.size)
+    return phase
+
+  def demodulate(self, signal: np.ndarray) -> np.ndarray:
+    """Apply :meth:`demodulation_phase` to a signal sampled on this window.
+
+    The solver never samples the ADC -- the readout is synthesized from the
+    trajectory -- so the receiver's frequency and phase offsets have to be
+    applied here or not at all. They were parsed and carried but never
+    applied until 2026-09-10; on ``ppm_v15`` that left 228 degrees of phase
+    on the table.
+    """
+    phase = self.demodulation_phase()
+    if not np.any(phase):
+      return signal
+    out = np.asarray(signal)
+    # signal is (n_samples, ...) -- broadcast the phase along the sample axis.
+    shape = (phase.size,) + (1,) * (out.ndim - 1)
+    return out * np.exp(-1j * phase.reshape(shape))
 
 
 @dataclass(frozen=True)
@@ -2023,10 +2081,9 @@ class PulseqImport:
     return block
 
 
-# RF use labels that anchor a coherence period. ADC blocks following one
-# of these — until the next anchor — belong to the same readout group.
-# 'undefined' mirrors pypulseq's Sequence.calculate_kspace behaviour
-# (sequence.py:1322-1325).
+# RF use labels that open a coherence period. Kept for reference and for
+# callers that reason about grouping; the ANCHOR itself is not chosen from this
+# set -- see _identify_readout_groups for why any RF must anchor.
 _ANCHOR_USES = frozenset(('excitation', 'refocusing', 'undefined'))
 
 
@@ -2068,20 +2125,66 @@ def _compute_block_labels(pulseq_seq: PulseqSequence) -> List[Dict[str, int]]:
   return out
 
 
+def _gradient_moment_between(feelmri_seq, t0_ms: float, t1_ms: float,
+                             gammabar_hz_per_t: float) -> np.ndarray:
+  """Gradient moment accumulated over ``[t0_ms, t1_ms]``, in 1/m per axis.
+
+  Integrates FEelMRI's own converted gradients rather than pypulseq's
+  ``waveforms_and_times``: the latter concatenates each block's shape pieces
+  with no padding between them, so interpolating across it silently bridges
+  the gaps where no gradient is playing. Our blocks carry their own support
+  and are zero outside it, so the sum is gap-free. The waveforms are
+  piecewise linear, so evaluating at every corner inside the interval plus the
+  two endpoints makes the trapezoid rule exact.
+  """
+  total = np.zeros(3, dtype=float)
+  if t1_ms <= t0_ms:
+    return total
+  for block in feelmri_seq.blocks:
+    if (block.time_extent[1].m_as('ms') <= t0_ms
+        or block.time_extent[0].m_as('ms') >= t1_ms):
+      continue
+    for g in block.gradients:
+      ts = g.timings.m_as('ms')
+      amp = g.amplitudes.m_as('mT/m')
+      lo = max(t0_ms, float(ts[0]))
+      hi = min(t1_ms, float(ts[-1]))
+      if hi <= lo:
+        continue
+      inner = ts[(ts > lo) & (ts < hi)]
+      grid = np.concatenate(([lo], inner, [hi]))
+      total[g.axis] += float(np.trapezoid(
+          np.interp(grid, ts, amp, left=0.0, right=0.0), grid))
+  # mT/m * ms -> T/m * s, then Hz/T -> 1/m
+  return total * 1e-6 * gammabar_hz_per_t
+
+
 def _identify_readout_groups(pulseq_seq: PulseqSequence
                              ) -> List[Tuple[int, int, int]]:
-  """Group ADC-bearing blocks by their most recent coherence anchor.
+  """Group ADC-bearing blocks by the last RF pulse that precedes them.
 
   Returns a list of ``(first_block, last_block, anchor_block)`` tuples.
-  ``anchor_block`` is the index of the latest RF block with
-  ``use ∈ {'excitation', 'refocusing', 'undefined'}``. Refocusing
-  pulses keep the current anchor (they flip k but do not start a new
-  coherence period). ``preparation`` / ``saturation`` / ``inversion`` /
-  ``other`` pulses do not anchor.
 
-  When no use-labeled anchor exists (the v1.4 fallback path), each ADC
-  block becomes its own group anchored on the most recent non-ADC
-  block — exactly the legacy partitioning.
+  The anchor is the block holding the most recent ACTIVE RF pulse,
+  whatever its ``use`` label. That is not a grouping convenience, it is
+  what the dual-path factorisation requires. The readout is synthesized
+  as
+
+      M(t) = M(t_anchor) · exp(-i2π(k(t) − k(t_anchor))·x) · exp(-Δt/T2)
+
+  which substitutes the snapshot for the magnetization at the ADC. It is
+  valid only while nothing but gradients and relaxation act in between,
+  so an RF pulse between the snapshot and the ADC breaks it. Anchoring a
+  spin echo on its excitation leaves the refocusing pulse *after* the
+  snapshot, and the inversion never reaches the signal at all: measured
+  on tests/data/se_an_v15.seq, the off-resonance phase at the echo came
+  out fully unrefocused (2.77 rad, i.e. ω·TE).
+
+  An EPI echo train is unaffected — it carries no RF — so blip-separated
+  ADCs sharing one excitation still collapse into a single window.
+
+  When no RF precedes an ADC at all, that ADC becomes its own group
+  anchored on the most recent non-ADC block.
   """
   n = len(pulseq_seq)
   anchor = -1
@@ -2089,8 +2192,9 @@ def _identify_readout_groups(pulseq_seq: PulseqSequence
   anchor_order: List[Any] = []
 
   for i in range(n):
-    use = _block_use_label(pulseq_seq, i)
-    if use in _ANCHOR_USES and use != 'refocusing':
+    # Any active RF anchors: what matters is that no pulse falls between the
+    # snapshot and the ADC, not which coherence period the pulse opens.
+    if _block_use_label(pulseq_seq, i) is not None:
       anchor = i
 
     has_adc = int(pulseq_seq.ADC[i].num) > 0
@@ -2170,6 +2274,7 @@ def import_pulseq(
 
   See :class:`PulseqImport` for the returned object's shape.
   """
+  scanner_was_given = scanner is not None
   if scanner is None:
     scanner = Scanner()
   # Read with the scanner's own gyromagnetic ratio, so that gamma * B in the
@@ -2199,6 +2304,30 @@ def import_pulseq(
           '; '.join(timing_errors[:3]),
           '...' if len(timing_errors) > 3 else '')
   ppm_to_hz = _ppm_to_hz(scanner)
+  gammabar = scanner.gammabar.m_as('Hz/T')
+
+  # ppm offsets are a fraction of the Larmor frequency, and the .seq file does
+  # not record B0 -- so they are scaled by the SCANNER's. Imported with the
+  # default scanner, a sequence written for 3 T silently gets half the offset
+  # it was designed with, and a fat-sat pulse lands on the wrong resonance.
+  if not scanner_was_given:
+    n_ppm = 0
+    for i in range(len(pulseq_seq)):
+      rf_i, adc_i = pulseq_seq.RF[i], pulseq_seq.ADC[i]
+      for ev in (rf_i, adc_i):
+        if ev is None:
+          continue
+        if (abs(float(getattr(ev, 'freq_ppm', 0.0) or 0.0)) > 0.0
+            or abs(float(getattr(ev, 'phase_ppm', 0.0) or 0.0)) > 0.0):
+          n_ppm += 1
+    if n_ppm:
+      logger.warning(
+          "%s: %d event(s) carry a ppm frequency/phase offset, which is scaled "
+          "by gammabar*B0*1e-6 = %.4g Hz/ppm from the DEFAULT scanner (B0 = %s). "
+          "The .seq file does not record B0 -- pass import_pulseq(..., "
+          "scanner=Scanner(field_strength=...)) if it was not written for "
+          "this field.",
+          filename, n_ppm, ppm_to_hz, scanner.field_strength)
   feelmri_seq = feelmriSequence()
   # A .seq file spells out its spoiler gradients and RF phase cycling, so the
   # solver must not zero Mxy between blocks on top of them -- that would
@@ -2307,11 +2436,32 @@ def import_pulseq(
     t_start = float(block_start_s[first])
     t_end = float(block_end_s[last])
     mask = (t_adc >= t_start - 1e-12) & (t_adc < t_end + 1e-12)
-    kspace = k_traj_adc[:, mask].T.astype(np.float32, copy=False)
+    kspace_file = k_traj_adc[:, mask].T.astype(np.float32, copy=False)
     # float64: these are absolute sequence times, and float32 only resolves
     # about 6e-6 ms at 100 ms. The signal assembler takes float32, so callers
     # cast at that boundary, usually after subtracting the window start.
     times_arr = np.ascontiguousarray(t_adc[mask] * 1e3, dtype=np.float64)
+
+    # The magnetization is snapshotted at the END of the anchor block, and
+    # calculate_kspace measures k from the excitation, so the snapshot already
+    # carries whatever moment had accumulated by then. Handing the assembler
+    # the file's k as-is winds that moment a second time -- on the bundled
+    # files that is 252 to 460 1/m of slice-select, one to two whole cycles
+    # across the slice. Subtract it, so rw.kspace is the encoding measured
+    # FROM THE SNAPSHOT, which is what pairs with rw's Mxy column.
+    #
+    # The anchor is the last RF before the readout, so nothing between it and
+    # the first sample reflects k and a plain integral is valid there. Working
+    # backwards from the first ADC sample also keeps any earlier refocusing
+    # reflections, which pypulseq has already folded into k_traj_adc.
+    if m_block >= 0 and times_arr.size:
+      t_anchor_ms = float(block_end_s[m_block]) * 1e3
+      k_at_anchor = kspace_file[0].astype(float) - _gradient_moment_between(
+          feelmri_seq, t_anchor_ms, float(times_arr[0]), gammabar)
+    else:
+      t_anchor_ms = float(t_start) * 1e3
+      k_at_anchor = np.zeros(3, dtype=float)
+    kspace = (kspace_file - k_at_anchor).astype(np.float32, copy=False)
 
     head_adc = pulseq_seq.ADC[first]
     readouts.append(ReadoutWindow(
@@ -2320,6 +2470,9 @@ def import_pulseq(
       m_storage_block=m_block,
       m_storage_idx=m_idx,
       kspace=kspace,
+      kspace_file=kspace_file,
+      k_at_anchor=k_at_anchor,
+      t_anchor=t_anchor_ms,
       times=times_arr,
       adc_freq_offset=float(head_adc.df) + float(head_adc.freq_ppm) * ppm_to_hz,
       adc_phase_offset=float(head_adc.phase) + float(head_adc.phase_ppm) * ppm_to_hz,
@@ -2420,7 +2573,9 @@ class PulseqSimulation:
       Under MPI these are reduced onto rank 0 unless ``gather=False``, in
       which case each rank holds its own partial sum.
   times : list of np.ndarray
-      Absolute sample times (ms) matching each ``kspace`` entry.
+      Absolute sample times (ms) matching each ``kspace`` entry. The signal is
+      assembled with ``times - ReadoutWindow.t_anchor``; these are kept
+      absolute so a caller can place each window on the sequence timeline.
   Mxy, Mz : np.ndarray
       The solver's stored magnetization columns, one per block flagged
       ``store_magnetization``. ``ReadoutWindow.m_storage_idx`` indexes them.
@@ -2487,6 +2642,12 @@ def simulate_pulseq(seq_path,
       :func:`~feelmri.MPIUtilities.gather_data`. Default True. ``mri_signal``
       has no collective of its own, so with ``gather=False`` every rank
       returns only its own nodes' contribution.
+
+      ``gather_data`` is an ``MPI_comm.Reduce(root=0)``, **not** an Allreduce:
+      with ``gather=True`` the complete signal exists on rank 0 alone and every
+      other rank receives ZEROS. Guard reconstruction, plotting and file output
+      with ``if MPI_rank == 0``, and do not test a non-root rank's ``kspace``
+      for correctness -- it is expected to be empty, not wrong.
   import_kwargs : dict, optional
       Forwarded to :func:`import_pulseq` (``readout_set_values``,
       ``placeholder_dt``, ``validate``).
@@ -2520,9 +2681,16 @@ def simulate_pulseq(seq_path,
           rw.first_block, rw.last_block)
       continue
     phantom.update_magnetization(Mxy[:, rw.m_storage_idx])
+    # Elapsed time since the snapshot, not absolute time from the start of the
+    # file. mri_signal uses t for exp(-t/T2) and exp(i*phi*t), both of which
+    # continue from the instant the magnetization was captured; feeding it
+    # absolute times applies a spurious exp(-t_anchor/T2) to the whole window.
     points, t = _reshape_signal_inputs(
-        rw.kspace[:, 0], rw.kspace[:, 1], rw.kspace[:, 2], rw.times, None)
+        rw.kspace[:, 0], rw.kspace[:, 1], rw.kspace[:, 2],
+        rw.times - rw.t_anchor, None)
     signal = phantom.mri_signal(list(points), t, pod)
+    # The receiver's frequency/phase offsets and any per-sample phase shape.
+    signal = rw.demodulate(signal)
     kspace.append(gather_data(signal) if gather else signal)
     times.append(rw.times)
 
@@ -2533,12 +2701,18 @@ def simulate_pulseq(seq_path,
 # High-level sequence reader for FEelMRI
 # ---------------------------------------------------------------------------
 
-def read_seq_feelmri(filename) -> Tuple[feelmriSequence, PulseqSequence]:
+def read_seq_feelmri(filename, *, scanner: Optional[Scanner] = None,
+                     validate: bool = True) -> Tuple[feelmriSequence, PulseqSequence]:
   """Backward-compatible wrapper around :func:`import_pulseq`.
 
   Returns ``(feelmri_seq, pulseq_seq)`` so existing callers keep working;
   new callers should prefer :func:`import_pulseq` for the partitioned
   view (with readout windows ready for the dual-path workflow).
+
+  ``scanner`` and ``validate`` are forwarded. ``scanner`` is not optional in
+  practice for anything but 1.5 T: the file carries no B0, so every ppm offset
+  is scaled by the scanner's, and the gamma the file is read with must be the
+  gamma the solver integrates.
   """
-  imp = import_pulseq(filename)
+  imp = import_pulseq(filename, scanner=scanner, validate=validate)
   return imp.feelmri_seq, imp.pulseq_seq
