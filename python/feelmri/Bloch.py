@@ -158,6 +158,18 @@ def _rf_support_ms(rf):
     return float(t[0]), float(t[-1])
 
 
+def _rf_waveform_mT(rf):
+    """An RF pulse's B1 waveform in mT, on either construction path.
+
+    ``_init_from_user_waveform`` stores a pint Quantity; the analytic
+    generators store a bare ndarray already in mT (verified: gamma times the
+    trapezoidal integral of a hard 90 reads 90.0000 deg either way). Callers
+    that read ``.m_as`` unconditionally crash on every natively built pulse.
+    """
+    w = rf.waveform
+    return np.asarray(w.m_as('mT') if isinstance(w, Quantity) else w)
+
+
 def _collapse_near_duplicates(sorted_t, tol=RASTER_TOL_MS):
     """Drop entries within ``tol`` of their predecessor in a sorted array.
 
@@ -494,8 +506,12 @@ class SequenceBlock:
         else:
             rf_timings = np.array([])
 
-        # Sequence timings
-        seq_timings = np.arange(self.time_extent[0].m, self.time_extent[1].m, self.dt.m)
+        # Sequence timings. Every term is converted, not read raw: the raster
+        # is in ms, and `dt` carries whatever unit the caller wrote. Reading
+        # `.m` made dt=100 us give 2 points where dt=0.1 ms gave 21.
+        seq_timings = np.arange(self.time_extent[0].m_as('ms'),
+                                self.time_extent[1].m_as('ms'),
+                                self.dt.m_as('ms'))
 
         # ADC timings
         if self.adc is not None:
@@ -743,7 +759,7 @@ class Sequence:
                             f"{slew.max():.1f} mT/m/ms, limit {s_max:.1f}")
             if b1_max is not None:
                 for rf in block.rf_pulses:
-                    b1 = np.abs(np.asarray(rf.waveform.m_as('mT')))
+                    b1 = np.abs(_rf_waveform_mT(rf))
                     if b1.size and b1.max() > b1_max * (1.0 + rtol):
                         problems.append(
                             f"block {i}: RF peaks at {b1.max() * 1e3:.3f} uT, "
@@ -1110,10 +1126,18 @@ class BlochSolver:
             # Pre-compute the POD modes and weights for this block's timeframe
             has_traj = self.pod_trajectory is not None
             if has_traj:
-                self.pod_trajectory.update_timeshift(block.time_extent[0].m_as('ms'))
-
-                # Get the continuous weights for this block's time points
-                weights = self.pod_trajectory.get_weights(discrete_times - self.pod_trajectory.timeshift)
+                # `discrete_times` is already absolute sequence time, which is
+                # the frame the motion is defined in, so hand it over as is.
+                # `get_weights` adds the trajectory's own `timeshift` itself
+                # (Motion.py: `_fold_time(t + self.timeshift)`), so a caller
+                # who set one gets it honoured here.
+                #
+                # This used to call `update_timeshift(block_start)` and then
+                # subtract the same value back off, which cancelled exactly --
+                # the evolution was right, but a user-set `timeshift` was
+                # silently discarded and the attribute was left mutated at the
+                # LAST block's start time for every later consumer.
+                weights = self.pod_trajectory.get_weights(discrete_times)
 
                 # Get the static modes mapped to the original local nodes
                 # (built once and cached -- they do not change between blocks)
