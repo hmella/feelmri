@@ -281,3 +281,31 @@ ok, err = seq.check_timing()
 print('asym_ramp_v15 check_timing:', 'OK' if ok else err)
 seq.set_definition('Name', 'asym_ramp')
 seq.write(str(script_path / 'asym_ramp_v15.seq'))
+
+# 7d. A slice-offset excitation: the same sinc played twice, once on resonance
+# and once with a frequency offset that moves the slice by a known distance.
+#
+# NO other fixture has a non-zero RF `freq` column, which is exactly why the
+# custom-waveform path could drop the offset entirely and stay green. The
+# offset a scanner uses for slice `i` is gz.amplitude * slice_thickness * i,
+# so the excited slice must land at df / (gammabar * Gz).
+SLICE_OFF_DZ = 6e-3                       # metres, the offset slice's centre
+rf_on, gz_sl, gz_sl_reph = pp.make_sinc_pulse(
+    flip_angle=np.deg2rad(10), duration=1e-3, slice_thickness=slice_thickness,
+    apodization=0.5, time_bw_product=4, system=system, use='excitation',
+    return_gz=True)
+rf_off, _, _ = pp.make_sinc_pulse(
+    flip_angle=np.deg2rad(10), duration=1e-3, slice_thickness=slice_thickness,
+    apodization=0.5, time_bw_product=4, system=system, use='excitation',
+    freq_offset=gz_sl.amplitude * SLICE_OFF_DZ, return_gz=True)
+seq = pp.Sequence(system=system)
+seq.add_block(rf_on, gz_sl)
+seq.add_block(gz_sl_reph)
+seq.add_block(pp.make_delay(5e-3))
+seq.add_block(rf_off, gz_sl)
+seq.add_block(gz_sl_reph)
+ok, err = seq.check_timing()
+print('slice_offset_v15 check_timing:', 'OK' if ok else err)
+seq.set_definition('Name', 'slice_offset')
+seq.set_definition('SliceOffset_m', SLICE_OFF_DZ)
+seq.write(str(script_path / 'slice_offset_v15.seq'))

@@ -506,7 +506,7 @@ def _write_minimal_tet_mesh(path: Path):
 
 
 @pytest.mark.slow
-def test_dual_path_multi_window(parsed_imports, tmp_path):
+def test_dual_path_multi_window(adapter, parsed_imports, tmp_path):
   """End-to-end dual-path smoke test over SEVERAL readout windows.
 
   Was written against `gre_radial_pypulseq.seq`, which is not in the repo, so
@@ -539,14 +539,18 @@ def test_dual_path_multi_window(parsed_imports, tmp_path):
   except ImportError as exc:
     pytest.skip(f'feelmri C++ extensions not available: {exc}')
 
-  if 'cpmg_v15.seq' not in parsed_imports:
-    pytest.skip('cpmg_v15.seq not parsed')
+  # Not from `parsed_imports`: that fixture globs examples/pulseq, which holds
+  # only the EPI file. This one lives in tests/data.
+  seq_path = DATA_DIR / 'cpmg_v15.seq'
+  if not seq_path.exists():
+    pytest.skip('run tests/data/generate_seq_fixtures.py to build cpmg_v15.seq')
+  skip_if_pypulseq_too_old(seq_path)
 
   mesh_path = tmp_path / 'minimal_tet.vtu'
   _write_minimal_tet_mesh(mesh_path)
   phantom = FEMPhantom(path=str(mesh_path))
 
-  imp = parsed_imports['cpmg_v15.seq']
+  imp = adapter.import_pulseq(seq_path)
   assert len(imp.readouts) > 1, 'expected several readout windows'
   # The CPMG fixture plays no gradients at all, so k is constant within each
   # window and the windows differ only in time -- which is what makes the
