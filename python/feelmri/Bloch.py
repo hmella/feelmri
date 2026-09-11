@@ -1068,6 +1068,9 @@ class BlochSolver:
         # every rank, which is why the messages are accumulated instead of the
         # call being made inside the branch that found them.
         node_problems = []
+        # Whether guard 3 has already warned for the CURRENT value of
+        # perfect_spoiling. Set before any guard can run.
+        self._warned_perfect_spoiling = False
         self.M0 = M0
 
         def _node_column(value, name, template=None):
@@ -1417,12 +1420,25 @@ class BlochSolver:
         # Guard 3: perfect_spoiling zeroes Mxy at every non-empty block
         # boundary, which destroys the ensemble's coherence -- making the whole
         # feature a no-op that still costs K times.
-        if self.perfect_spoiling:
+        #
+        # Warned on TRANSITION, not on every visit. warnings.warn deduplicates
+        # per (message, category, module, lineno) under the default filter, and
+        # __init__ and solve() reach this same line -- so once any solver in the
+        # process had warned, the solve-time re-check was silent, including for
+        # the post-construction `solver.perfect_spoiling = True` flip that is
+        # the whole reason the re-check exists. Tracking the last state seen
+        # makes the warning fire when it actually changes. stacklevel=3 points
+        # at the caller rather than at this file.
+        if self.perfect_spoiling and not self._warned_perfect_spoiling:
+            self._warned_perfect_spoiling = True
             warnings.warn(
                 "BlochSolver: perfect_spoiling is on together with t2_prime, so "
                 "the sub-ensemble's coherence is zeroed at every non-empty "
                 "block boundary and can never rephase at an echo. The spectral "
-                "bins are then pure cost. Pass perfect_spoiling=False.")
+                "bins are then pure cost. Pass perfect_spoiling=False.",
+                stacklevel=3)
+        elif not self.perfect_spoiling:
+            self._warned_perfect_spoiling = False
         # Guard 4: the spatial spoiler ensemble is a SECOND sub-voxel axis. A
         # tensor product is K_spatial * K_spectral (x400 at the default
         # isochromat_K=25), and merging them onto one index is wrong: the
