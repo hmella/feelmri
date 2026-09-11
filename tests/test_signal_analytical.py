@@ -612,6 +612,15 @@ def test_a_zero_or_non_finite_static_field_is_refused(tmp_path):
     with pytest.raises(Exception, match='T2'):
       assembler.set_static_fields(t2_with(0.0), good_phi)
 
+  # A SHORT map is the silent case: the assembler indexes these by element
+  # connectivity under -DNDEBUG, so it reads adjacent heap. Measured before
+  # the length check, 22 entries for 27 nodes: 6.348e-08 against a true
+  # 6.336e-08 -- and a DIFFERENT wrong value on a re-run, which is what
+  # identifies it as a heap read rather than an arithmetic error.
+  with pytest.raises(ValueError, match='local nodes'):
+    phantom.set_static_fields(T2=np.full(n - 5, 60.0, dtype=np.float32),
+                              phi_dB0=np.zeros(n - 5, dtype=np.float32))
+
   # (n,) and (n, 1) describe the same nodes and callers mix them freely --
   # examples/water_and_fat.py passes one of each in the same call, which a
   # shape-equality check broke. Only a differing ENTRY COUNT is an error.

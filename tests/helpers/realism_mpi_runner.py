@@ -77,6 +77,10 @@ def main(argv=None):
                   help='hand this rank a delta_B one node short. Every rank '
                        'must then raise; if only the poisoned rank does, the '
                        'others block in the collective that reports it.')
+  ap.add_argument('--refusal-case', default='',
+                  choices=['', 'static_fields', 'update_mag', 'b1_map'],
+                  help='exercise one per-node refusal whose condition is true '
+                       'on a SUBSET of ranks; every rank must raise')
   ap.add_argument('--poison-at-solve', type=int, default=-1,
                   help='give this rank a short delta_B AFTER construction, so '
                        'the refusal has to come from solve()')
@@ -87,6 +91,9 @@ def main(argv=None):
 
   phantom = FEMPhantom(path=args.mesh)
   scanner = Scanner()
+  if args.refusal_case in ('static_fields', 'update_mag'):
+    phantom.set_assembler(voxel_size=0.0, lorder=1, horder=1,
+                          nodal_approximation=False, lumped=False)
 
   # Smooth spatial functions, so each node's value follows the node and not
   # its position in some rank-local array.
@@ -100,6 +107,29 @@ def main(argv=None):
   u = nodes[:, 0] / reach
   b1_map = (0.7 + 0.3 * np.cos(np.pi * u)) * np.exp(0.4j * u)
   t2_prime = 6.0 + 4.0 * u**2
+
+  if args.refusal_case:
+    # Each of these inspects local data and sits upstream of a collective, so
+    # a bare raise on the rank that notices hangs the rest.
+    n_local = phantom.local_nodes.shape[0]
+    globals_ = np.asarray(phantom.local_to_global_nodes)
+    if args.refusal_case == 'static_fields':
+      # One global node is "air" at T2 = 0, so it lives on one rank only.
+      T2 = np.full(n_local, 100.0, dtype=np.float32)
+      T2[globals_ == 0] = 0.0
+      phantom.set_static_fields(T2=T2,
+                                phi_dB0=np.zeros(n_local, dtype=np.float32))
+    elif args.refusal_case == 'update_mag':
+      # One length for every rank, so it is right on some and wrong on others.
+      phantom.update_magnetization(np.ones((80, 1), dtype=np.complex64))
+    else:
+      solver = BlochSolver(_build_sequence(scanner), phantom, scanner=scanner,
+                           M0=1.0, T1=Quantity(1e9, 'ms'),
+                           T2=Quantity(400.0, 'ms'), perfect_spoiling=False,
+                           dtype='float64')
+      solver.b1_map = np.ones(80, dtype=np.complex128)
+      solver.solve()
+    return
 
   # A per-rank field built against the wrong node count is the realistic way
   # this goes wrong -- under dual partitioning the two layouts have different

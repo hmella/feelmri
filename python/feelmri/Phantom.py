@@ -18,6 +18,7 @@ from scipy.sparse import lil_matrix
 
 from contextlib import contextmanager
 from feelmri.Assemble import basixMassAssemble as bMassAssemble
+from feelmri.MPIUtilities import collective_raise
 from feelmri.MRIAssemble import quadrature_npoints
 from mpi4py import MPI
 from feelmri.MPIUtilities import MPI_comm, MPI_print, MPI_rank, MPI_size
@@ -1203,13 +1204,16 @@ class FEMPhantom:
         """
         n_rows = np.shape(Mxy)[0]
         n_local = self.local_nodes.shape[0]
-        if n_rows != n_local:
-            raise ValueError(
-                f"update_magnetization: expected one row per local node "
-                f"({n_local}), got {n_rows}. A sub-voxel ensemble must be "
-                f"collapsed before the assembler handoff -- redistribute_nodal "
-                f"and the assembler both index by node and would silently use "
-                f"the wrong rows.")
+        # Collected and raised collectively: the per-rank node count differs,
+        # so this fires on a subset of ranks, and the redistribution below is
+        # an Alltoallv. Reproduced as a hang under `mpirun -n 2`.
+        collective_raise(
+            '' if n_rows == n_local else
+            f"update_magnetization: expected one row per local node "
+            f"({n_local}), got {n_rows}. A sub-voxel ensemble must be "
+            f"collapsed before the assembler handoff -- redistribute_nodal "
+            f"and the assembler both index by node and would silently use "
+            f"the wrong rows.")
         if getattr(self, '_dual', False) and self._active_partition != 'signal':
             Mxy = self.redistribute_nodal(np.ascontiguousarray(Mxy), 'bloch', 'signal')
             with self._using('signal'):
@@ -1283,29 +1287,42 @@ class FEMPhantom:
         # NaN rather than spoiling its own contribution; a negative T2 is
         # finite and merely produces a plausible growing signal. An infinite
         # T2 is legitimate and means no relaxation.
+        # COLLECTED, not raised on the spot. Everything below inspects
+        # LOCAL-node data -- a T2 map with one air node at zero has that node
+        # on one rank only -- and the redistribution beneath is an Alltoallv.
+        # A bare raise leaves the offending rank outside it while every other
+        # rank blocks there for ever: reproduced under `mpirun -n 2`.
         T2_arr = np.asarray(T2)
         phi_arr = np.asarray(phi_dB0)
+        n_local = self.local_nodes.shape[0]
+        problem = ''
         # Compare the ENTRY COUNT, not the shape: callers mix (n,) and (n, 1)
         # freely -- examples/water_and_fat.py passes one of each in the same
         # call -- and pybind flattens both into Eigen's Array<T, Dynamic, 1>.
         if T2_arr.size != phi_arr.size:
-            raise ValueError(
-                f"set_static_fields: T2 has {T2_arr.size} entries and phi_dB0 "
-                f"{phi_arr.size}; they describe the same nodes.")
-        bad = ~(T2_arr > 0.0) | np.isnan(T2_arr)
-        if bad.any():
+            problem = (f"set_static_fields: T2 has {T2_arr.size} entries and "
+                       f"phi_dB0 {phi_arr.size}; they describe the same nodes.")
+        elif T2_arr.size != n_local:
+            # The assembler indexes these by element connectivity under
+            # -DNDEBUG, so a short map is an out-of-bounds READ that returns
+            # adjacent heap: measured 6.35e-08 against a true 6.34e-08 with 22
+            # entries for 27 nodes, and a DIFFERENT wrong value on a re-run.
+            problem = (f"set_static_fields: got {T2_arr.size} entries for "
+                       f"{n_local} local nodes. A short map is read out of "
+                       f"bounds and returns whatever is next in memory.")
+        elif (~(T2_arr > 0.0) | np.isnan(T2_arr)).any():
+            bad = ~(T2_arr > 0.0) | np.isnan(T2_arr)
             first = int(np.flatnonzero(bad.reshape(-1))[0])
-            raise ValueError(
-                f"set_static_fields: every T2 must be positive; entry {first} "
-                f"is {T2_arr.reshape(-1)[first]}. Zero inverts to Inf and "
-                f"turns the whole signal into NaN even at t = 0. An infinite "
-                f"T2 is fine and means no relaxation.")
-        if not np.all(np.isfinite(phi_arr)):
+            problem = (f"set_static_fields: every T2 must be positive; entry "
+                       f"{first} is {T2_arr.reshape(-1)[first]}. Zero inverts "
+                       f"to Inf and turns the whole signal into NaN even at "
+                       f"t = 0. An infinite T2 is fine and means no relaxation.")
+        elif not np.all(np.isfinite(phi_arr)):
             first = int(np.flatnonzero(~np.isfinite(phi_arr.reshape(-1)))[0])
-            raise ValueError(
-                f"set_static_fields: phi_dB0 entry {first} is "
-                f"{phi_arr.reshape(-1)[first]}, which turns every k-space "
-                f"sample into NaN.")
+            problem = (f"set_static_fields: phi_dB0 entry {first} is "
+                       f"{phi_arr.reshape(-1)[first]}, which turns every "
+                       f"k-space sample into NaN.")
+        collective_raise(problem)
 
         # Remembered so a caller can temporarily perturb them and put them
         # back -- the bin-by-bin readout in simulate_pulseq offsets phi_dB0 by

@@ -405,3 +405,49 @@ def test_a_rank_asymmetric_refusal_does_not_hang(tmp_path):
   assert out.count('ValueError') >= 2, (
     f'the solve-time length check raised on one rank only:\n{out[-3000:]}')
   assert 'delta_B' in out, out[-2000:]
+
+
+@pytest.mark.slow
+@pytest.mark.requires_mpi
+@pytest.mark.timeout(240)
+@pytest.mark.parametrize('case', ['static_fields', 'update_mag', 'b1_map'])
+def test_every_per_node_refusal_reaches_every_rank(tmp_path, case):
+  """Three more refusals whose condition is true on a SUBSET of ranks, each
+  sitting upstream of a collective. All three hung.
+
+  - `set_static_fields`: a T2 map with one air node at zero has that node on
+    one rank, and the guard ran before the layout redistribution's Alltoallv.
+    This one was introduced by the guard added earlier in this same audit.
+  - `update_magnetization`: SPMD code passes ONE length, so it matches the
+    local node count on some ranks and not others, and the raise sat upstream
+    of the same Alltoallv.
+  - `b1_map`: the one public per-node array left out of the collective row
+    check, so the kernel's own length check threw rank-locally and the other
+    ranks waited in solve()'s closing Barrier.
+
+  The timeout is the assertion: before the fix none of these came back.
+  """
+  pytest.importorskip('mpi4py')
+  pytest.importorskip('pymetis')
+  pytest.importorskip('meshio')
+  if shutil.which('mpirun') is None:
+    pytest.skip('mpirun not on PATH')
+
+  mesh_path = tmp_path / 'rod.vtu'
+  make_1d_rod_mesh(mesh_path, length=0.08, n_segments=48,
+                   transverse_width=2e-4)
+  env = os.environ.copy()
+  env.setdefault('OPENBLAS_NUM_THREADS', '1')
+  env.setdefault('MPLBACKEND', 'Agg')
+
+  proc = subprocess.run(
+    ['mpirun', '--allow-run-as-root', '--oversubscribe', '-n', '2',
+     sys.executable, str(_REALISM_RUNNER), '--mesh', str(mesh_path),
+     '--output', str(tmp_path / 'unused.npz'), '--refusal-case', case],
+    env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=150)
+  out = proc.stdout.decode(errors='replace')
+  assert proc.returncode != 0, f'{case} was accepted'
+  assert out.count('Error') >= 2, (
+    f'{case} raised on one rank only, so the rest never reached the '
+    f'collective that reports it:\n{out[-3000:]}')
+

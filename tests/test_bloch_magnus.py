@@ -1746,3 +1746,42 @@ def test_balanced_ssfp_reaches_its_closed_form_per_node(minimal_phantom):
   assert reversed_gap > 0.5, (
     'a reversed b1 map would give nearly the same answer here, so this case '
     'cannot localise the map')
+
+
+def test_a_nan_relaxation_time_is_refused_rather_than_absorbed(minimal_phantom):
+  """The kernel cannot see a NaN T1 or T2.
+
+  Its uniform-relaxation dispatch asks `(T2.array() == T2(0)).all()`, and
+  -ffinite-math-only lets the compiler assume that comparison cannot involve a
+  NaN. Measured on a 27-node cube before the check: a NaN T2 at local node 2
+  was silently given node 0's value and that node returned the HEALTHY
+  exp(-0.04) = 0.96078944, while the same NaN at node 0 turned all 27 nodes
+  into NaN. The blast radius depended on which local index the bad node landed
+  at -- i.e. on the partition, so the same input gave a different wrong answer
+  at a different rank count.
+  """
+  n_nodes = minimal_phantom.local_nodes.shape[0]
+  seq = make_single_block_sequence(make_empty_block(4.0, dt_ms=1.0))
+
+  for name, first in (('T2', 0), ('T2', 2), ('T1', 1)):
+    values = np.full(n_nodes, 100.0)
+    values[first] = np.nan
+    kwargs = {'T1': Quantity(1e9, 'ms'), 'T2': Quantity(50.0, 'ms')}
+    kwargs[name] = Quantity(values, 'ms')
+    with pytest.raises(ValueError, match=name):
+      BlochSolver(seq, minimal_phantom, initial_Mxy=1.0 + 0.0j,
+                  initial_Mz=0.0, perfect_spoiling=False, dtype='float64',
+                  **kwargs)
+
+  # Zero and negative are refused for the same reason; an infinite relaxation
+  # time is legitimate and means "no decay".
+  for bad in (0.0, -50.0):
+    with pytest.raises(ValueError, match='T2'):
+      BlochSolver(seq, minimal_phantom, T1=Quantity(1e9, 'ms'),
+                  T2=Quantity(bad, 'ms'), initial_Mxy=1.0 + 0.0j,
+                  initial_Mz=0.0, perfect_spoiling=False, dtype='float64')
+  solver = BlochSolver(seq, minimal_phantom, T1=Quantity(np.inf, 'ms'),
+                       T2=Quantity(np.inf, 'ms'), initial_Mxy=1.0 + 0.0j,
+                       initial_Mz=0.0, perfect_spoiling=False, dtype='float64')
+  np.testing.assert_allclose(np.abs(solver.solve()[0][:, 0]), 1.0, atol=1e-12)
+

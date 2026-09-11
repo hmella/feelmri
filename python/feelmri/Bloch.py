@@ -250,7 +250,7 @@ _METHOD_TO_ORDER = {
 }
 from feelmri.Motion import POD
 from mpi4py import MPI
-from feelmri.MPIUtilities import MPI_comm, MPI_print, MPI_rank
+from feelmri.MPIUtilities import collective_raise, MPI_comm, MPI_print, MPI_rank
 from feelmri.MRObjects import Scanner
 from feelmri.Phantom import FEMPhantom
 
@@ -1162,6 +1162,22 @@ class BlochSolver:
 
         self.T1 = Quantity(_node_column(T1.m, 'T1'), T1.units)
         self.T2 = Quantity(_node_column(T2.m, 'T2'), T2.units)
+        # A NaN here is invisible to the kernel. Its uniform-relaxation
+        # dispatch asks `(T1.array() == T1(0)).all()`, and -ffinite-math-only
+        # lets the compiler assume that comparison cannot involve a NaN, so a
+        # NaN at any node but the first is silently given node 0's value --
+        # measured: NaN T2 at local node 2 of 27 returned the HEALTHY
+        # exp(-0.04) = 0.96078944 for that node, while the same NaN at node 0
+        # turned all 27 nodes into NaN. The blast radius depends on which local
+        # index the bad node lands at, i.e. on the partition.
+        for name, values in (('T1', self.T1.m), ('T2', self.T2.m)):
+            arr = np.asarray(values, dtype=np.float64)
+            if not np.all(~np.isnan(arr) & (arr > 0.0)):
+                bad = np.flatnonzero(np.isnan(arr.reshape(-1))
+                                     | ~(arr.reshape(-1) > 0.0))
+                node_problems.append(
+                    f"every {name} must be positive and not NaN; entry "
+                    f"{int(bad[0])} is {arr.reshape(-1)[int(bad[0])]}")
         self.delta_B = _node_column(delta_B, 'delta_B')
         # Transmit sensitivity. Stored as a complex vector of local-node
         # length, or None. It is applied at USE TIME inside the kernel rather
@@ -1471,13 +1487,17 @@ class BlochSolver:
         # tuned to avoid re-transposing. That is a kernel redesign (a bin axis
         # sharing positions and modes), not a tuning knob, so refuse rather
         # than quietly crawl.
-        if self.pod_trajectory is not None:
-            raise NotImplementedError(
-                "BlochSolver: t2_prime with a pod_trajectory is not supported. "
+        # Collective: this sits between the allgather above and the allreduces
+        # below, so a rank-local raise here leaves the others blocked in one of
+        # them. Reproduced by setting solver.pod_trajectory on one rank only,
+        # which is reachable because solve() deliberately re-reads it.
+        collective_raise(
+            '' if self.pod_trajectory is None else
+            ("BlochSolver: t2_prime with a pod_trajectory is not supported. "
                 "The spectral ensemble duplicates every node, which would "
                 "duplicate the POD mode matrix and its per-block transpose. It "
-                "needs a kernel bin axis that shares positions and modes across "
-                "sub-spins.")
+             "needs a kernel bin axis that shares positions and modes across "
+             "sub-spins."), exc_type=NotImplementedError)
         # Guard 2: UniformRelax survives np.repeat of a constant, but a per-node
         # T1/T2 drops onto the kernel's per-node std::exp path, which recomputes
         # on every dt change -- 2*N*K libm calls on roughly half of all steps,
@@ -1757,10 +1777,14 @@ class BlochSolver:
         # `solver.initial_Mxy = 0.0 + 0j` between solves -- the exact spelling
         # the constructor accepts -- and `np.ascontiguousarray` of a scalar is
         # a 0-d array, which pybind hands the kernel as a length-1 vector.
+        # b1_map is included when present: it is public, per-node, and the
+        # kernel's own length check throws rank-locally, which hangs the others
+        # at solve()'s closing Barrier.
         _check_rows_collectively(
             (('x', x, 3), ('T1', T1, 1), ('T2', T2, 1),
              ('delta_B', delta_B, 1), ('Bz_old', Bz_old, None),
-             ('initial_Mxy', initial_Mxy, 1), ('initial_Mz', initial_Mz, 1)),
+             ('initial_Mxy', initial_Mxy, 1), ('initial_Mz', initial_Mz, 1))
+            + ((('b1_map', b1_map, None),) if b1_map.size else ()),
             nb_nodes * n_bins,
             f"{nb_nodes} nodes x {n_bins} bins" if n_bins > 1
             else f"{nb_nodes} nodes")
@@ -2092,26 +2116,8 @@ def _check_rows_collectively(arrays, n_rows, detail):
   _collective_raise(problem)
 
 
-def _collective_raise(message):
-  """Raise on EVERY rank if ANY rank supplies a message.
+_collective_raise = collective_raise
 
-  Per-node validation inspects local data, so a bad entry can exist on one rank
-  only. A bare ``raise`` there aborts that rank while the others walk on into
-  the next collective and block forever -- an un-debuggable hang in place of a
-  one-line traceback, for what is usually a one-line input mistake.
-  """
-  if MPI_comm.Get_size() == 1:
-    if message:
-      raise ValueError(message)
-    return
-  gathered = MPI_comm.allgather(str(message or ''))
-  offenders = [r for r, m in enumerate(gathered) if m]
-  if offenders:
-    first = offenders[0]
-    raise ValueError(
-      f"{gathered[first]} [reported by rank {first}"
-      + (f" and {len(offenders) - 1} other(s)" if len(offenders) > 1 else "")
-      + f" of {len(gathered)}]")
 
 
 LINESHAPES = ('gaussian', 'uniform', 'lorentzian')
