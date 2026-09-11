@@ -2082,6 +2082,16 @@ class PulseqImport:
   they are surfaced rather than raised because a file that fails them still
   simulates.
 
+  ``hardware_problems`` holds whatever :meth:`Sequence.check_hardware`
+  reported against the scanner -- gradient amplitude, slew rate and peak
+  B1 -- and is empty when the sequence is within spec. Like
+  ``timing_errors`` it is surfaced rather than raised: an over-spec file
+  still simulates, and the numbers are what the file asks for, not what
+  the simulation gets wrong. It stays a warning for a concrete reason --
+  ``examples/pulseq/epi_pypulseq.seq`` sits at 98.4% of the default slew
+  limit, so a raise would be one rounding change from rejecting a file
+  that has always worked.
+
   ``feelmri_sim_seq`` is a parallel :class:`feelmriSequence` with the
   same block count and indices as ``feelmri_seq``, except that every
   block whose running ``SET`` label value matches the
@@ -2104,6 +2114,7 @@ class PulseqImport:
   block_labels: List[Dict[str, int]]
   readout_sim_block_indices: List[int]
   timing_errors: Tuple[str, ...] = ()
+  hardware_problems: Tuple[str, ...] = ()
 
   def filter_blocks(self, **labels: int) -> List[int]:
     """Return block indices whose running LABELSET/LABELINC state matches
@@ -2677,6 +2688,21 @@ def import_pulseq(
     else:
       feelmri_sim_seq.add_block(blk)
 
+  # Same contract as check_timing above: report, do not raise. check_timing
+  # covers raster alignment and dead times; it says nothing about amplitude,
+  # slew or peak B1, which is what check_hardware measures. Both together are
+  # still only what the FILE asks of a scanner -- neither says the simulation
+  # is wrong, which is why an over-spec sequence imports and runs.
+  hardware_problems: Tuple[str, ...] = ()
+  if validate:
+    hardware_problems = tuple(feelmri_seq.check_hardware(scanner))
+    if hardware_problems:
+      logger.warning(
+          "%s: %d hardware limit(s) exceeded for the given scanner: %s%s",
+          filename, len(hardware_problems),
+          '; '.join(hardware_problems[:3]),
+          '...' if len(hardware_problems) > 3 else '')
+
   return PulseqImport(
     feelmri_seq=feelmri_seq,
     pulseq_seq=pulseq_seq,
@@ -2689,6 +2715,7 @@ def import_pulseq(
     block_labels=block_labels,
     readout_sim_block_indices=readout_sim_block_indices,
     timing_errors=timing_errors,
+    hardware_problems=hardware_problems,
   )
 
 

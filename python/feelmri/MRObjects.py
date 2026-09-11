@@ -45,7 +45,7 @@ class Scanner:
                 field_strength: Quantity = Quantity(1.5, 'T'), 
                 gradient_strength: Quantity = Quantity(33,'mT/m'),
                 gradient_slew_rate: Quantity = Quantity(180,'mT/m/ms'),
-                b1_max: Quantity = Quantity(0.025, 'mT')):
+                b1_max: Quantity = Quantity(0.060, 'mT')):
         self.field_strength = field_strength
         self.gradient_strength = gradient_strength
         self.gradient_slew_rate = gradient_slew_rate
