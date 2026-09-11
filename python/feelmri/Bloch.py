@@ -1124,6 +1124,11 @@ class BlochSolver:
                 raise ValueError(
                     f"BlochSolver: b1_map must be a scalar or have one entry "
                     f"per local node ({n_local}); got {b1.size}")
+            if not np.all(np.isfinite(b1)):
+                raise ValueError(
+                    "BlochSolver: b1_map contains a non-finite entry. It would "
+                    "poison that node from the first RF step and be carried "
+                    "into every later block.")
             self.b1_map = np.ascontiguousarray(b1)
         # The same normalisation: these two were left on the bare idiom, so
         # initial_Mz=np.ones(n) still produced the (n, n) outer product.
@@ -1163,6 +1168,12 @@ class BlochSolver:
         self.concomitant_fields = bool(concomitant_fields)
         self._B0_mT = (float(scanner.field_strength.m_as('mT'))
                        if self.concomitant_fields else 0.0)
+        if self.concomitant_fields and not self._B0_mT > 0.0:
+            raise ValueError(
+                f"BlochSolver: concomitant_fields=True needs a positive "
+                f"scanner field strength; got {scanner.field_strength}. The "
+                f"term scales as 1/B0, so a zero or negative B0 is not a "
+                f"weaker field, it is undefined.")
         # Spectral sub-ensemble for reversible (T2') dephasing. OFF unless
         # t2_prime is given. Each node gets `spectral_bins` sub-spins whose
         # only difference is a static frequency offset, so the offsets ride the

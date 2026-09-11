@@ -76,7 +76,14 @@ MagnetizationState<T> solve_mri_impl(
 
   const int n_pos = r0.rows();
   const int n_time = rf_all.size();
-  // Loop-invariant: zero disables the concomitant term exactly.
+  // Loop-invariant: zero disables the concomitant term exactly. A NEGATIVE B0
+  // is not a sentinel, it is malformed input -- treating it as "off" made an
+  // explicit concomitant_fields=True a silent no-op.
+  if (B0 < T(0)) {
+    throw std::invalid_argument(
+        "solve_mri: B0 must be >= 0 (0 disables the concomitant term); got a "
+        "negative field strength");
+  }
   const bool concomitant = (B0 > T(0));
   const T inv_2B0 = concomitant ? T(1) / (T(2) * B0) : T(0);
 
@@ -88,6 +95,14 @@ MagnetizationState<T> solve_mri_impl(
   if (has_b1 && b1_map.size() != n_pos) {
     throw std::invalid_argument(
         "solve_mri: b1_map must be empty or have one entry per node");
+  }
+  // A non-finite entry poisons that node from the first RF step and is then
+  // carried into every later block through the returned magnetization, with no
+  // diagnostic anywhere. The default build is -ffast-math, which already
+  // assumes finiteness, so reject rather than propagate.
+  if (has_b1 && !b1_map.allFinite()) {
+    throw std::invalid_argument(
+        "solve_mri: b1_map contains a non-finite entry");
   }
 
   const int n_out = store_history ? n_time : 1;
