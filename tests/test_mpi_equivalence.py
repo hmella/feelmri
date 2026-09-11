@@ -78,6 +78,66 @@ def test_serial_matches_mpi_n2(tmp_path):
     np.testing.assert_allclose(a['Mz'],  b['Mz'],  rtol=1e-4, atol=1e-6)
 
 
+_REALISM_RUNNER = (Path(__file__).resolve().parent / 'helpers'
+                   / 'realism_mpi_runner.py')
+
+
+@pytest.mark.slow
+@pytest.mark.requires_mpi
+@pytest.mark.timeout(240)
+def test_realism_features_match_between_serial_and_mpi(tmp_path):
+  """Concomitant fields, a per-node B1+ map and a per-node T2' sub-ensemble,
+  all on at once, must give the same answer at 1 and 2 ranks.
+
+  None of the three had any MPI coverage. All are indexed by LOCAL node, and
+  t2_prime additionally allocates per-rank K-fold state and carries it across
+  blocks, so a rank-ordering bug would be invisible to every serial test while
+  producing a plausible image.
+  """
+  pytest.importorskip('mpi4py')
+  pytest.importorskip('pymetis')
+  pytest.importorskip('meshio')
+  if shutil.which('mpirun') is None:
+    pytest.skip('mpirun not on PATH')
+
+  mesh_path = tmp_path / 'realism_rod.vtu'
+  # Long enough that the concomitant term (quadratic in position) and the T2'
+  # map both vary appreciably along it, and dense enough for pymetis to fill
+  # two ranks.
+  make_1d_rod_mesh(mesh_path, length=0.08, n_segments=48,
+                   transverse_width=2e-4)
+
+  out_serial = tmp_path / 'R_serial.npz'
+  out_mpi = tmp_path / 'R_mpi.npz'
+
+  env = os.environ.copy()
+  env.setdefault('OPENBLAS_NUM_THREADS', '1')
+  env.setdefault('MPLBACKEND', 'Agg')
+
+  proc_serial = _run(
+    [sys.executable, str(_REALISM_RUNNER), '--mesh', str(mesh_path),
+     '--output', str(out_serial)], env=env)
+  assert proc_serial.returncode == 0, (
+    f'serial run failed:\n{proc_serial.stdout.decode(errors="replace")}')
+
+  proc_mpi = _run(
+    ['mpirun', '--allow-run-as-root', '--oversubscribe', '-n', '2',
+     sys.executable, str(_REALISM_RUNNER),
+     '--mesh', str(mesh_path), '--output', str(out_mpi)], env=env)
+  assert proc_mpi.returncode == 0, (
+    f'mpi run failed:\n{proc_mpi.stdout.decode(errors="replace")}')
+
+  with np.load(out_serial) as a, np.load(out_mpi) as b:
+    # float64 throughout, so the only difference should be summation order.
+    np.testing.assert_allclose(a['Mxy'], b['Mxy'], rtol=1e-9, atol=1e-12)
+    np.testing.assert_allclose(a['Mz'], b['Mz'], rtol=1e-9, atol=1e-12)
+    # Guard against a vacuous pass: the features must have done something.
+    assert np.abs(a['Mxy']).max() > 1e-3
+    assert np.ptp(np.abs(a['Mxy'][:, -1])) > 1e-2, (
+      'the per-node maps produced a spatially flat result; the comparison '
+      'would not detect a rank-ordering bug')
+
+
 _PULSEQ_RUNNER = (Path(__file__).resolve().parent / 'helpers'
                   / 'pulseq_mpi_runner.py')
 
