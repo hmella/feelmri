@@ -980,10 +980,16 @@ class BlochSolver:
         This is the reversible part only. Pass the irreversible T2 to ``T2=``,
         and pass **T2, not T2\***, to ``Phantom.set_static_fields`` or the two
         double-count.
+        Requires ``dtype='float64'`` for quantitative work: the bin offsets
+        are ~1e-5 to 1e-3 mT and float32 loses them into the background field
+        in proportion to it (2.4e-2 relative at ``|Bz|`` = 8 mT). The solver
+        warns if you ask for both.
     spectral_bins : int, optional
-        Number of sub-spins per node. Default 16, which is machine-precision
-        for the gaussian and uniform lineshapes. See :func:`lineshape_bins`
-        for the measured accuracy of each rule.
+        Number of sub-spins per node, as an UPPER BOUND -- :func:`lineshape_bins`
+        prunes bins whose weight is below float64 epsilon, of which
+        Gauss-Hermite produces many (4 of 32, 70 of 128). Default 16, which is
+        machine-precision for the gaussian and uniform lineshapes. See
+        :func:`lineshape_bins` for the measured accuracy of each rule.
     lineshape : {'gaussian', 'uniform', 'lorentzian'}, optional
         Shape of the intra-voxel field distribution. Default ``'gaussian'``.
         ``'lorentzian'`` is the only one that targets the conventional
@@ -1180,6 +1186,21 @@ class BlochSolver:
             # Follow the rule, not the request: lineshape_bins prunes sub-spins
             # whose weight is below float64 epsilon.
             self._n_bins = int(self._bin_z.size)
+            # The bin offsets are tiny -- z/(T2'*gamma) is 3e-5 to 5e-4 mT at
+            # T2' = 50 ms -- and the kernel adds them to `curr.G + delta_B`,
+            # which is O(1-10 mT) under any readout gradient. In float32 the
+            # rounding quantum of that sum swamps the offset in proportion to
+            # the background field. Measured on a gaussian FID at t = 2*T2',
+            # against the float64 answer: 2.2e-4 with no gradient, 1.9e-3 at
+            # |Bz| = 1 mT, and 2.4e-2 at |Bz| = 8 mT -- an ordinary readout.
+            # It is a floor, not a step-size error, so a finer dt does not help.
+            if self._dtype == 'float32':
+                warnings.warn(
+                    "BlochSolver: t2_prime with dtype='float32' loses the bin "
+                    "offsets into the background field -- measured 1.9e-3 "
+                    "relative at |Bz| = 1 mT and 2.4e-2 at 8 mT, and it does "
+                    "not improve with dt. Use dtype='float64' for quantitative "
+                    "T2' work.")
             if self.lineshape == 'lorentzian':
                 warnings.warn(
                     f"lineshape='lorentzian' targets exp(-t/T2*) but cannot be "
