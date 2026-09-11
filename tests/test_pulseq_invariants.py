@@ -1,9 +1,7 @@
 import numpy as np
 import pytest
-from pathlib import Path
 
-from conftest import skip_if_pypulseq_too_old
-from feelmri.PulseqAdapter import import_pulseq
+from conftest import SEQ_FILES, seq_ids, skip_if_pypulseq_too_old
 
 # Invariants an imported sequence must satisfy for the dual-path workflow to be
 # sound. These need no Bloch solve, so they run on every bundled fixture.
@@ -17,40 +15,9 @@ from feelmri.PulseqAdapter import import_pulseq
 
 pytestmark = pytest.mark.pulseq
 
-DATA_DIR = Path(__file__).parent / 'data'
-EXAMPLES_DIR = Path(__file__).parent.parent / 'examples' / 'pulseq'
-
-SEQ_FILES = sorted(DATA_DIR.glob('*.seq')) + sorted(EXAMPLES_DIR.glob('*.seq'))
-
 # 1/m. A gradient moment this small cannot wind an appreciable phase across any
 # phantom: 1e-3 1/m is one cycle per kilometre.
 TOL_INV_M = 1e-3
-
-
-def _ids(paths):
-    return [p.stem for p in paths]
-
-
-@pytest.fixture(scope='module')
-def pulseq_sequences():
-    pp = pytest.importorskip('pypulseq')
-    out = {}
-    for path in SEQ_FILES:
-        seq = pp.Sequence()
-        try:
-            seq.read(str(path), detect_rf_use=False)
-        except Exception:
-            continue
-        out[path] = seq
-    return out
-
-
-def _reference(sequences, seq_path):
-    if seq_path not in sequences:
-        skip_if_pypulseq_too_old(seq_path)
-        pytest.skip(f'pypulseq does not implement an extension used by '
-                    f'{seq_path.name}; no reference available')
-    return sequences[seq_path]
 
 
 def _gradient_moment(waveforms, t_from_s, t_to_s, n=200000):
@@ -79,6 +46,11 @@ def _governing_excitation(t_excitation, t_end_s):
     te = np.atleast_1d(np.asarray(t_excitation)).ravel()
     earlier = te[te <= t_end_s + 1e-12]
     return float(earlier[-1]) if earlier.size else float(te[0])
+
+
+def t_refocusing_of(ref):
+    _k, _kf, _te, t_ref, _ta = ref.calculate_kspace()
+    return t_ref if np.size(t_ref) else np.empty(0)
 
 
 def _forward_reference_applies(ref, t_anchor_s):
@@ -114,13 +86,8 @@ def _forward_reference_applies(ref, t_anchor_s):
     return True, ''
 
 
-def t_refocusing_of(ref):
-    _k, _kf, _te, t_ref, _ta = ref.calculate_kspace()
-    return t_ref if np.size(t_ref) else np.empty(0)
-
-
-@pytest.mark.parametrize('seq_path', SEQ_FILES, ids=_ids(SEQ_FILES))
-def test_readout_kspace_is_measured_from_the_snapshot(seq_path, pulseq_sequences):
+@pytest.mark.parametrize('seq_path', SEQ_FILES, ids=seq_ids(SEQ_FILES))
+def test_readout_anchor_invariant(seq_path, pulseq_import, pypulseq_ref):
     """Each window's k-space must be the file's trajectory MINUS the gradient
     moment already carried by the magnetization at its anchor.
 
@@ -129,12 +96,14 @@ def test_readout_kspace_is_measured_from_the_snapshot(seq_path, pulseq_sequences
     slice-select lobe: kz there is +252 to +460 1/m, which is 1-2 full cycles
     across a 5 mm slice.
 
-    The decomposition itself is asserted on every fixture; the independent
-    forward-integral reference only where it is valid -- see
-    ``_forward_reference_applies``.
+    Three fields carry the decomposition and each must reconstruct the others:
+    ``kspace_file`` as the file wrote it, ``k_at_anchor`` the moment removed,
+    and ``kspace`` what a caller hands to ``mri_signal``. The identity is
+    asserted on every fixture; the independent forward-integral reference only
+    where it is valid -- see ``_forward_reference_applies``.
     """
-    ref = _reference(pulseq_sequences, seq_path)
-    imp = import_pulseq(seq_path)
+    ref = pypulseq_ref(seq_path)
+    imp = pulseq_import(seq_path)
     if not imp.readouts:
         pytest.skip('no ADC in this sequence')
 
@@ -147,12 +116,11 @@ def test_readout_kspace_is_measured_from_the_snapshot(seq_path, pulseq_sequences
         anchor = imp.feelmri_seq.blocks[rw.m_storage_block]
         t_end = anchor.time_extent[1].m_as('ms') * 1e-3
 
-        # The window carries the raw trajectory, the moment removed, and the
-        # instant it was measured from -- and they must reconstruct each other.
         assert rw.t_anchor == pytest.approx(t_end * 1e3, abs=1e-9), (
             f'window {rw.first_block}-{rw.last_block}: t_anchor is '
             f'{rw.t_anchor} ms, but the anchor block ends at {t_end * 1e3} ms')
-        assert np.abs((rw.kspace_file - np.asarray(rw.k_at_anchor)) - rw.kspace).max()             < TOL_INV_M
+        assert np.abs((rw.kspace_file - np.asarray(rw.k_at_anchor))
+                      - rw.kspace).max() < TOL_INV_M, 'kf - k_at_anchor != k'
 
         # The samples of this window, in the file's own trajectory.
         t0 = rw.times.min() * 1e-3
@@ -166,6 +134,8 @@ def test_readout_kspace_is_measured_from_the_snapshot(seq_path, pulseq_sequences
             continue
         k_anchor = _gradient_moment(
             waveforms, _governing_excitation(t_exc, t_end), t_end)
+        # The moment the adapter removed is the moment actually played.
+        assert np.abs(np.asarray(rw.k_at_anchor) - k_anchor).max() < TOL_INV_M
         expected = k_raw[:, mask].T - k_anchor
         assert rw.kspace.shape == expected.shape
         worst = float(np.abs(rw.kspace - expected).max())
@@ -176,35 +146,8 @@ def test_readout_kspace_is_measured_from_the_snapshot(seq_path, pulseq_sequences
             f'that is being applied twice')
 
 
-@pytest.mark.parametrize('seq_path', SEQ_FILES, ids=_ids(SEQ_FILES))
-def test_k_at_anchor_is_recorded(seq_path, pulseq_sequences):
-    """The moment subtracted above is kept on the window, so a caller can see
-    what was removed and recover the file's own trajectory."""
-    ref = _reference(pulseq_sequences, seq_path)
-    imp = import_pulseq(seq_path)
-    if not imp.readouts:
-        pytest.skip('no ADC in this sequence')
-    if not hasattr(imp.readouts[0], 'k_at_anchor'):
-        pytest.fail('ReadoutWindow has no k_at_anchor field')
-
-    _k, _kf, t_exc, _tr, _ta = ref.calculate_kspace()
-    waveforms = ref.waveforms_and_times()[0]
-    for rw in imp.readouts:
-        anchor = imp.feelmri_seq.blocks[rw.m_storage_block]
-        t_end = anchor.time_extent[1].m_as('ms') * 1e-3
-        # kspace_file keeps the trajectory as the file wrote it.
-        assert np.abs((rw.kspace_file - rw.kspace)
-                      - np.asarray(rw.k_at_anchor)).max() < TOL_INV_M
-        applies, _why = _forward_reference_applies(ref, t_end)
-        if not applies:
-            continue
-        expected = _gradient_moment(
-            waveforms, _governing_excitation(t_exc, t_end), t_end)
-        assert np.abs(np.asarray(rw.k_at_anchor) - expected).max() < TOL_INV_M
-
-
-@pytest.mark.parametrize('seq_path', SEQ_FILES, ids=_ids(SEQ_FILES))
-def test_raster_spans_every_block(seq_path):
+@pytest.mark.parametrize('seq_path', SEQ_FILES, ids=seq_ids(SEQ_FILES))
+def test_raster_spans_every_block(seq_path, pulseq_import):
     """The integration raster must cover each block exactly, and carry no
     zero-length steps.
 
@@ -213,21 +156,26 @@ def test_raster_spans_every_block(seq_path):
     can introduce a duplicate of a timing already contributed by a gradient
     corner -- the same instant computed two ways, differing by an ulp until a
     later shift collapses them.
+
+    The `t.size >= 2` leg is the one that matters most on its own: a block with
+    fewer points gets no integration step at all and evolves the magnetization
+    not at all. Event-free delays are the usual case, and in a spin echo they
+    carry the T2 weighting.
     """
     # This is the one test here that needs no pypulseq reference, so it never
-    # passes through _reference() and has to do its own version gate: under
-    # pypulseq 1.4 a v1.5 file cannot be read at all and import_pulseq raises
-    # out of the trajectory step.
+    # asks for one and has to do its own version gate: under pypulseq 1.4 a
+    # v1.5 file cannot be read at all and import_pulseq raises out of the
+    # trajectory step.
     skip_if_pypulseq_too_old(seq_path)
-    imp = import_pulseq(seq_path)
-    seq = imp.feelmri_seq
+    seq = pulseq_import(seq_path).feelmri_seq
     integrated = 0.0
+    unstepped = []
     for i, b in enumerate(seq.blocks):
         t = b.discrete_times.m_as('ms')
         lo = b.time_extent[0].m_as('ms')
         hi = b.time_extent[1].m_as('ms')
-        if b.dur.m_as('ms') > 0:
-            assert t.size >= 2, f'block {i} of nonzero duration gets no step'
+        if b.dur.m_as('ms') > 0 and t.size < 2:
+            unstepped.append(i)
         if t.size < 2:
             continue
         assert abs(t[0] - lo) < 1e-9, f'block {i} raster starts at {t[0]}, not {lo}'
@@ -238,40 +186,11 @@ def test_raster_spans_every_block(seq_path):
             f'the kernel re-exponentiates every node at each one')
         integrated += t[-1] - t[0]
 
+    assert not unstepped, (
+        f'{len(unstepped)} block(s) of nonzero duration get no integration '
+        f'step: {unstepped[:10]}')
+
     total = seq.dur.m_as('ms')
     assert abs(integrated - total) < 1e-6 * max(total, 1.0), (
         f'{integrated:.4f} of {total:.4f} ms integrated '
         f'({100 * integrated / total:.2f}%)')
-
-
-@pytest.mark.parametrize('seq_path', SEQ_FILES, ids=_ids(SEQ_FILES))
-def test_rf_flip_angle_round_trip(seq_path, pulseq_sequences):
-    """gamma * INT(B1 dt) through the import equals what pypulseq put in the file.
-
-    Integrate the SIGNED waveform. A sinc's side lobes are negative, so
-    INT(|B1|) reads about 10% high on an apodized sinc and exact on a block
-    pulse -- which looks like a shaped-pulse bug and is not one.
-    """
-    from feelmri.MRObjects import Scanner
-    gamma = Scanner().gamma.m_as('rad/ms/mT')
-
-    ref = _reference(pulseq_sequences, seq_path)
-    imp = import_pulseq(seq_path)
-
-    checked = 0
-    for i in range(1, len(ref.block_durations) + 1):
-        rf_pp = getattr(ref.get_block(i), 'rf', None)
-        if rf_pp is None:
-            continue
-        got = imp.feelmri_seq.blocks[i - 1].rf_pulses[0]
-        flip = gamma * np.trapezoid(
-            np.real(got.waveform.m_as('mT')), got.timings.m_as('ms'))
-        # pypulseq's own view of the same pulse: B1 in Hz, times in s.
-        expected = 2 * np.pi * np.trapezoid(np.real(rf_pp.signal), rf_pp.t)
-        assert abs(flip - expected) < 1e-6 * max(abs(expected), 1e-3), (
-            f'block {i - 1}: {np.degrees(flip):.4f} deg imported vs '
-            f'{np.degrees(expected):.4f} deg in the file')
-        checked += 1
-
-    if checked == 0:
-        pytest.skip('no RF in this sequence')

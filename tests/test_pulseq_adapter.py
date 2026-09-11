@@ -1,16 +1,17 @@
-"""Tests for feelmri.PulseqAdapter.
+"""Tests for feelmri.PulseqAdapter: the API, not the waveforms.
 
-Layered coverage:
-  * Parametrised parsing/units/trajectory tests across every .seq shipped
-    under ``examples/pulseq/``.
-  * Block-partition consistency tests for the dual-path ``import_pulseq``
-    API (prep vs ADC indices, readout window contiguity, m_storage_idx
-    correctness, kspace round-trip vs the flat ``kspace_trajectory``).
-  * ROTATIONS extension test using a hand-authored synthetic fixture.
-  * One end-to-end Bloch + signal-assembly integration test (slow,
-    opt-out via ``-m 'not slow'``) that mirrors ``examples/phase_contrast.py``
-    pattern on the gre_radial_pypulseq.seq 2D radial trajectory and a
-    minimal 2-tetrahedron phantom built on the fly.
+What the reader makes of a file is compared against pypulseq in
+``test_pulseq_timing.py``, and the structural invariants of an import live in
+``test_pulseq_invariants.py``. This file covers what neither does:
+
+  * the dual-path partition API -- prep vs ADC indices, readout window
+    contiguity, ``m_storage_idx`` ordering -- over every bundled fixture;
+  * the placeholder-substitution sequence (``feelmri_sim_seq``);
+  * parser paths no bundled file exercises: the ROTATIONS extension, the v1.5
+    column layout, a cyclic or dangling extension chain, an unhandled section;
+  * LABELSET / LABELINC retrieval on a synthetic four-block sequence;
+  * the end-to-end ``simulate_pulseq`` path, including that ADC demodulation
+    actually reaches the signal.
 """
 from pathlib import Path
 
@@ -18,7 +19,8 @@ import numpy as np
 import pytest
 from pint import Quantity
 
-from conftest import skip_if_pypulseq_too_old
+from conftest import (EXAMPLES_SEQ_DIR, SEQ_FILES, seq_ids,
+                      skip_if_pypulseq_too_old)
 
 
 # The whole module exercises the PulseqAdapter, whose end-to-end paths
@@ -30,8 +32,6 @@ from conftest import skip_if_pypulseq_too_old
 pytestmark = pytest.mark.pulseq
 
 
-PULSEQ_DIR = Path(__file__).resolve().parent.parent / 'examples' / 'pulseq'
-SEQ_FILES = sorted(PULSEQ_DIR.glob('*.seq'))
 ROTATION_SEQ = Path(__file__).resolve().parent / 'data' / 'rotation_minimal.seq'
 
 
@@ -42,117 +42,27 @@ def adapter():
   return PulseqAdapter
 
 
-@pytest.fixture(scope='session')
-def parsed_imports(adapter):
-  """Parse every .seq file exactly once via import_pulseq.
-
-  mprage_pypulseq.seq alone takes ~80s to convert (5940 SequenceBlocks
-  with per-block Quantity work), so caching across all parametrised
-  tests is essential to keep total runtime reasonable.
-
-  A file the installed pypulseq is too old to read is left out of the cache;
-  the tests that consume it already skip on a missing key.
-  """
-  cache = {}
-  for path in SEQ_FILES:
-    try:
-      cache[path.name] = adapter.import_pulseq(path)
-    except RuntimeError:
-      continue
-  return cache
-
-
-def _seq_id(p):
-  return p.name
-
-
-def _imp(parsed_imports, seq_path):
+def _imp(pulseq_import, seq_path):
   """The parsed import for one fixture, skipping when the installed pypulseq
-  cannot read that file's format."""
-  if seq_path.name not in parsed_imports:
+  cannot read that file's format.
+
+  The fixture list is conftest's SEQ_FILES: all fourteen files under
+  tests/data plus the one under examples/pulseq. This file used to glob
+  examples/pulseq alone, which holds a single sequence, so every test here
+  described as running "over every .seq" was in fact running over one.
+  """
+  try:
+    return pulseq_import(seq_path)
+  except RuntimeError:
     skip_if_pypulseq_too_old(seq_path)
     pytest.skip(f'{seq_path.name} could not be parsed')
-  return parsed_imports[seq_path.name]
-
-
-# ---------------------------------------------------------------------------
-# Parsing / structural tests over all bundled .seq files
-# ---------------------------------------------------------------------------
-
-@pytest.mark.parametrize('seq_path', SEQ_FILES, ids=_seq_id)
-def test_parse_returns_populated_sequences(parsed_imports, seq_path):
-  from feelmri.Bloch import Sequence
-
-  imp = _imp(parsed_imports, seq_path)
-  assert isinstance(imp.feelmri_seq, Sequence)
-  assert len(imp.feelmri_seq.blocks) > 0
-  assert len(imp.pulseq_seq) == len(imp.feelmri_seq.blocks)
-  assert imp.pulseq_seq.DEF.get('PulseqVersion') is not None
-  assert imp.pulseq_seq.DEF.get('FileName') == seq_path.name
-
-
-@pytest.mark.parametrize('seq_path', SEQ_FILES, ids=_seq_id)
-def test_block_units_are_correct(parsed_imports, seq_path):
-  from feelmri.Bloch import SequenceBlock
-
-  imp = _imp(parsed_imports, seq_path)
-  inspected = 0
-  for blk in imp.feelmri_seq.blocks:
-    if not isinstance(blk, SequenceBlock):
-      continue
-    for g in blk.gradients:
-      assert g.amplitudes.units == Quantity(0, 'mT/m').units
-      assert g.timings.units == Quantity(0, 'ms').units
-      assert np.all(np.isfinite(g.amplitudes.m))
-      inspected += 1
-    for rf in blk.rf_pulses:
-      assert rf.timings.units == Quantity(0, 'ms').units
-      inspected += 1
-    if blk.adc is not None:
-      assert blk.adc.times.units == Quantity(0, 'ms').units
-      assert blk.adc.times.m.size > 0
-      assert blk.adc.freq_offset.units == Quantity(0, 'Hz').units
-      assert blk.adc.phase_offset.units == Quantity(0, 'rad').units
-      inspected += 1
-  assert inspected > 0, f'no gradient/rf/adc inspected for {seq_path.name}'
-
-
-@pytest.mark.parametrize('seq_path', SEQ_FILES, ids=_seq_id)
-def test_kspace_trajectory_well_formed(adapter, parsed_imports, seq_path):
-  imp = _imp(parsed_imports, seq_path)
-  traj = adapter.kspace_trajectory(imp.pulseq_seq)
-  n = traj['times'].size
-  if n == 0:
-    # Some bundled .seq fragments (tagging prep, excitation-only) carry
-    # no ADC events; the trajectory function is still expected to return
-    # well-shaped empty arrays.
-    for axis in ('kx', 'ky', 'kz', 'times'):
-      assert traj[axis].shape == (0,)
-    pytest.skip(f'{seq_path.name} has no ADC events')
-  for axis in ('kx', 'ky', 'kz'):
-    assert traj[axis].shape == (n,)
-    assert np.all(np.isfinite(traj[axis]))
-  assert np.all(np.diff(traj['times']) >= -1e-9), 'times not monotonic'
-
-
-@pytest.mark.parametrize('seq_path', SEQ_FILES, ids=_seq_id)
-def test_pulseq_version_supported(adapter, parsed_imports, seq_path):
-  imp = _imp(parsed_imports, seq_path)
-  ver = imp.pulseq_seq.DEF['PulseqVersion']
-  assert ver.major == 1
-  assert ver >= adapter.Version(1, 2, 0)
-  assert ver < adapter.Version(1, 6, 0), (
-    f'{seq_path.name} declares Pulseq {ver}; adapter warns on >=1.6.0'
-  )
-
-
 # ---------------------------------------------------------------------------
 # Dual-path partition API
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize('seq_path', SEQ_FILES, ids=_seq_id)
-def test_import_pulseq_partitions_blocks(parsed_imports, seq_path):
-  imp = _imp(parsed_imports, seq_path)
+@pytest.mark.parametrize('seq_path', SEQ_FILES, ids=seq_ids(SEQ_FILES))
+def test_import_pulseq_partitions_blocks(pulseq_import, seq_path):
+  imp = _imp(pulseq_import, seq_path)
   n = len(imp.pulseq_seq)
   prep = set(imp.prep_block_indices)
   adc = set(imp.adc_block_indices)
@@ -185,32 +95,6 @@ def test_import_pulseq_partitions_blocks(parsed_imports, seq_path):
   active_indices = [rw.m_storage_idx for rw in imp.readouts
                     if rw.m_storage_idx >= 0]
   assert active_indices == sorted(active_indices)
-
-
-@pytest.mark.parametrize('seq_path', SEQ_FILES, ids=_seq_id)
-def test_readout_windows_match_flat_trajectory(adapter, parsed_imports, seq_path):
-  imp = _imp(parsed_imports, seq_path)
-  flat = adapter.kspace_trajectory(imp.pulseq_seq)
-
-  if not imp.readouts:
-    assert flat['times'].size == 0
-    return
-
-  # kspace_file, not kspace: the flat trajectory is the FILE's, measured from
-  # the excitation, while rw.kspace has the anchor's gradient moment removed so
-  # it is relative to the magnetization snapshot handed alongside it.
-  kx = np.concatenate([rw.kspace_file[:, 0] for rw in imp.readouts])
-  ky = np.concatenate([rw.kspace_file[:, 1] for rw in imp.readouts])
-  kz = np.concatenate([rw.kspace_file[:, 2] for rw in imp.readouts])
-  times = np.concatenate([rw.times for rw in imp.readouts])
-
-  assert kx.shape == flat['kx'].shape
-  np.testing.assert_allclose(kx, flat['kx'], rtol=1e-6, atol=1e-9)
-  np.testing.assert_allclose(ky, flat['ky'], rtol=1e-6, atol=1e-9)
-  np.testing.assert_allclose(kz, flat['kz'], rtol=1e-6, atol=1e-9)
-  np.testing.assert_allclose(times, flat['times'], rtol=1e-6, atol=1e-9)
-
-
 # ---------------------------------------------------------------------------
 # ROTATIONS extension
 # ---------------------------------------------------------------------------
@@ -349,13 +233,13 @@ def test_labelset_filter(adapter, tmp_path):
 # Readout-placeholder substitution: feelmri_sim_seq
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize('seq_path', SEQ_FILES, ids=_seq_id)
-def test_feelmri_sim_seq_default_matches_seq(parsed_imports, seq_path):
+@pytest.mark.parametrize('seq_path', SEQ_FILES, ids=seq_ids(SEQ_FILES))
+def test_feelmri_sim_seq_default_matches_seq(pulseq_import, seq_path):
   """With the default ``readout_set_values=(3,)`` the simulation
   sequence has identical block count and absolute duration as
   ``feelmri_seq``. Per-block durations match exactly so the global
   timing grid is preserved across the substitution."""
-  imp = _imp(parsed_imports, seq_path)
+  imp = _imp(pulseq_import, seq_path)
   assert len(imp.feelmri_sim_seq.blocks) == len(imp.feelmri_seq.blocks)
   durs_o = np.array([b.dur.m_as('ms') for b in imp.feelmri_seq.blocks])
   durs_s = np.array([b.dur.m_as('ms') for b in imp.feelmri_sim_seq.blocks])
@@ -365,24 +249,11 @@ def test_feelmri_sim_seq_default_matches_seq(parsed_imports, seq_path):
     imp.feelmri_seq.dur.m_as('ms'),
     rtol=0, atol=1e-9,
   )
-
-
-@pytest.mark.parametrize('seq_path', SEQ_FILES, ids=_seq_id)
-def test_feelmri_sim_seq_storage_flag_carryover(parsed_imports, seq_path):
-  """``store_magnetization`` flags on non-readout blocks survive the
-  substitution. Readout-tagged blocks themselves never carry storage
-  flags by construction (the anchor block is the preceding RF)."""
-  imp = _imp(parsed_imports, seq_path)
-  flags_o = [b.store_magnetization for b in imp.feelmri_seq.blocks]
-  flags_s = [b.store_magnetization for b in imp.feelmri_sim_seq.blocks]
-  assert flags_o == flags_s
-
-
 def test_feelmri_sim_seq_collapses_set3(adapter):
   """End-to-end: every SET=3 block on the bundled EPI tagging file is
   empty (no RF, no gradients, no ADC) on ``feelmri_sim_seq``; all
   non-readout blocks keep their event content via deep copy."""
-  epi = PULSEQ_DIR / 'epi_pypulseq.seq'
+  epi = EXAMPLES_SEQ_DIR / 'epi_pypulseq.seq'
   if not epi.exists():
     pytest.skip(f'{epi.name} not bundled')
   skip_if_pypulseq_too_old(epi)
@@ -404,7 +275,7 @@ def test_feelmri_sim_seq_collapses_set3(adapter):
 def test_feelmri_sim_seq_optout(adapter):
   """``readout_set_values=()`` disables the substitution; sim_seq
   becomes an event-for-event mirror of feelmri_seq."""
-  epi = PULSEQ_DIR / 'epi_pypulseq.seq'
+  epi = EXAMPLES_SEQ_DIR / 'epi_pypulseq.seq'
   if not epi.exists():
     pytest.skip(f'{epi.name} not bundled')
   skip_if_pypulseq_too_old(epi)
@@ -505,8 +376,7 @@ def _write_minimal_tet_mesh(path: Path):
   return 5  # node count, preserved for historical callers
 
 
-@pytest.mark.slow
-def test_dual_path_multi_window(adapter, parsed_imports, tmp_path):
+def test_dual_path_multi_window(adapter, tmp_path):
   """End-to-end dual-path smoke test over SEVERAL readout windows.
 
   Was written against `gre_radial_pypulseq.seq`, which is not in the repo, so
@@ -614,49 +484,6 @@ def _ppm_to_hz():
   from feelmri.MRObjects import Scanner
   s = Scanner()
   return s.gammabar.m_as('Hz/T') * s.field_strength.m_as('T') * 1e-6
-
-
-def test_rf_ppm_offsets_are_consumed(adapter):
-  """freq_ppm and phase_ppm reach the RF's Hz / rad offsets, scaled by the
-  Larmor frequency. The fixture's saturation pulse carries -3.3 ppm and
-  0.25 rad/MHz."""
-  if not PPM_SEQ.exists():
-    pytest.skip('run tests/data/generate_seq_fixtures.py to build ppm_v15.seq')
-  skip_if_pypulseq_too_old(PPM_SEQ)
-  scale = _ppm_to_hz()
-  imp = adapter.import_pulseq(PPM_SEQ)
-  sat = [b.rf_pulses[0] for b in imp.feelmri_seq.blocks
-         if b.rf_pulses and b.rf_pulses[0].use == 'saturation']
-  assert sat, 'fixture has no saturation pulse'
-  for rf in sat:
-    assert rf.frequency_offset.m_as('Hz') == pytest.approx(-3.3 * scale)
-    assert rf.phase_offset.m_as('rad') == pytest.approx(0.25 * scale)
-
-
-def test_adc_ppm_offsets_and_phase_modulation_are_consumed(adapter):
-  """The ADC's ppm offsets are folded in the same way, and the v1.5
-  phase_id column resolves to a per-sample phase shape."""
-  if not PPM_SEQ.exists():
-    pytest.skip('run tests/data/generate_seq_fixtures.py to build ppm_v15.seq')
-  skip_if_pypulseq_too_old(PPM_SEQ)
-  scale = _ppm_to_hz()
-  imp = adapter.import_pulseq(PPM_SEQ)
-  adcs = [b.adc for b in imp.feelmri_seq.blocks if b.adc is not None]
-  assert adcs
-  for adc in adcs:
-    assert adc.freq_offset.m_as('Hz') == pytest.approx(1.5 * scale)
-    assert adc.phase_offset.m_as('rad') == pytest.approx(-0.5 * scale)
-    assert adc.phase_modulation is not None
-    mod = adc.phase_modulation.m_as('rad')
-    assert mod.size == adc.times.m.size
-    assert mod == pytest.approx(np.linspace(0.0, np.pi, mod.size), abs=1e-5)
-
-  for rw in imp.readouts:
-    assert rw.adc_freq_offset == pytest.approx(1.5 * scale)
-    assert rw.adc_phase_offset == pytest.approx(-0.5 * scale)
-    assert rw.adc_phase_modulation is not None
-
-
 def test_arbitrary_gradient_carries_boundary_samples(adapter):
   """A v1.5 arbitrary gradient on the regular raster has its samples at
   raster centres; the amplitudes at the block boundaries come from the
@@ -820,36 +647,6 @@ def test_block_labels_match_evaluate_labels(adapter, tmp_path):
 
 
 # The v1.5 fixtures alongside the examples: they carry the use labels the
-# anchor logic keys on, which the v1.4 example does not.
-ANCHOR_SEQ_FILES = sorted(DATA_DIR.glob('*_v15.seq')) + SEQ_FILES
-
-
-@pytest.mark.parametrize('seq_path', ANCHOR_SEQ_FILES, ids=lambda p: p.stem)
-def test_readout_anchors_agree_with_calculate_kspace(adapter, seq_path):
-  """_identify_readout_groups picks a coherence anchor from the RF use
-  labels; calculate_kspace resets or reflects k at the same pulses. Every
-  window's anchor block must therefore hold one of those pulses."""
-  skip_if_pypulseq_too_old(seq_path)
-  pp = pytest.importorskip('pypulseq')
-  ref = pp.Sequence()
-  ref.read(str(seq_path), detect_rf_use=False)
-  _k, _kf, t_exc, t_ref, _t = ref.calculate_kspace()
-  anchors = np.sort(np.concatenate([np.atleast_1d(t_exc).ravel(),
-                                    np.atleast_1d(t_ref).ravel()]))
-  imp = adapter.import_pulseq(seq_path)
-  if not imp.readouts:
-    pytest.skip('no ADC in this sequence')
-  assert anchors.size, 'sequence has readouts but no excitation or refocusing'
-  for rw in imp.readouts:
-    assert rw.m_storage_block >= 0
-    block = imp.feelmri_seq.blocks[rw.m_storage_block]
-    t0 = block.time_extent[0].m_as('ms') * 1e-3
-    t1 = block.time_extent[1].m_as('ms') * 1e-3
-    assert np.any((anchors >= t0 - 1e-12) & (anchors <= t1 + 1e-12)), (
-        f'anchor block {rw.m_storage_block} [{t0:.6g}, {t1:.6g}] s holds no '
-        f'pulse that calculate_kspace treats as an anchor')
-
-
 # ---------------------------------------------------------------------------
 # One-call simulation
 # ---------------------------------------------------------------------------
