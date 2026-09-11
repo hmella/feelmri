@@ -19,7 +19,7 @@ import numpy as np
 import pytest
 from pint import Quantity
 
-from conftest import (EXAMPLES_SEQ_DIR, SEQ_FILES, seq_ids,
+from conftest import (DATA_DIR, EXAMPLES_SEQ_DIR, SEQ_FILES, seq_ids,
                       skip_if_pypulseq_too_old)
 
 
@@ -95,6 +95,32 @@ def test_import_pulseq_partitions_blocks(pulseq_import, seq_path):
   active_indices = [rw.m_storage_idx for rw in imp.readouts
                     if rw.m_storage_idx >= 0]
   assert active_indices == sorted(active_indices)
+def test_kspace_trajectory_matches_the_windows(pulseq_import):
+  """``kspace_trajectory`` is the flat back-compat view of the same samples
+  the readout windows carry, and it short-circuits when there is no ADC.
+
+  This is the one caller of that wrapper. test_readout_anchor_invariant
+  compares ``rw.kspace_file`` against ``calculate_kspace`` directly and never
+  goes through it, so deleting the old shape-only test left the function
+  uncovered -- caught by the coverage gate, not by a failure.
+  """
+  from feelmri.PulseqAdapter import kspace_trajectory
+
+  imp = pulseq_import(DATA_DIR / 'gre_v15.seq')
+  traj = kspace_trajectory(imp.pulseq_seq)
+  expected = np.concatenate([rw.kspace_file for rw in imp.readouts])
+  assert traj['times'].shape == expected[:, 0].shape
+  assert np.all(np.diff(traj['times']) >= -1e-9), 'times must not run backwards'
+  for axis, key in enumerate(('kx', 'ky', 'kz')):
+    np.testing.assert_allclose(traj[key], expected[:, axis], atol=1e-3)
+
+  # A sequence with no ADC has no trajectory, and must say so rather than
+  # calling into pypulseq.
+  empty = kspace_trajectory(pulseq_import(DATA_DIR / 'flash_tr_v15.seq').pulseq_seq)
+  for key in ('kx', 'ky', 'kz', 'times'):
+    assert empty[key].size == 0
+
+
 # ---------------------------------------------------------------------------
 # ROTATIONS extension
 # ---------------------------------------------------------------------------
