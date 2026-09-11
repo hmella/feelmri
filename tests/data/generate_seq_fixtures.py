@@ -99,8 +99,16 @@ seq.write(str(script_path / 'se_v15.seq'))
 # the block boundaries come from the file's first/last columns.
 seq = pp.Sequence(system=system)
 n_samples = 200
-t = np.arange(n_samples) * system.grad_raster_time
-wave = 8e-3 * system.gamma * np.sin(2 * np.pi * t / (n_samples * system.grad_raster_time))
+# Samples sit at raster CENTRES, which is the whole point of this fixture, so
+# the phase must be offset by half a step. Sampling at the raster EDGES instead
+# stopped one sample short of the period and left the waveform ending at 1.57%
+# of peak -- a gradient that never returns to zero and that nothing continues.
+# The file was then ill-posed: pypulseq's calculate_kspace bridges the gap
+# linearly to the next x event while the solver reads zero there, which put
+# 1.686 cycles of phase across the FOV into the readout. import_pulseq now
+# warns about that shape of file; this one should not provoke it.
+centres = (np.arange(n_samples) + 0.5) / n_samples
+wave = 8e-3 * system.gamma * np.sin(2 * np.pi * centres)
 gx_arb = pp.make_arbitrary_grad('x', waveform=wave, system=system,
                                 delay=system.grad_raster_time)
 
