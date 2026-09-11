@@ -14,7 +14,7 @@ import pytest
 EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "examples"
 
 # Each script runs a full pipeline in a subprocess with a 180 s budget,
-# well past the global 30 s pytest-timeout default. Measured, the 13 of
+# well past the global 30 s pytest-timeout default. Measured, the 14 of
 # them are 97 s -- half the suite's wall clock -- so they carry `slow`
 # and leave `-m "not slow"` a fast suite. CI does not deselect them.
 pytestmark = [
@@ -25,6 +25,7 @@ pytestmark = [
 
 @pytest.mark.parametrize("script", [
     "4dflow.py",
+    "concomitant_fields.py",
     "free_running.py",
     "gradient_orientation.py",
     "gradient_spoiling.py",
