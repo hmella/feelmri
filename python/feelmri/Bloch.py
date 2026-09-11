@@ -969,6 +969,26 @@ class BlochSolver:
         This is the TRANSMIT side only. Receive sensitivity is a signal-side
         quantity and belongs on the assembler's ``nv`` coil axis, which this
         does not touch.
+    t2_prime : Quantity or None, optional
+        Intra-voxel field-inhomogeneity time constant (ms), scalar or one
+        entry per local node. ``None`` (the default) is the off switch. When set, every node carries
+        ``spectral_bins`` sub-spins with static frequency offsets drawn from
+        ``lineshape``, and the ensemble PERSISTS across blocks -- so the
+        reversible dephasing it produces is genuinely REPHASED by a refocusing
+        pulse, which no scalar T2* can do.
+
+        This is the reversible part only. Pass the irreversible T2 to ``T2=``,
+        and pass **T2, not T2\***, to ``Phantom.set_static_fields`` or the two
+        double-count.
+    spectral_bins : int, optional
+        Number of sub-spins per node. Default 16, which is machine-precision
+        for the gaussian and uniform lineshapes. See :func:`lineshape_bins`
+        for the measured accuracy of each rule.
+    lineshape : {'gaussian', 'uniform', 'lorentzian'}, optional
+        Shape of the intra-voxel field distribution. Default ``'gaussian'``.
+        ``'lorentzian'`` is the only one that targets the conventional
+        ``exp(-t/T2*)`` and the only inaccurate one -- see
+        :func:`lineshape_bins`.
     pod_trajectory : POD or None, optional
         Motion trajectory for moving-phantom simulations. Default is None.
     initial_Mxy : np.ndarray or float, optional
@@ -996,6 +1016,9 @@ class BlochSolver:
                  T2: Quantity = Quantity(100.0, 'ms'),
                  delta_B: np.ndarray | float = 0.0,
                  b1_map: np.ndarray | complex | None = None,
+                 t2_prime: Quantity | None = None,
+                 spectral_bins: int = 16,
+                 lineshape: str = 'gaussian',
                  pod_trajectory: POD | None = None,
                  initial_Mxy: np.ndarray | float = 0.0,
                  initial_Mz: np.ndarray | float = None,
@@ -1033,9 +1056,31 @@ class BlochSolver:
         # solver inconsistent.
         phantom._partition_bound = True
         self.M0 = M0
-        self.T1 = Quantity(T1.m * ones, T1.units)
-        self.T2 = Quantity(T2.m * ones, T2.units)
-        self.delta_B = delta_B * ones
+
+        def _node_column(value, name):
+            """Broadcast a scalar or per-node value onto the (n, 1) node column.
+
+            `ones` is (n, 1), so the bare `value * ones` idiom turns a plain
+            (n,) array into an (n, n) OUTER PRODUCT rather than raising -- at
+            63 357 nodes that is a silent 32 GB allocation, which is how this
+            was found. A scalar or (n, 1) is the historical input and is
+            unchanged; (n,) is now accepted and reshaped."""
+            arr = np.asarray(value)
+            if arr.ndim > 1 and arr.shape != ones.shape:
+                raise ValueError(
+                    f"BlochSolver: {name} must be a scalar, (n,) or (n, 1) with "
+                    f"n = {ones.shape[0]} local nodes; got shape {arr.shape}")
+            if arr.ndim == 1:
+                if arr.size != ones.shape[0]:
+                    raise ValueError(
+                        f"BlochSolver: {name} has {arr.size} entries but there "
+                        f"are {ones.shape[0]} local nodes")
+                arr = arr.reshape(-1, 1)
+            return arr * ones
+
+        self.T1 = Quantity(_node_column(T1.m, 'T1'), T1.units)
+        self.T2 = Quantity(_node_column(T2.m, 'T2'), T2.units)
+        self.delta_B = _node_column(delta_B, 'delta_B')
         # Transmit sensitivity. Stored as a complex vector of local-node
         # length, or None. It is applied at USE TIME inside the kernel rather
         # than folded into rf_all, which keeps the carried Magnus state
@@ -1091,11 +1136,115 @@ class BlochSolver:
         self.concomitant_fields = bool(concomitant_fields)
         self._B0_mT = (float(scanner.field_strength.m_as('mT'))
                        if self.concomitant_fields else 0.0)
+        # Spectral sub-ensemble for reversible (T2') dephasing. OFF unless
+        # t2_prime is given. Each node gets `spectral_bins` sub-spins whose
+        # only difference is a static frequency offset, so the offsets ride the
+        # existing per-node delta_B channel and the kernel is untouched.
+        #
+        # The ensemble PERSISTS across blocks -- that is the whole point. A
+        # scalar T2* decays monotonically from the snapshot whatever constant
+        # it is given, so it can never rephase at an echo; a real sub-ensemble
+        # does, because each sub-spin simply runs backwards after a 180.
+        self.lineshape = str(lineshape).lower()
+        self.spectral_bins = int(spectral_bins)
+        if t2_prime is None:
+            self._t2_prime_ms = None
+            self._bin_z = None
+            self._bin_w = None
+            self._n_bins = 1
+        else:
+            # Scalar, (n,) or (n, 1). Per-node is the useful case -- T2' is a
+            # tissue property and is dominated by local susceptibility -- and it
+            # costs nothing here, because the offsets ride delta_B rather than
+            # the relaxation path that guard 2 protects.
+            t2p = np.asarray(Quantity(t2_prime).m_as('ms'),
+                             dtype=np.float64).reshape(-1)
+            n_local = ones.shape[0]
+            if t2p.size == 1:
+                t2p = np.full(n_local, t2p[0])
+            elif t2p.size != n_local:
+                raise ValueError(
+                    f"BlochSolver: t2_prime must be a scalar or have one entry "
+                    f"per local node ({n_local}); got {t2p.size}")
+            if not np.all(t2p > 0):
+                raise ValueError(
+                    "BlochSolver: every t2_prime entry must be positive; got a "
+                    f"minimum of {t2p.min()}")
+            self._t2_prime_ms = t2p
+            if self.spectral_bins < 2:
+                raise ValueError(
+                    "BlochSolver: spectral_bins must be >= 2 when t2_prime is "
+                    f"set; got {self.spectral_bins}. One bin is no ensemble.")
+            self._bin_z, self._bin_w = lineshape_bins(self.spectral_bins,
+                                                      self.lineshape)
+            self._n_bins = self.spectral_bins
+            if self.lineshape == 'lorentzian':
+                warnings.warn(
+                    f"lineshape='lorentzian' targets exp(-t/T2*) but cannot be "
+                    f"represented by a finite spin ensemble: at "
+                    f"spectral_bins={self._n_bins} the decay is wrong by "
+                    f"~{_LORENTZIAN_ERR(self._n_bins):.1e}, improving only as "
+                    f"K^-0.55. Use 'gaussian' or 'uniform' unless you need "
+                    f"continuity with the exp(-t/T2*) convention.")
+            # Guard 1: a K-fold node expansion also duplicates the POD mode
+            # matrix, which is rebuilt and Fortran-transposed on every block
+            # once the ensemble persists -- 3*N*K*M reals, against the 23 MB
+            # the layout was tuned to avoid re-transposing. That is a kernel
+            # redesign (a bin axis sharing positions and modes), not a tuning
+            # knob, so refuse rather than quietly crawl.
+            if pod_trajectory is not None:
+                raise NotImplementedError(
+                    "BlochSolver: t2_prime with a pod_trajectory is not "
+                    "supported. The spectral ensemble duplicates every node, "
+                    "which would duplicate the POD mode matrix and its "
+                    "per-block transpose. It needs a kernel bin axis that "
+                    "shares positions and modes across sub-spins.")
+            # Guard 2: UniformRelax survives np.repeat of a constant, but a
+            # per-node T1/T2 drops onto the kernel's per-node std::exp path,
+            # which recomputes on every dt change -- 2*N*K libm calls on
+            # roughly half of all steps, which would dominate the node loop.
+            for name, arr in (('T1', self.T1.m), ('T2', self.T2.m)):
+                a = np.asarray(arr).reshape(-1)
+                if a.size and not np.all(a == a[0]):
+                    raise NotImplementedError(
+                        f"BlochSolver: t2_prime with a per-node {name} is not "
+                        f"supported; the kernel would fall onto its per-node "
+                        f"exp() path at K times the cost.")
+            # Guard 3: perfect_spoiling zeroes Mxy at every non-empty block
+            # boundary, which destroys the ensemble's coherence -- making the
+            # whole feature a no-op that still costs K times.
+            if self.perfect_spoiling:
+                warnings.warn(
+                    "BlochSolver: perfect_spoiling is on together with "
+                    "t2_prime, so the sub-ensemble's coherence is zeroed at "
+                    "every non-empty block boundary and can never rephase at "
+                    "an echo. The spectral bins are then pure cost. Pass "
+                    "perfect_spoiling=False.")
+            # Guard 4: the spatial spoiler ensemble is a SECOND sub-voxel axis.
+            # A tensor product is K_spatial * K_spectral (x400 at the default
+            # isochromat_K=25), and merging them onto one index is wrong: the
+            # quadrature weights span ~10 orders of magnitude, so the spatial
+            # average would inherit them and its effective sample size would
+            # collapse.
+            if any(getattr(b, 'spoiler', False)
+                   for b in getattr(sequence, 'blocks', [])):
+                raise NotImplementedError(
+                    "BlochSolver: t2_prime with a spoiler=True block is not "
+                    "supported. They are two independent sub-voxel axes -- a "
+                    "spatial spread is rewound by a gradient, a frequency "
+                    "spread by a 180 -- so they would need a tensor product.")
+
         # Persistent Magnus state (per-node Bz, scalar rf) carried between
         # blocks so that order-2/4 maintain a continuous field history. For
         # order = 0 these arrays are written but never read by the kernel.
         self._Bz_old = np.zeros(phantom.local_nodes.shape[0], dtype=self._np_real)
         self._rf_old = self._np_cplx(0)
+        # Carried sub-ensemble state, (n_nodes * n_bins, 1). Held separately so
+        # the public initial_Mxy/initial_Mz keep their per-node shape and
+        # meaning; a repeated solve(start=..., end=...) per shot must not lose
+        # the intra-voxel coherence between calls.
+        self._bin_Mxy = None
+        self._bin_Mz = None
         # Wall-clock cumulative time spent inside the C++ kernel across all
         # solve() calls; populated by solve(). Useful for benchmarking.
         self.bloch_elapsed = 0.0
@@ -1201,6 +1350,65 @@ class BlochSolver:
 
         # Gyromagnetic constant
         gamma = self.scanner.gamma.m_as('rad/ms/mT')
+
+        # Spectral sub-ensemble. Every per-node array grows K-fold through
+        # np.repeat, so node n occupies rows [n*K : (n+1)*K] -- the same
+        # consecutive-duplicate ordering create_multi_isochromats uses. Only
+        # delta_B actually differs between a node's bins: a sub-spin shares its
+        # node's position, relaxation and transmit sensitivity.
+        n_bins = self._n_bins
+        bin_w = None
+        if n_bins > 1:
+            # z is dimensionless, z/T2' is rad/ms, and the kernel wants mT.
+            # (n_nodes, n_bins) -> ravel puts node n's bins at rows
+            # [n*K : (n+1)*K], matching np.repeat's ordering below.
+            bin_dB = np.asarray(
+                self._bin_z[None, :]
+                / (self._t2_prime_ms[:, None] * gamma),
+                dtype=self._np_real).reshape(-1, 1)
+            bin_w = self._bin_w.astype(np.float64)
+            x = np.repeat(x, n_bins, axis=0)
+            T1 = np.repeat(T1, n_bins, axis=0)
+            T2 = np.repeat(T2, n_bins, axis=0)
+            delta_B = np.repeat(delta_B, n_bins, axis=0) + bin_dB
+            delta_B = np.ascontiguousarray(delta_B, dtype=self._np_real)
+            if b1_map.size:
+                b1_map = np.ascontiguousarray(np.repeat(b1_map, n_bins, axis=0))
+            Bz_old = np.ascontiguousarray(
+                np.repeat(Bz_old.reshape(-1), n_bins, axis=0),
+                dtype=self._np_real)
+            # Resume the ensemble if a previous solve() left one of the right
+            # shape; otherwise seed every bin of a node from its per-node value.
+            want = (nb_nodes * n_bins, 1)
+            if (self._bin_Mxy is not None and self._bin_Mxy.shape == want
+                    and self._bin_Mz is not None):
+                initial_Mxy = np.ascontiguousarray(self._bin_Mxy,
+                                                   dtype=self._np_cplx)
+                initial_Mz = np.ascontiguousarray(self._bin_Mz,
+                                                  dtype=self._np_real)
+            else:
+                initial_Mxy = np.ascontiguousarray(
+                    np.repeat(initial_Mxy, n_bins, axis=0), dtype=self._np_cplx)
+                initial_Mz = np.ascontiguousarray(
+                    np.repeat(initial_Mz, n_bins, axis=0), dtype=self._np_real)
+            # The kernel sizes everything from r0.rows() and validates no other
+            # length (only b1_map), so a forgotten expansion is an out-of-bounds
+            # read under NDEBUG rather than an exception. Check here instead.
+            n_rows = nb_nodes * n_bins
+            for name, arr in (('x', x), ('T1', T1), ('T2', T2),
+                              ('delta_B', delta_B), ('Bz_old', Bz_old),
+                              ('initial_Mxy', initial_Mxy),
+                              ('initial_Mz', initial_Mz)):
+                if arr.shape[0] != n_rows:
+                    raise RuntimeError(
+                        f"BlochSolver: {name} has {arr.shape[0]} rows, expected "
+                        f"{n_rows} = {nb_nodes} nodes x {n_bins} bins")
+
+        def collapse_bins(arr):
+            """Weighted sum over each node's bins, back to one row per node."""
+            if n_bins == 1:
+                return arr
+            return (arr.reshape(nb_nodes, n_bins) * bin_w).sum(axis=1)
 
         # Solve the Bloch equations for each block
         for i, block in enumerate(blocks):
@@ -1399,9 +1607,11 @@ class BlochSolver:
                 Bz_old = np.ascontiguousarray(Bz_old_out, dtype=self._np_real).reshape(-1)
                 rf_old = self._py_cplx(rf_old_out)
 
-            # Update magnetizations
-            Mxy[:, i] = Mxy_[:, -1]
-            Mz[:, i]  = Mz_[:, -1]
+            # Update magnetizations. This is the ONLY place the ensemble is
+            # reduced: the carried state below stays per sub-spin, so coherence
+            # survives the block boundary and a 180 can rephase it.
+            Mxy[:, i] = collapse_bins(Mxy_[:, -1])
+            Mz[:, i]  = collapse_bins(Mz_[:, -1])
 
             # Update the initial magnetization for the next block. Keep the
             # cached column-vector initial_Mxy/initial_Mz in step with the
@@ -1425,8 +1635,18 @@ class BlochSolver:
         # normally the very same buffers -- np.ascontiguousarray is a no-op
         # when dtype and layout already match -- so rebinding only does
         # anything when a dtype conversion forced a copy above.
-        self.initial_Mxy = initial_Mxy
-        self.initial_Mz = initial_Mz
+        if n_bins > 1:
+            # Keep the sub-ensemble for the next solve(), and expose the
+            # collapsed per-node state on the public attributes.
+            self._bin_Mxy = initial_Mxy
+            self._bin_Mz = initial_Mz
+            self.initial_Mxy = collapse_bins(
+                initial_Mxy[:, 0]).reshape(-1, 1).astype(self._np_cplx)
+            self.initial_Mz = collapse_bins(
+                initial_Mz[:, 0]).reshape(-1, 1).astype(self._np_real)
+        else:
+            self.initial_Mxy = initial_Mxy
+            self.initial_Mz = initial_Mz
 
         # Persist final Magnus state for the next solve() call.
         self._Bz_old = Bz_old
@@ -1439,6 +1659,94 @@ class BlochSolver:
         MPI_comm.Barrier()
 
         return Mxy[:, store_indices], Mz[:, store_indices]
+
+
+LINESHAPES = ('gaussian', 'uniform', 'lorentzian')
+
+# Measured worst error of the lorentzian rule against exp(-t/T2'),
+# over tau in [0, 3*T2']: 3.3e-1 at K=8 falling as roughly K^-0.55.
+def _LORENTZIAN_ERR(K):
+  return 3.3e-1 * (K / 8.0)**-0.55
+
+
+
+def lineshape_bins(K, lineshape='gaussian'):
+  """Quadrature nodes and weights for an intra-voxel field distribution.
+
+  Returns ``(z, w)``: ``K`` dimensionless frequency offsets and ``K``
+  non-negative weights summing to exactly 1. Scaled by ``1/T2'`` the offsets
+  are rad/ms, and the ensemble average
+
+      F(tau) = sum_k w_k * exp(-i * z_k / T2' * tau)
+
+  is the decay the sub-ensemble produces. The weights are a genuine probability
+  distribution: an unconstrained least-squares fit reaches 4e-11 on the
+  exponential but needs ``sum|w| = 1534``, i.e. cancellation that a spin
+  ensemble cannot represent and float32 cannot carry.
+
+  Measured worst error against the lineshape each rule claims, over
+  ``tau`` in ``[0, 3*T2']``:
+
+  ============  ========  ========  ========  ========
+  K                    8        16        64       256
+  ============  ========  ========  ========  ========
+  gaussian       9.7e-03   1.7e-08   3.3e-16   5.0e-16
+  uniform        2.2e-07   6.1e-16   3.1e-16   8.3e-16
+  lorentzian     3.3e-01   2.4e-01   1.0e-01   3.8e-02
+  ============  ========  ========  ========  ========
+
+  * ``'gaussian'`` -- Gauss-Hermite. Decay ``exp(-tau^2 / 2 T2'^2)``.
+    Machine precision by K=24.
+  * ``'uniform'`` -- Gauss-Legendre on a half-width of ``sqrt(3)/T2'``, chosen
+    so the variance matches the Gaussian of the same ``T2'``. Decay is a sinc,
+    so the signal has true zero crossings and partial recoveries -- the right
+    model for a linear susceptibility gradient across the voxel.
+  **A finite bin set is quasi-periodic, so the decay REVIVES at long tau.**
+  With K discrete frequencies the ensemble cannot stay cancelled forever; it
+  recurs once the accumulated phase spread wraps. Largest ``tau/T2'`` at which
+  each rule still tracks its lineshape to 1e-3:
+
+  ============  ======  ======  ======  ======
+  K                  8      16      32      64
+  ============  ======  ======  ======  ======
+  gaussian        2.50    4.67    7.86   12.47
+  uniform         5.37   13.40     inf     inf
+  ============  ======  ======  ======  ======
+
+  So for the gaussian rule size ``K >= 5 * tau_max / T2'``, where ``tau_max``
+  is the longest time coherence survives WITHOUT a refocusing pulse -- a 180
+  restarts the clock, so echo-based sequences are far less demanding than the
+  bound suggests. The uniform rule barely needs sizing.
+
+  * ``'lorentzian'`` -- equal-probability quantile midpoints. The only rule
+    that targets the conventional ``exp(-t/T2*)``, and the only inaccurate one:
+    it converges roughly as ``K^-0.55``, so 3.8e-2 at K=256. That is not an
+    implementation limit. ``exp(-t/T2*)`` is the Fourier transform of a
+    Lorentzian, which has infinite variance, so reproducing it needs
+    arbitrarily far off-resonance spins and no finite ensemble gets there.
+  """
+  K = int(K)
+  if K < 1:
+    raise ValueError(f"lineshape_bins: K must be >= 1; got {K}")
+  key = str(lineshape).lower()
+  if key not in LINESHAPES:
+    raise ValueError(
+      f"lineshape_bins: lineshape must be one of {list(LINESHAPES)}; "
+      f"got {lineshape!r}")
+  if key == 'gaussian':
+    z, w = np.polynomial.hermite_e.hermegauss(K)
+  elif key == 'uniform':
+    z, w = np.polynomial.legendre.leggauss(K)
+    z = z * np.sqrt(3.0)
+  else:
+    u = (np.arange(K) + 0.5) / K
+    z, w = np.tan(np.pi * (u - 0.5)), np.ones(K)
+  # Normalise in float64. The T1 recovery term (1 - e1) * M0 is AFFINE, so the
+  # collapsed equilibrium is M0 * sum(w): raw Gauss-Hermite weights sum to
+  # 2.5066 and Gauss-Legendre to 2.0, either of which would put the whole
+  # phantom at the wrong M0.
+  w = np.asarray(w, dtype=np.float64)
+  return np.asarray(z, dtype=np.float64), w / w.sum()
 
 
 def _draw_in_sphere_offsets(M, R, distribution='uniform', seed=None):

@@ -33,6 +33,8 @@ Three groups of tests:
 """
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pytest
 from pint import Quantity
@@ -42,7 +44,7 @@ from feelmri import (
   FEMPhantom,
   Scanner,
 )
-from feelmri.Bloch import Sequence, SequenceBlock
+from feelmri.Bloch import Sequence, SequenceBlock, lineshape_bins
 from feelmri.MRObjects import RF, Gradient
 
 from _phantom_fixtures import make_minimal_tet_mesh, make_1d_rod_mesh
@@ -460,3 +462,212 @@ def test_magnus_state_reseeded_at_block_start(minimal_phantom):
       mags, 1.0, atol=5e-4,
       err_msg=f"{method} |Mxy| not preserved across block stitches",
     )
+
+
+# ---------------------------------------------------------------------------
+# 4. Sub-voxel T2' by a spectral sub-ensemble
+# ---------------------------------------------------------------------------
+#
+# The gap these close: a scalar T2* decays monotonically from the snapshot
+# whatever constant it is given, so it can never rephase at an echo. A real
+# sub-ensemble does, because each sub-spin simply runs backwards after a 180.
+# `test_spin_echo_rephases_what_t2_prime_dephased` FAILS without the feature --
+# that is what makes it worth having.
+
+T2_PRIME_MS = 20.0
+
+
+def _t2_prime_echo_sequence(tau_ms, n_steps, refocus, pulse_ms=0.002):
+  """90 -- tau -- (180) -- tau, sampled every tau/n_steps."""
+  seq = Sequence()
+  seq.add_block(make_hard_pulse_block(np.pi / 2, dur_ms=pulse_ms, dt_ms=1e-4))
+  step = tau_ms / n_steps
+  for _ in range(n_steps):
+    blk = make_empty_block(step, dt_ms=step)
+    blk.store_magnetization = True
+    seq.add_block(blk)
+  if refocus:
+    seq.add_block(make_hard_pulse_block(np.pi, dur_ms=pulse_ms, dt_ms=1e-4))
+  for _ in range(n_steps):
+    blk = make_empty_block(step, dt_ms=step)
+    blk.store_magnetization = True
+    seq.add_block(blk)
+  return seq
+
+
+def _run_t2_prime(phantom, seq, t2_prime_ms=T2_PRIME_MS, T2_ms=1e9, **kwargs):
+  extra = {} if t2_prime_ms is None else dict(
+    t2_prime=Quantity(t2_prime_ms, 'ms'), **kwargs)
+  solver = BlochSolver(
+    seq, phantom,
+    T1=Quantity(1e9, 'ms'), T2=Quantity(T2_ms, 'ms'),
+    initial_Mxy=0.0 + 0.0j, initial_Mz=1.0,
+    perfect_spoiling=False, dtype='float64', **extra)
+  Mxy, Mz = solver.solve()
+  return np.abs(Mxy[0, :]), Mz[0, :]
+
+
+@pytest.mark.parametrize('lineshape, decay', [
+  ('gaussian', lambda t, T: np.exp(-0.5 * (t / T)**2)),
+  # |Mxy| is a magnitude and the uniform lineshape's sinc goes NEGATIVE:
+  # the signal has true zero crossings and partial recoveries, which is the
+  # physically right behaviour for a linear gradient across the voxel.
+  ('uniform', lambda t, T: np.abs(np.sinc(np.sqrt(3.0) * t / T / np.pi))),
+], ids=['gaussian', 'uniform'])
+def test_free_induction_decays_with_the_shape_of_its_lineshape(
+        minimal_phantom, lineshape, decay):
+  """The ensemble must reproduce the decay its own quadrature rule encodes.
+
+  This is the check that the bins are a real distribution and not just a
+  spread: a gaussian lineshape gives exp(-t^2 / 2 T2'^2), NOT exp(-t/T2*).
+  Getting the shape right is the whole difference from a scalar.
+
+  The residual is set by the finite pulse width, not the quadrature: the time
+  origin is the pulse CENTRE while the first sample is taken at its end.
+  Measured, it falls exactly linearly with the pulse duration -- 3.86e-4 at
+  20 us, 3.86e-5 at 2 us, 3.87e-6 at 0.2 us -- so at the 2 us used here the
+  quadrature (1.7e-8 at K=16) is nowhere near the limit.
+  """
+  n_steps, tau = 12, 30.0
+  seq = _t2_prime_echo_sequence(tau, n_steps, refocus=False)
+  mag, _ = _run_t2_prime(minimal_phantom, seq, lineshape=lineshape,
+                         spectral_bins=16)
+  t = np.arange(mag.size) * (tau / n_steps)
+  np.testing.assert_allclose(mag, decay(t, T2_PRIME_MS), atol=2e-4)
+
+
+def test_spin_echo_rephases_what_t2_prime_dephased(minimal_phantom):
+  """The point of the whole feature, and the one thing no scalar can do.
+
+  T2 is infinite, so every radian lost is REVERSIBLE and a 180 must bring all
+  of it back. Under the scalar model -- T2* handed to the solver as T2 -- the
+  magnetization decays monotonically and reaches exp(-2 tau / T2*) at the echo
+  with no recovery whatever, which is the control asserted below.
+  """
+  n_steps, tau = 12, 30.0
+  mag, _ = _run_t2_prime(
+    minimal_phantom, _t2_prime_echo_sequence(tau, n_steps, refocus=True),
+    lineshape='gaussian', spectral_bins=16)
+
+  at_tau = mag[n_steps]
+  at_echo = mag[-1]
+  assert at_tau < 0.4, (
+    f'the sub-ensemble should have dephased to ~0.32 by tau; got {at_tau:.4f}')
+  assert at_echo > 0.999, (
+    f'a 180 must rephase reversible dephasing: |Mxy| at the echo is '
+    f'{at_echo:.6f}, expected ~1. If this fails the ensemble is not '
+    f'surviving the block boundary.')
+
+  # The control: the same sequence under the scalar model cannot recover.
+  scalar, _ = _run_t2_prime(minimal_phantom,
+                            _t2_prime_echo_sequence(tau, n_steps, refocus=True),
+                            t2_prime_ms=None, T2_ms=T2_PRIME_MS)
+  assert np.all(np.diff(scalar) <= 1e-12), 'the scalar model must be monotone'
+  assert scalar[-1] < 0.06, (
+    f'scalar control should reach exp(-2 tau/T2*) = 0.05; got {scalar[-1]:.4f}')
+
+
+def test_rephasing_is_exact_for_every_lineshape_and_bin_count(minimal_phantom):
+  """Refocusing is exact for ANY static distribution, so the echo amplitude
+  does not depend on the quadrature rule -- only the decay BETWEEN echoes
+  does. Worth pinning: it is the reason the inaccurate lorentzian rule is
+  still usable for echo-based sequences."""
+  n_steps, tau = 6, 24.0
+  seq = _t2_prime_echo_sequence(tau, n_steps, refocus=True)
+  for lineshape in ('gaussian', 'uniform', 'lorentzian'):
+    for K in (8, 16):
+      with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        mag, _ = _run_t2_prime(minimal_phantom, seq, lineshape=lineshape,
+                               spectral_bins=K)
+      assert mag[-1] > 0.999, (
+        f'{lineshape} at K={K} rephased to only {mag[-1]:.6f}')
+
+
+def test_bin_weights_are_a_probability_distribution(minimal_phantom):
+  """Non-negative and summing to exactly 1.
+
+  Not cosmetic: the T1 recovery term (1 - e1) * M0 is AFFINE, so the collapsed
+  equilibrium is M0 * sum(w). Raw Gauss-Hermite weights sum to 2.5066 and
+  Gauss-Legendre to 2.0, either of which would put the whole phantom at the
+  wrong M0. Asserted here on the rule and end to end on a long recovery.
+  """
+  for lineshape in ('gaussian', 'uniform', 'lorentzian'):
+    for K in (4, 8, 16, 32):
+      z, w = lineshape_bins(K, lineshape)
+      assert z.shape == (K,) and w.shape == (K,)
+      assert w.min() >= 0.0, f'{lineshape} K={K} has a negative weight'
+      assert abs(w.sum() - 1.0) < 1e-15, f'{lineshape} K={K} sums to {w.sum()}'
+
+  # End to end: the recovery curve is M0 * sum(w) * (1 - exp(-t/T1)), so an
+  # unnormalised rule scales the whole phantom. Compared against the closed
+  # form rather than against 1, which five T1 does not reach anyway (0.9933).
+  T1_ms, dur_ms = 100.0, 500.0
+  seq = make_single_block_sequence(make_empty_block(dur_ms, dt_ms=10.0))
+  solver = BlochSolver(
+    seq, minimal_phantom, M0=1.0,
+    T1=Quantity(T1_ms, 'ms'), T2=Quantity(1e9, 'ms'),
+    initial_Mxy=0.0 + 0.0j, initial_Mz=0.0,
+    perfect_spoiling=False, dtype='float64',
+    t2_prime=Quantity(T2_PRIME_MS, 'ms'), spectral_bins=16)
+  _, Mz = solver.solve()
+  np.testing.assert_allclose(Mz[:, 0], 1.0 - np.exp(-dur_ms / T1_ms), atol=1e-9)
+
+
+def test_t2_prime_refuses_what_stage_one_cannot_do(minimal_phantom):
+  """Each guard names a real cost, not a missing convenience -- see the
+  docstrings. Silence here would mean a K-fold slowdown or a wrong answer."""
+  seq = make_single_block_sequence(make_empty_block(5.0, dt_ms=1.0))
+  common = dict(T1=Quantity(1e9, 'ms'), initial_Mz=1.0,
+                perfect_spoiling=False, t2_prime=Quantity(T2_PRIME_MS, 'ms'))
+
+  # A per-node T2 would drop the kernel onto its per-node exp() path at K times
+  # the cost.
+  n_nodes = minimal_phantom.local_nodes.shape[0]
+  per_node = np.linspace(40.0, 60.0, n_nodes).reshape(-1, 1)
+  with pytest.raises(NotImplementedError, match='per-node'):
+    BlochSolver(seq, minimal_phantom, T2=Quantity(per_node, 'ms'), **common)
+
+  # A spoiler block is a SECOND sub-voxel axis; combining needs a tensor
+  # product.
+  spoiled = make_single_block_sequence(make_empty_block(5.0, dt_ms=1.0))
+  spoiled.blocks[0].spoiler = True
+  with pytest.raises(NotImplementedError, match='spoiler'):
+    BlochSolver(spoiled, minimal_phantom, T2=Quantity(50.0, 'ms'), **common)
+
+  # One bin is not an ensemble.
+  with pytest.raises(ValueError, match='spectral_bins'):
+    BlochSolver(seq, minimal_phantom, T2=Quantity(50.0, 'ms'),
+                spectral_bins=1, **common)
+
+  # The lorentzian rule cannot reach the decay it targets, and says so.
+  with pytest.warns(UserWarning, match='lorentzian'):
+    BlochSolver(seq, minimal_phantom, T2=Quantity(50.0, 'ms'),
+                lineshape='lorentzian', **common)
+
+
+def test_finite_bin_sets_revive_and_the_sizing_rule_holds():
+  """A finite ensemble is quasi-periodic: it cannot stay cancelled forever.
+
+  Pinned rather than merely documented because the failure is SILENT and looks
+  like signal -- a free induction decay that has reached zero climbs back out.
+  Measured usable range for the gaussian rule is tau/T2' = 0.2*K (2.50 at K=8,
+  4.67 at 16, 7.86 at 32, 12.47 at 64), which is the source of the
+  `K >= 5 * tau_max / T2'` guidance in `lineshape_bins`.
+  """
+  tau = np.linspace(0.0, 15.0, 4000)          # in units of T2'
+  target = np.exp(-0.5 * tau**2)
+
+  def usable_range(K):
+    z, w = lineshape_bins(K, 'gaussian')
+    F = np.abs((w[None, :] * np.exp(-1j * np.outer(tau, z))).sum(1))
+    bad = np.where(np.abs(F - target) > 1e-3)[0]
+    return tau[bad[0]] if bad.size else np.inf
+
+  reach = {K: usable_range(K) for K in (8, 16, 32)}
+  assert reach[8] < reach[16] < reach[32], f'not monotone in K: {reach}'
+  for K, expected in ((8, 2.50), (16, 4.67), (32, 7.86)):
+    assert abs(reach[K] - expected) < 0.15, (
+      f'gaussian K={K} tracks to tau/T2\' = {reach[K]:.2f}, expected '
+      f'{expected:.2f}; the 5 * tau_max / T2\' sizing rule has moved')
+    assert reach[K] > 0.2 * K, 'the documented 0.2*K rule must be conservative'
