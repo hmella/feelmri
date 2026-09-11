@@ -1463,3 +1463,35 @@ def test_stored_columns_keep_their_block_order(minimal_phantom):
   # cannot be right by accident.
   expected = np.exp(-10.0 * (np.array(wanted) + 1) / T2_ms)
   np.testing.assert_allclose(np.abs(selective[0]), expected, rtol=1e-6)
+
+
+def test_a_one_dimensional_per_node_array_is_accepted_between_solves(
+        minimal_phantom):
+  """The constructor normalises an (n,) per-node array onto the node column, so
+  the same spelling assigned to a public attribute must work too.
+
+  The universal length check added by the second audit required ndim == 2, so
+  `solver.delta_B = np.zeros(n)` -- correct data, one missing trailing axis --
+  was refused with a message claiming it was wrongly sized. The check still
+  refuses a wrong LENGTH, which is the case that corrupts the heap.
+  """
+  n_nodes = minimal_phantom.local_nodes.shape[0]
+  seq = make_single_block_sequence(make_empty_block(2.0, dt_ms=0.5))
+
+  def solver_with(**kwargs):
+    return BlochSolver(
+      seq, minimal_phantom, T1=Quantity(1e9, 'ms'), T2=Quantity(50.0, 'ms'),
+      initial_Mxy=1.0 + 0.0j, initial_Mz=0.0, perfect_spoiling=False,
+      dtype='float64', **kwargs)
+
+  reference = solver_with(delta_B=np.full((n_nodes, 1), 2e-3)).solve()[0]
+
+  flat = solver_with()
+  flat.delta_B = np.full(n_nodes, 2e-3)
+  np.testing.assert_allclose(flat.solve()[0], reference, rtol=0, atol=0)
+
+  # A genuinely wrong length is still refused.
+  short = solver_with()
+  short.delta_B = np.full(n_nodes - 1, 2e-3)
+  with pytest.raises(ValueError, match='delta_B'):
+    short.solve()

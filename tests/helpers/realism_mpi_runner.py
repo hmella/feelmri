@@ -73,6 +73,10 @@ def main(argv=None):
   ap = argparse.ArgumentParser()
   ap.add_argument('--mesh', required=True)
   ap.add_argument('--output', required=True)
+  ap.add_argument('--poison-rank', type=int, default=-1,
+                  help='hand this rank a delta_B one node short. Every rank '
+                       'must then raise; if only the poisoned rank does, the '
+                       'others block in the collective that reports it.')
   args = ap.parse_args(argv)
 
   if not os.path.exists(args.mesh):
@@ -94,9 +98,16 @@ def main(argv=None):
   b1_map = (0.7 + 0.3 * np.cos(np.pi * u)) * np.exp(0.4j * u)
   t2_prime = 6.0 + 4.0 * u**2
 
+  # A per-rank field built against the wrong node count is the realistic way
+  # this goes wrong -- under dual partitioning the two layouts have different
+  # per-rank counts, so an array can match on one rank and not on another.
+  delta_B = np.zeros((nodes.shape[0], 1))
+  if args.poison_rank == MPI_rank:
+    delta_B = delta_B[:-1]
+
   solver = BlochSolver(
     _build_sequence(scanner), phantom,
-    scanner=scanner, M0=1.0,
+    scanner=scanner, M0=1.0, delta_B=delta_B,
     T1=Quantity(1e9, 'ms'), T2=Quantity(400.0, 'ms'),
     initial_Mxy=0.0, initial_Mz=1.0,
     perfect_spoiling=False, dtype='float64',

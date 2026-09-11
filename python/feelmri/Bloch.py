@@ -1089,34 +1089,44 @@ class BlochSolver:
             broadcast), an (n,) array, or an (n, 1) array.
             """
             base = ones if template is None else template
+
+            def refuse(message):
+                # Collected, NOT raised: this validates LOCAL-node data, so a
+                # bad value can exist on one rank only, and raising here would
+                # leave that rank outside the _collective_raise below while
+                # every other rank waited in its allgather. Reproduced as a
+                # hang under `mpirun -n 2` with a delta_B one node short on one
+                # rank. The template is returned so the rest of __init__ keeps
+                # working on well-shaped data until the collective fires.
+                node_problems.append(message)
+                return base
+
             if isinstance(value, Quantity):
                 # np.asarray on a Quantity SILENTLY strips the unit, so a
                 # delta_B given in T would arrive as if it were mT -- a 1000x
                 # error. T1/T2 reach here already converted; anything else must
                 # name its unit.
-                raise TypeError(
-                    f"BlochSolver: {name} must be a plain array or scalar in "
-                    f"the documented unit, not a Quantity ({value.units}); "
-                    f"converting it here would guess the unit.")
+                return refuse(
+                    f"{name} must be a plain array or scalar in the documented "
+                    f"unit, not a Quantity ({value.units}); converting it here "
+                    f"would guess the unit")
             arr = np.asarray(value)
             if (np.iscomplexobj(arr) and not np.iscomplexobj(base)):
                 # .astype below would drop the imaginary part in silence.
-                raise TypeError(
-                    f"BlochSolver: {name} is complex but must be real")
+                return refuse(f"{name} is complex but must be real")
             if arr.ndim > 1 and arr.shape != base.shape:
                 if arr.size != 1:
-                    raise ValueError(
-                        f"BlochSolver: {name} must be a scalar, (n,) or (n, 1) "
-                        f"with n = {base.shape[0]} local nodes; got shape "
-                        f"{arr.shape}")
+                    return refuse(
+                        f"{name} must be a scalar, (n,) or (n, 1) with n = "
+                        f"{base.shape[0]} local nodes; got shape {arr.shape}")
                 arr = arr.reshape(())
             if arr.ndim == 1:
                 if arr.size == 1:
                     arr = arr.reshape(())
                 elif arr.size != base.shape[0]:
-                    raise ValueError(
-                        f"BlochSolver: {name} has {arr.size} entries but there "
-                        f"are {base.shape[0]} local nodes")
+                    return refuse(
+                        f"{name} has {arr.size} entries but there are "
+                        f"{base.shape[0]} local nodes")
                 else:
                     arr = arr.reshape(-1, 1)
             # Preserve the template's dtype. Under NEP 50 `np.asarray(1000.0) *
@@ -1538,8 +1548,7 @@ class BlochSolver:
         solve_kernel = solve_mri_f32 if self._dtype == 'float32' else solve_mri_f64
 
         # Dimensions
-        nb_nodes  = x.shape[0]
-        nb_blocks = len(blocks)
+        nb_nodes = x.shape[0]
 
         # List of indices indicating which blocks need to be stored
         # These index into `blocks`, i.e. into the SLICE, while the readout
@@ -1564,7 +1573,7 @@ class BlochSolver:
 
         # Allocate magnetizations. Only the STORED columns are allocated: a
         # column is written once and read only by the return below, so sizing
-        # these over every block carried nb_blocks / len(store_indices) times
+        # these over every block carried len(blocks) / len(store_indices) times
         # the memory for nothing. The bin array is the one that hurts, since it
         # carries the n_bins factor as well -- on epi_v142 at 22 167 nodes and
         # K = 32 it reserved 2.6 GB to keep 0.01 GB, and on flash_tr_v15, which
@@ -1574,7 +1583,7 @@ class BlochSolver:
         Mxy = np.zeros((nb_nodes, nb_stored), dtype=self._np_cplx)
         Mz  = np.zeros((nb_nodes, nb_stored), dtype=self._np_real)
         # The UNCOLLAPSED ensemble at each stored column, (n_nodes, n_bins,
-        # n_blocks). Kept because collapsing at the snapshot is what makes a
+        # n_stored). Kept because collapsing at the snapshot is what makes a
         # readout lose the sub-voxel rephasing: the assembler can only replay
         # exp(-t/T2) from a single value per node, so an echo forming inside a
         # readout window is flattened and every spin-echo readout comes out
@@ -1595,6 +1604,14 @@ class BlochSolver:
                   else np.ascontiguousarray(self.b1_map, dtype=self._np_cplx))
         initial_Mxy = np.ascontiguousarray(self.initial_Mxy, dtype=self._np_cplx)
         initial_Mz = np.ascontiguousarray(self.initial_Mz, dtype=self._np_real)
+        # The constructor normalises an (n,) per-node array onto the (n, 1)
+        # node column, so accept the same spelling from a public attribute
+        # reassigned between solves. The length check below stays strict: it
+        # guards an out-of-bounds write, and a wrong LENGTH is the dangerous
+        # case, not a missing trailing axis.
+        T1, T2, delta_B, initial_Mxy, initial_Mz = (
+            arr.reshape(-1, 1) if arr.ndim == 1 and arr.size == nb_nodes else arr
+            for arr in (T1, T2, delta_B, initial_Mxy, initial_Mz))
         Bz_old = np.ascontiguousarray(self._Bz_old, dtype=self._np_real).reshape(-1)
         rf_old = self._py_cplx(self._rf_old)
 

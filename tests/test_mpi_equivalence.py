@@ -138,6 +138,53 @@ def test_realism_features_match_between_serial_and_mpi(tmp_path):
       'would not detect a rank-ordering bug')
 
 
+@pytest.mark.slow
+@pytest.mark.requires_mpi
+@pytest.mark.timeout(180)
+def test_a_bad_per_node_array_on_one_rank_raises_everywhere(tmp_path):
+  """A per-node array validated against the LOCAL node count can be wrong on
+  one rank and right on the others, so the refusal has to be collective.
+
+  It was not: `_node_column` raised on the spot for T1, T2, delta_B and both
+  initial magnetizations, while every other rank walked on into the allgather
+  that reports such problems and blocked there. Reproduced as a hang under
+  `mpirun -n 2` -- rank 1 raised, rank 0 never returned and had to be killed.
+
+  This is not a contrived input. Under dual partitioning the bloch and signal
+  layouts carry different per-rank node counts, so an array built from
+  `phantom.local_nodes` while the wrong layout is active matches on some ranks
+  and not on others.
+  """
+  pytest.importorskip('mpi4py')
+  pytest.importorskip('pymetis')
+  pytest.importorskip('meshio')
+  if shutil.which('mpirun') is None:
+    pytest.skip('mpirun not on PATH')
+
+  mesh_path = tmp_path / 'poison_rod.vtu'
+  make_1d_rod_mesh(mesh_path, length=0.08, n_segments=48,
+                   transverse_width=2e-4)
+
+  env = os.environ.copy()
+  env.setdefault('OPENBLAS_NUM_THREADS', '1')
+  env.setdefault('MPLBACKEND', 'Agg')
+
+  proc = subprocess.run(
+    ['mpirun', '--allow-run-as-root', '--oversubscribe', '-n', '2',
+     sys.executable, str(_REALISM_RUNNER), '--mesh', str(mesh_path),
+     '--output', str(tmp_path / 'unused.npz'), '--poison-rank', '1'],
+    env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
+
+  # The timeout above is the real assertion: before the fix this never
+  # returned. What follows pins the diagnosis.
+  out = proc.stdout.decode(errors='replace')
+  assert proc.returncode != 0, 'a short delta_B on one rank was accepted'
+  assert out.count('ValueError') >= 2, (
+    f'only one rank reported the problem, so the others did not reach the '
+    f'collective that raises it:\n{out[-3000:]}')
+  assert 'delta_B' in out and 'reported by rank 1' in out, out[-3000:]
+
+
 _PULSEQ_RUNNER = (Path(__file__).resolve().parent / 'helpers'
                   / 'pulseq_mpi_runner.py')
 
