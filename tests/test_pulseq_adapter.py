@@ -106,7 +106,10 @@ def test_kspace_trajectory_matches_the_windows(pulseq_import):
   """
   from feelmri.PulseqAdapter import kspace_trajectory
 
-  imp = pulseq_import(DATA_DIR / 'gre_v15.seq')
+  # Through _imp, not pulseq_import directly: gre_v15 is a v1.5 file with an
+  # ADC, which pypulseq 1.4 cannot read at all, and the trajectory step raises
+  # RuntimeError there. Every other test in this file is gated the same way.
+  imp = _imp(pulseq_import, DATA_DIR / 'gre_v15.seq')
   traj = kspace_trajectory(imp.pulseq_seq)
   expected = np.concatenate([rw.kspace_file for rw in imp.readouts])
   assert traj['times'].shape == expected[:, 0].shape
@@ -116,7 +119,7 @@ def test_kspace_trajectory_matches_the_windows(pulseq_import):
 
   # A sequence with no ADC has no trajectory, and must say so rather than
   # calling into pypulseq.
-  empty = kspace_trajectory(pulseq_import(DATA_DIR / 'flash_tr_v15.seq').pulseq_seq)
+  empty = kspace_trajectory(_imp(pulseq_import, DATA_DIR / 'flash_tr_v15.seq').pulseq_seq)
   for key in ('kx', 'ky', 'kz', 'times'):
     assert empty[key].size == 0
 
