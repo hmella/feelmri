@@ -2868,15 +2868,26 @@ def simulate_pulseq(seq_path,
           "t2_prime is set but set_static_fields was never called, so the "
           "readout cannot be reproduced per sub-spin and every echo will be "
           "attenuated by the dephasing standing at its anchor")
-    elif remembered[1].shape[0] != solver.bin_offsets.shape[0]:
-      _collective_raise(
-          f"simulate_pulseq: the remembered off-resonance map has "
-          f"{remembered[1].shape[0]} rows against {solver.bin_offsets.shape[0]} "
-          f"sub-spin offsets. set_static_fields must be called under the same "
-          f"partition the solver was built on, or the two describe different "
-          f"nodes")
     else:
-      bins = (solver.bin_magnetization, solver.bin_offsets,
+      offsets = solver.bin_offsets
+      # The row counts are compared on LOCAL data, so under dual partitioning
+      # this fires on some ranks and not others -- measured 4 of 6 on a cube at
+      # 6 ranks, where two ranks happen to have equal bloch and signal counts.
+      # Calling the collective inside the branch that found the problem is the
+      # bug this repo has now hit four times: those two ranks walked into the
+      # redistribution below while the other four waited in the allgather, and
+      # all six hung. Every rank reaches it, with an empty message when clean.
+      mismatch = ''
+      if (remembered[0].shape[0] != offsets.shape[0]
+              or remembered[1].shape[0] != offsets.shape[0]):
+        mismatch = (
+            f"simulate_pulseq: the remembered static fields have "
+            f"{remembered[0].shape[0]} (T2) and {remembered[1].shape[0]} "
+            f"(phi_dB0) rows against {offsets.shape[0]} sub-spin offsets. "
+            f"set_static_fields must be called under the same partition the "
+            f"solver was built on, or the two describe different nodes")
+      _collective_raise(mismatch)
+      bins = (solver.bin_magnetization, offsets,
               solver.bin_weights, remembered[0], remembered[1])
 
   # Under dual partitioning every set_static_fields and update_magnetization is
@@ -2906,7 +2917,12 @@ def simulate_pulseq(seq_path,
           "readout blocks %d-%d have no coherence anchor and are skipped",
           rw.first_block, rw.last_block)
       continue
-    phantom.update_magnetization(Mxy[:, rw.m_storage_idx])
+    if bins is None:
+      # On the bins path the loop below sets this once per sub-spin and the
+      # finally puts the collapsed value back, so doing it here as well is a
+      # wasted nodal store -- and, under dual partitioning, a wasted Alltoallv
+      # per readout window (4 of 23 on cpmg_v15 at K = 16).
+      phantom.update_magnetization(Mxy[:, rw.m_storage_idx])
     # Elapsed time since the snapshot, not absolute time from the start of the
     # file. mri_signal uses t for exp(-t/T2) and exp(i*phi*t), both of which
     # continue from the instant the magnetization was captured; feeding it

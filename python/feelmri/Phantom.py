@@ -1255,8 +1255,10 @@ class FEMPhantom:
         solver's governs the Bloch evolution between blocks. Passing different
         values is supported and costs nothing.
 
-        **When to split them, and when not to.** For a sequence with no
-        refocusing pulse -- every gradient-echo example shipped here -- the
+        **When to split them, and when not to.** With ``BlochSolver(t2_prime=...)``
+        the answer is always T2 here, for the reason given below. Without it,
+        for a sequence with no refocusing pulse -- every gradient-echo example
+        shipped here -- the
         reversible dephasing is never recovered, so the spins really do lose
         coherence at T2* throughout and passing T2* to BOTH is correct. Split
         them (T2 to the solver, T2* here) only when a refocusing pulse recovers

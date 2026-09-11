@@ -35,6 +35,10 @@ def main() -> int:
                   help='ms; non-zero turns on the spectral sub-ensemble, so '
                        'the readout is evaluated once per sub-spin')
   ap.add_argument('--spectral-bins', type=int, default=16)
+  ap.add_argument('--fields-under-signal', action='store_true',
+                  help='set the static fields while the SIGNAL layout is live, '
+                       'so their row count disagrees with the solver on some '
+                       'ranks and not others')
   ap.add_argument('--dual', action='store_true',
                   help='build two partitions instead of one, so every static '
                        'field and magnetization handoff is redistributed')
@@ -56,9 +60,32 @@ def main() -> int:
                           nodal_approximation=False, lumped=False)
   # Under dual partitioning this is the BLOCH layout, which is what is active
   # here and what the solver's bin offsets are indexed by.
-  n = phantom.local_nodes.shape[0]
-  phantom.set_static_fields(T2=np.full(n, 60.0, dtype=np.float32),
-                            phi_dB0=np.zeros(n, dtype=np.float32))
+  #
+  # phi_dB0 VARIES IN SPACE, and that is the point: with a constant map (and a
+  # magnetization that comes out spatially uniform on these fixtures) a
+  # redistribution that moved the wrong rows changed the k-space by exactly
+  # 0.000e+00 -- reversing the destination order of every redistributed array
+  # was undetectable. Tied to the node position so it follows the node, not its
+  # index in some rank-local array.
+  if args.fields_under_signal:
+    # The mistake the row-count guard exists to diagnose. Under dual
+    # partitioning the two layouts have different per-rank node counts, so
+    # this is rank-asymmetric: the guard fires on some ranks and not others.
+    with phantom._using('signal'):
+      m = phantom.local_nodes.shape[0]
+      phantom.set_static_fields(T2=np.full(m, 60.0, dtype=np.float32),
+                                phi_dB0=np.zeros(m, dtype=np.float32))
+    sim = simulate_pulseq(args.seq, phantom, M0=1.0, T1=Quantity(1e9, 'ms'),
+                          T2=Quantity(60.0, 'ms'), dtype='float64',
+                          t2_prime=Quantity(8.0, 'ms'), spectral_bins=8)
+    return 0
+
+  nodes = phantom.local_nodes.astype(np.float64)
+  reach = float(np.abs(nodes).max()) or 1.0
+  n = nodes.shape[0]
+  phantom.set_static_fields(
+      T2=np.full(n, 60.0, dtype=np.float32),
+      phi_dB0=(2.0 * nodes[:, 0] / reach).astype(np.float32))
 
   extra = {}
   if args.t2_prime > 0.0:

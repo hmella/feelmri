@@ -77,6 +77,9 @@ def main(argv=None):
                   help='hand this rank a delta_B one node short. Every rank '
                        'must then raise; if only the poisoned rank does, the '
                        'others block in the collective that reports it.')
+  ap.add_argument('--poison-at-solve', type=int, default=-1,
+                  help='give this rank a short delta_B AFTER construction, so '
+                       'the refusal has to come from solve()')
   args = ap.parse_args(argv)
 
   if not os.path.exists(args.mesh):
@@ -114,6 +117,12 @@ def main(argv=None):
     concomitant_fields=True,
     b1_map=b1_map,
     t2_prime=Quantity(t2_prime, 'ms'), spectral_bins=32)
+  if args.poison_at_solve >= 0:
+    solver.solve()
+    if args.poison_at_solve == MPI_rank:
+      solver.delta_B = np.zeros(nodes.shape[0] - 1)
+    solver.solve()
+
   Mxy_local, Mz_local = solver.solve()
 
   l2g = np.asarray(phantom.local_to_global_nodes, dtype=np.int64)

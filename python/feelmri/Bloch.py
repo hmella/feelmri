@@ -968,9 +968,14 @@ class BlochSolver:
         during a readout. The two are separate objects with no code path
         between them, so passing different values is supported and free.
 
-        For a sequence with no refocusing pulse -- every gradient-echo example
-        shipped here -- pass T2* to BOTH: the reversible dephasing is never
-        recovered, so that is the correct model and splitting them is not.
+        With ``t2_prime`` set, always pass T2 here: the solver then carries
+        the reversible part explicitly as a sub-ensemble and the readout
+        replays it per sub-spin, so T2* on both sides would decay it twice.
+
+        Without ``t2_prime``, for a sequence with no refocusing pulse -- every
+        gradient-echo example shipped here -- pass T2* to BOTH: the reversible
+        dephasing is never recovered, so that is the correct model and
+        splitting them is not.
         Split (T2 here, T2* on the signal side) only when a refocusing pulse
         recovers the reversible part. Neither choice reproduces a spin echo,
         whose reversible component rephases towards the echo; that needs
@@ -1678,10 +1683,10 @@ class BlochSolver:
         # K-fold expansion instead, as `operands could not be broadcast
         # together with shapes (64,1) (40,1)` -- which names neither the
         # attribute nor the node count.
-        _check_rows((('T1', T1, 1), ('T2', T2, 1), ('delta_B', delta_B, 1),
-                     ('initial_Mxy', initial_Mxy, 1),
-                     ('initial_Mz', initial_Mz, 1)),
-                    nb_nodes, f"{nb_nodes} nodes")
+        _check_rows_collectively(
+            (('T1', T1, 1), ('T2', T2, 1), ('delta_B', delta_B, 1),
+             ('initial_Mxy', initial_Mxy, 1), ('initial_Mz', initial_Mz, 1)),
+            nb_nodes, f"{nb_nodes} nodes")
 
         # Spectral sub-ensemble. Every per-node array grows K-fold through
         # np.repeat, so node n occupies rows [n*K : (n+1)*K] -- the same
@@ -1752,7 +1757,7 @@ class BlochSolver:
         # `solver.initial_Mxy = 0.0 + 0j` between solves -- the exact spelling
         # the constructor accepts -- and `np.ascontiguousarray` of a scalar is
         # a 0-d array, which pybind hands the kernel as a length-1 vector.
-        _check_rows(
+        _check_rows_collectively(
             (('x', x, 3), ('T1', T1, 1), ('T2', T2, 1),
              ('delta_B', delta_B, 1), ('Bz_old', Bz_old, None),
              ('initial_Mxy', initial_Mxy, 1), ('initial_Mz', initial_Mz, 1)),
@@ -2067,6 +2072,24 @@ def _check_rows(arrays, n_rows, detail):
         f"BlochSolver: {name} has shape {arr.shape}, expected {want} = "
         f"{detail}. Assigning a scalar or a wrongly-sized array to a public "
         f"solver attribute between solve() calls is the usual cause.")
+
+
+def _check_rows_collectively(arrays, n_rows, detail):
+  """:func:`_check_rows`, reported through the collective.
+
+  The arrays it inspects are per-LOCAL-node and reachable as public
+  attributes, so a bad one can exist on a single rank -- and ``solve()`` ends
+  in ``MPI_comm.Barrier()``. A bare raise there leaves the offending rank
+  outside that barrier while every other rank waits in it: reproduced as a
+  hang under ``mpirun -n 2`` with ``solver.delta_B`` one node short on rank 1,
+  which is the exact spelling this module's own tests use.
+  """
+  problem = ''
+  try:
+    _check_rows(arrays, n_rows, detail)
+  except ValueError as exc:
+    problem = str(exc)
+  _collective_raise(problem)
 
 
 def _collective_raise(message):

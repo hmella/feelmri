@@ -335,3 +335,73 @@ def test_the_bin_readout_survives_mpi_and_dual_partitioning(tmp_path):
     worst = float(np.abs(got - single_1).max() / scale)
     assert worst < 1e-4, (
       f'{tag} disagrees with the serial single-partition run by {worst:.2e}')
+
+
+@pytest.mark.slow
+@pytest.mark.requires_mpi
+@pytest.mark.pulseq
+@pytest.mark.timeout(240)
+def test_a_rank_asymmetric_refusal_does_not_hang(tmp_path):
+  """Two refusals that fired on SOME ranks only, both of which hung.
+
+  simulate_pulseq's row-count guard compares the remembered static fields
+  against the sub-spin offsets. Under dual partitioning the bloch and signal
+  layouts have different per-rank node counts, so the comparison is
+  rank-local: measured on a 4-cube at 6 ranks, it fired on 4 of them. Calling
+  the collective inside that branch left the other 2 walking into the
+  redistribution while 4 waited in the allgather -- all six timed out.
+
+  solve()'s length check had the same shape: it raised on the offending rank
+  while every other rank waited in solve()'s closing Barrier, and the barrier
+  counts then desynchronised so rank 0's solve() RETURNED and the deadlock
+  surfaced later somewhere unrelated.
+
+  The timeouts are the real assertion here: before the fix neither command
+  came back at all.
+  """
+  pytest.importorskip('mpi4py')
+  pytest.importorskip('pymetis')
+  pytest.importorskip('meshio')
+  pytest.importorskip('pypulseq')
+  if shutil.which('mpirun') is None:
+    pytest.skip('mpirun not on PATH')
+
+  from conftest import skip_if_pypulseq_too_old
+  from _phantom_fixtures import make_cube_mesh
+
+  env = os.environ.copy()
+  env.setdefault('OPENBLAS_NUM_THREADS', '1')
+  env.setdefault('MPLBACKEND', 'Agg')
+
+  seq_path = Path(__file__).resolve().parent / 'data' / 'cpmg_v15.seq'
+  if not seq_path.exists():
+    pytest.skip('run tests/data/generate_seq_fixtures.py')
+  skip_if_pypulseq_too_old(seq_path)
+  cube = tmp_path / 'cube.vtu'
+  make_cube_mesh(cube, 'tetra', n=4, scale=1e-3)
+
+  # 6 ranks: the count at which some ranks' two layouts happen to agree.
+  guard = subprocess.run(
+    ['mpirun', '--allow-run-as-root', '--oversubscribe', '-n', '6',
+     sys.executable, str(_PULSEQ_RUNNER), '--mesh', str(cube),
+     '--seq', str(seq_path), '--output', str(tmp_path / 'unused.npz'),
+     '--dual', '--fields-under-signal'],
+    env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=180)
+  out = guard.stdout.decode(errors='replace')
+  assert guard.returncode != 0, 'the mismatched static fields were accepted'
+  assert out.count('ValueError') >= 6, (
+    f'only some ranks reported the mismatch, so the rest never reached the '
+    f'collective that raises it:\n{out[-3000:]}')
+
+  rod = tmp_path / 'rod.vtu'
+  make_1d_rod_mesh(rod, length=0.08, n_segments=48, transverse_width=2e-4)
+  at_solve = subprocess.run(
+    ['mpirun', '--allow-run-as-root', '--oversubscribe', '-n', '2',
+     sys.executable, str(_REALISM_RUNNER), '--mesh', str(rod),
+     '--output', str(tmp_path / 'unused2.npz'), '--poison-at-solve', '1'],
+    env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=180)
+  out = at_solve.stdout.decode(errors='replace')
+  assert at_solve.returncode != 0, 'a short delta_B at solve time was accepted'
+  assert out.count('ValueError') >= 2, (
+    f'the solve-time length check raised on one rank only:\n{out[-3000:]}')
+  assert 'delta_B' in out, out[-2000:]
