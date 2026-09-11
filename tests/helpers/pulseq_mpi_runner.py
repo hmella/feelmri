@@ -31,6 +31,13 @@ def main() -> int:
   ap.add_argument('--mesh', required=True)
   ap.add_argument('--seq', required=True)
   ap.add_argument('--output', required=True)
+  ap.add_argument('--t2-prime', type=float, default=0.0,
+                  help='ms; non-zero turns on the spectral sub-ensemble, so '
+                       'the readout is evaluated once per sub-spin')
+  ap.add_argument('--spectral-bins', type=int, default=16)
+  ap.add_argument('--dual', action='store_true',
+                  help='build two partitions instead of one, so every static '
+                       'field and magnetization handoff is redistributed')
   args = ap.parse_args()
 
   from mpi4py import MPI
@@ -41,15 +48,26 @@ def main() -> int:
   rank, size = comm.Get_rank(), comm.Get_size()
 
   phantom = FEMPhantom(path=args.mesh)
-  phantom.set_assembler(voxel_size=0.0, lorder=2, horder=2,
-                        nodal_approximation=False, lumped=False)
+  if args.dual:
+    phantom.enable_dual_partition(voxel_size=0.0, lorder=2, horder=2,
+                                  nodal_approximation=False, lumped=False)
+  else:
+    phantom.set_assembler(voxel_size=0.0, lorder=2, horder=2,
+                          nodal_approximation=False, lumped=False)
+  # Under dual partitioning this is the BLOCH layout, which is what is active
+  # here and what the solver's bin offsets are indexed by.
   n = phantom.local_nodes.shape[0]
   phantom.set_static_fields(T2=np.full(n, 60.0, dtype=np.float32),
                             phi_dB0=np.zeros(n, dtype=np.float32))
 
+  extra = {}
+  if args.t2_prime > 0.0:
+    extra = dict(t2_prime=Quantity(args.t2_prime, 'ms'),
+                 spectral_bins=args.spectral_bins)
+
   sim = simulate_pulseq(args.seq, phantom, M0=1.0,
                         T1=Quantity(1e9, 'ms'), T2=Quantity(60.0, 'ms'),
-                        dtype='float64')
+                        dtype='float64', **extra)
   gathered = np.asarray(sim.kspace[0]).reshape(-1)
 
   if rank == 0:

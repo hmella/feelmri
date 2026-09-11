@@ -38,6 +38,9 @@ from pint import Quantity
 import numpy as np
 import matplotlib.pyplot as plt
 
+from contextlib import contextmanager
+
+from feelmri.Bloch import _collective_raise
 from feelmri.Bloch import ADC as feelmriADC
 from feelmri.Bloch import Sequence as feelmriSequence
 from feelmri.Bloch import SequenceBlock
@@ -2781,6 +2784,12 @@ class PulseqSimulation:
     return np.concatenate(self.times)
 
 
+@contextmanager
+def _no_layout_change():
+  """Stand-in for ``Phantom._using`` when there is only one partition."""
+  yield
+
+
 def simulate_pulseq(seq_path,
                     phantom,
                     *,
@@ -2860,9 +2869,35 @@ def simulate_pulseq(seq_path,
           "t2_prime is set but set_static_fields was never called, so the "
           "readout cannot be reproduced per sub-spin and every echo will be "
           "attenuated by the dephasing standing at its anchor")
+    elif remembered[1].shape[0] != solver.bin_offsets.shape[0]:
+      _collective_raise(
+          f"simulate_pulseq: the remembered off-resonance map has "
+          f"{remembered[1].shape[0]} rows against {solver.bin_offsets.shape[0]} "
+          f"sub-spin offsets. set_static_fields must be called under the same "
+          f"partition the solver was built on, or the two describe different "
+          f"nodes")
     else:
       bins = (solver.bin_magnetization, solver.bin_offsets,
               solver.bin_weights, remembered[0], remembered[1])
+
+  # Under dual partitioning every set_static_fields and update_magnetization is
+  # an Alltoallv into the signal layout, and the bin loop below makes three of
+  # them per sub-spin: measured on cpmg_v15 at K = 16, 4 redistributions for the
+  # whole simulation became 208. The window-independent arrays are moved once
+  # here and the per-window ensemble once below, after which the loop runs with
+  # the signal layout already active and communicates nothing.
+  dual = (bins is not None and getattr(phantom, '_dual', False)
+          and phantom._active_partition != 'signal')
+  # `bins` stays in the BLOCH layout: it is what the finally below hands back
+  # to set_static_fields, which redistributes it itself. `readout_bins` is the
+  # same data already moved, for the loop that runs inside the signal layout.
+  readout_bins = bins
+  if dual:
+    _ens, offsets, weights, T2_read, phi_read = bins
+    move = lambda a: phantom.redistribute_nodal(
+        np.ascontiguousarray(a), 'bloch', 'signal')
+    readout_bins = (_ens, move(offsets), weights, move(T2_read),
+                    move(phi_read))
 
   kspace: List[np.ndarray] = []
   times: List[np.ndarray] = []
@@ -2907,13 +2942,18 @@ def simulate_pulseq(seq_path,
         # offsets are in the same rad/ms frame as phi_dB0, so they simply add --
         # and the signals are weight-summed. Exact, and it costs n_bins passes
         # over the signal path per window.
-        bin_Mxy, offsets, weights, T2_read, phi_read = bins
+        bin_Mxy, offsets, weights, T2_read, phi_read = readout_bins
+        ensemble = bin_Mxy[:, :, rw.m_storage_idx]
+        if dual:
+          ensemble = phantom.redistribute_nodal(
+              np.ascontiguousarray(ensemble), 'bloch', 'signal')
         signal = None
-        for k, w in enumerate(weights):
-          phantom.set_static_fields(T2_read, phi_read + offsets[:, k])
-          phantom.update_magnetization(bin_Mxy[:, k, rw.m_storage_idx])
-          contribution = w * phantom.mri_signal(list(points), t, pod)
-          signal = contribution if signal is None else signal + contribution
+        with phantom._using('signal') if dual else _no_layout_change():
+          for k, w in enumerate(weights):
+            phantom.set_static_fields(T2_read, phi_read + offsets[:, k])
+            phantom.update_magnetization(ensemble[:, k])
+            contribution = w * phantom.mri_signal(list(points), t, pod)
+            signal = contribution if signal is None else signal + contribution
     finally:
       if shift is not None:
         pod.update_timeshift(shift)

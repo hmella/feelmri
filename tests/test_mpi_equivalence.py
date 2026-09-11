@@ -262,3 +262,76 @@ def test_simulate_pulseq_matches_serial_under_mpi(tmp_path):
   assert not np.any(np.load(rank1)['kspace']), (
       'gather=True must leave non-root ranks empty; rank 1 received a '
       'non-zero signal, so the reduction is not Reduce(root=0)')
+
+
+@pytest.mark.slow
+@pytest.mark.requires_mpi
+@pytest.mark.pulseq
+@pytest.mark.timeout(420)
+def test_the_bin_readout_survives_mpi_and_dual_partitioning(tmp_path):
+  """The per-sub-spin readout must give the same k-space at any rank count and
+  under either partitioning scheme.
+
+  It had no coverage of either. The bins are per-LOCAL-node arrays and the
+  readout runs on the SIGNAL layout, so under dual partitioning every
+  `set_static_fields` and `update_magnetization` inside the bin loop is an
+  Alltoallv that has to move the right rows -- and `bin_offsets` is indexed by
+  the bloch layout, which is the one the caller set the static fields in.
+  Nothing checked that those two agree.
+  """
+  pytest.importorskip('mpi4py')
+  pytest.importorskip('pymetis')
+  pytest.importorskip('meshio')
+  pytest.importorskip('pypulseq')
+  if shutil.which('mpirun') is None:
+    pytest.skip('mpirun not on PATH')
+
+  from conftest import skip_if_pypulseq_too_old
+  from _phantom_fixtures import make_cube_mesh
+
+  seq_path = Path(__file__).resolve().parent / 'data' / 'cpmg_v15.seq'
+  if not seq_path.exists():
+    pytest.skip('run tests/data/generate_seq_fixtures.py')
+  skip_if_pypulseq_too_old(seq_path)
+
+  mesh_path = tmp_path / 'cube.vtu'
+  make_cube_mesh(mesh_path, 'tetra', n=4, scale=1e-3)
+
+  env = os.environ.copy()
+  env.setdefault('OPENBLAS_NUM_THREADS', '1')
+  env.setdefault('OMP_NUM_THREADS', '1')
+  env.setdefault('MPLBACKEND', 'Agg')
+
+  def run(tag, ranks, dual):
+    out = tmp_path / f'{tag}.npz'
+    cmd = [sys.executable, str(_PULSEQ_RUNNER), '--mesh', str(mesh_path),
+           '--seq', str(seq_path), '--output', str(out),
+           '--t2-prime', '8.0', '--spectral-bins', '16']
+    if dual:
+      cmd.append('--dual')
+    if ranks > 1:
+      cmd = ['mpirun', '--allow-run-as-root', '--oversubscribe',
+             '-n', str(ranks)] + cmd
+    proc = _run(cmd, env)
+    assert proc.returncode == 0, proc.stdout.decode(errors='replace')[-4000:]
+    return np.load(out)['kspace']
+
+  single_1 = run('single_1', 1, False)
+  scale = float(np.abs(single_1).max())
+  assert scale > 0, 'the reference run produced no signal'
+
+  # One rank, two layouts: no communication happens, so this must be exact.
+  dual_1 = run('dual_1', 1, True)
+  assert np.array_equal(dual_1, single_1), (
+    'dual partitioning changed the answer at ONE rank, where it redistributes '
+    'nothing')
+
+  # Two ranks, either scheme. The assembler accumulates in float32, so a
+  # different partition sums the same terms in a different order; the
+  # no-ensemble path on this mesh reads 2.3e-5 by the same measure, so a
+  # bin-specific defect would have to hide under the ordinary noise floor.
+  for tag, dual in (('single_2', False), ('dual_2', True)):
+    got = run(tag, 2, dual)
+    worst = float(np.abs(got - single_1).max() / scale)
+    assert worst < 1e-4, (
+      f'{tag} disagrees with the serial single-partition run by {worst:.2e}')

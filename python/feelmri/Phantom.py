@@ -1266,6 +1266,12 @@ class FEMPhantom:
         should REPHASE towards the echo, and a single exponential on either
         side decays monotonically from the snapshot whatever constant it is
         given. That needs sub-voxel isochromats, not a scalar.
+
+        **With ``BlochSolver(t2_prime=...)``, pass T2 and not T2\*.** The
+        solver then carries the reversible part explicitly as a sub-ensemble
+        and ``simulate_pulseq`` replays the readout once per sub-spin, so the
+        value given here is applied on top of it: T2\* on both sides decays
+        the reversible component twice.
         """
         # Remembered so a caller can temporarily perturb them and put them
         # back -- the bin-by-bin readout in simulate_pulseq offsets phi_dB0 by
