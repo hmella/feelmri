@@ -430,6 +430,16 @@ def test_concomitant_phase_reaches_kspace(tmp_path):
   and everything left at the snapshot is concomitant. `mri_signal` has no B0
   argument and no quadratic spatial channel of its own, so this is the only
   way the term can reach a readout: carried on the magnetization.
+
+  The pair is OBLIQUE on purpose. Driven on `Gz` alone, `Bc` collapses to
+  `(Gz^2/4)(x^2 + y^2)`, which has no cross terms and is symmetric in x and y:
+  on these nodes, negating a cross term or swapping the x and y position
+  indices then changes `Bc` by exactly 0.000, so the test could not see either.
+  With `G = (14, -9, 20)` the same two mistakes change it by 41x and 37x.
+
+  The prediction is written in the FACTORED form `(Bx^2 + By^2) / (2 B0)`,
+  which the library does not use -- it expands the square -- so the check is
+  independent of the expression it is checking.
   """
   pytest.importorskip('mpi4py')
   pytest.importorskip('pymetis')
@@ -441,21 +451,23 @@ def test_concomitant_phase_reaches_kspace(tmp_path):
   scanner = Scanner()
   gamma = scanner.gamma.m_as('rad/ms/mT')
   B0_mT = scanner.field_strength.m_as('mT')
-  G, dur_ms = 20.0, 4.0
+  G, dur_ms = (14.0, -9.0, 20.0), 4.0
 
-  def lobe(amplitude):
-    gradient = Gradient(timings=Q_(np.array([0.0, dur_ms]), 'ms'),
-                        amplitudes=Q_(np.array([amplitude, amplitude]), 'mT/m'),
-                        scanner=scanner, ref=Q_(0.0, 'ms'), time=Q_(0.0, 'ms'),
-                        axis=2)
-    return SequenceBlock(gradients=[gradient], dur=Q_(dur_ms, 'ms'),
+  def lobe(sign):
+    gradients = [
+      Gradient(timings=Q_(np.array([0.0, dur_ms]), 'ms'),
+               amplitudes=Q_(np.array([sign * G[axis]] * 2), 'mT/m'),
+               scanner=scanner, ref=Q_(0.0, 'ms'), time=Q_(0.0, 'ms'),
+               axis=axis)
+      for axis in range(3)]
+    return SequenceBlock(gradients=gradients, dur=Q_(dur_ms, 'ms'),
                          dt=Q_(0.01, 'ms'), empty=False)
 
   def run(concomitant):
     phantom = _irregular_phantom(tmp_path / f'conc_{concomitant}.vtu')
     seq = Sequence()
-    seq.add_block(lobe(+G))
-    closing = lobe(-G)
+    seq.add_block(lobe(+1.0))
+    closing = lobe(-1.0)
     closing.store_magnetization = True
     seq.add_block(closing)
     Mxy, _Mz = BlochSolver(
@@ -475,11 +487,12 @@ def test_concomitant_phase_reaches_kspace(tmp_path):
 
   phantom_on, mxy_on = run(True)
   nodes = phantom_on.local_nodes.astype(np.float64)
-  # Gx = Gy = 0, so Bc collapses to (Gz^2/4)(x^2 + y^2) / (2 B0), and both
-  # lobes contribute the same amount because it goes as G^2.
-  second_moment = 2.0 * G**2 * dur_ms
-  bc_phase = -gamma * (second_moment / 4.0) * (
-      nodes[:, 0]**2 + nodes[:, 1]**2) / (2.0 * B0_mT)
+  # Both lobes contribute the same amount because Bc goes as G^2, and the
+  # amplitude is constant over each, so the time integral is just 2 * dur.
+  x, y, z = nodes[:, 0], nodes[:, 1], nodes[:, 2]
+  Bx = G[0] * z - 0.5 * G[2] * x
+  By = G[1] * z - 0.5 * G[2] * y
+  bc_phase = -gamma * (2.0 * dur_ms) * (Bx**2 + By**2) / (2.0 * B0_mT)
   predicted = complex((weights * np.exp(1j * bc_phase)).sum())
 
   got = _signal_at_dc(phantom_on, mxy_on)
