@@ -152,6 +152,59 @@ def test_rotation_extension_round_trip(adapter):
   assert exts[0].matrix.shape == (3, 3)
 
 
+def test_rotation_preserves_moments_across_unequal_timings(adapter):
+  """A rotation must transform the three gradient MOMENTS as a vector.
+
+  Integration is linear and the matrix is time-independent, so
+  `moment(rotated)[i] == (R @ moment(original))[i]` exactly, whatever the
+  three waveforms look like. That is the whole contract, and it is checkable
+  without a reference implementation.
+
+  The case that matters is unequal timings, which no bundled fixture has:
+  `rotation_minimal.seq` drives a single axis, so it cannot see this. The
+  rotated amplitudes used to inherit one donor axis's geometry, and on an
+  ordinary block -- in-plane prephasers 0.5 ms flat against a 2.0 ms
+  slice-select -- an IDENTITY matrix inflated the x and y moments by 250%.
+  """
+  import numpy as np
+  from feelmri.PulseqAdapter import _grad_corners_seconds
+
+  def moment(g):
+    t, a = _grad_corners_seconds(g)
+    return float(np.trapezoid(a, t))
+
+  theta = np.radians(30.0)
+  c, s_ = np.cos(theta), np.sin(theta)
+  rot = np.array([[c, -s_, 0.0], [s_, c, 0.0], [0.0, 0.0, 1.0]])
+
+  trap = lambda a, flat, delay=0.0: adapter.Grad(
+      A=a, T=flat, rise=0.1, fall=0.1, delay=delay, first=0.0, last=0.0)
+
+  cases = {
+    'three trapezoids, unequal flat tops':
+        (trap(5.0, 0.5), trap(3.0, 0.5), trap(20.0, 2.0)),
+    'a trapezoid mixed with a shaped gradient':
+        (trap(5.0, 0.5),
+         adapter.Grad(A=np.sin(np.linspace(0, np.pi, 64)) * 8.0, T=1.0,
+                      rise=0.05, fall=0.05, delay=0.2, first=0.0, last=0.0),
+         trap(0.0, 0.0)),
+  }
+  for name, grads in cases.items():
+    before = np.array([moment(g) for g in grads])
+    for matrix in (np.eye(3), rot):
+      after = np.array([moment(g)
+                        for g in adapter._apply_rotation_to_grads(matrix, *grads)])
+      expected = matrix @ before
+      assert np.allclose(after, expected, rtol=1e-9, atol=1e-12), (
+        f'{name}: moments {after} != R @ {before} = {expected}')
+
+  # Axes that already share timing keep the exact scalar path -- no
+  # resampling, no shaped output.
+  same = (trap(5.0, 0.5), trap(3.0, 0.5), trap(2.0, 0.5))
+  out = adapter._apply_rotation_to_grads(rot, *same)
+  assert all(not isinstance(g.A, np.ndarray) for g in out)
+
+
 # ---------------------------------------------------------------------------
 # v1.5 column-layout dispatch (RF / ADC)
 # ---------------------------------------------------------------------------
