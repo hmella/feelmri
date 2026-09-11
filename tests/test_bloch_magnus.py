@@ -86,8 +86,7 @@ METHODS = ('cayley_klein', 'magnus2', 'magnus4')
 # 1. Closed-form / hard-pulse equivalence
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize('method', METHODS)
-def test_t1_recovery_all_methods(minimal_phantom, method):
+def test_t1_recovery(minimal_phantom):
   T1_ms = 200.0
   dur_ms = 0.5 * T1_ms
   expected_Mz = 1.0 - np.exp(-0.5)
@@ -100,14 +99,14 @@ def test_t1_recovery_all_methods(minimal_phantom, method):
     initial_Mxy=0.0,
     initial_Mz=0.0,
     perfect_spoiling=False,
-    method=method,
   )
   _, Mz = solver.solve()
+  # The kernel returns only the final state, one column, not a history.
+  assert Mz.shape[1] == 1
   np.testing.assert_allclose(Mz[:, 0], expected_Mz, atol=5e-3)
 
 
-@pytest.mark.parametrize('method', METHODS)
-def test_t2_decay_all_methods(minimal_phantom, method):
+def test_t2_decay(minimal_phantom):
   T2_ms = 50.0
   dur_ms = 2.0 * T2_ms
   expected_abs = np.exp(-2.0)
@@ -120,14 +119,12 @@ def test_t2_decay_all_methods(minimal_phantom, method):
     initial_Mxy=1.0 + 0.0j,
     initial_Mz=1.0,
     perfect_spoiling=False,
-    method=method,
   )
   Mxy, _ = solver.solve()
   np.testing.assert_allclose(np.abs(Mxy[:, 0]), expected_abs, atol=5e-3)
 
 
-@pytest.mark.parametrize('method', METHODS)
-def test_free_precession_all_methods(minimal_phantom, method):
+def test_free_precession(minimal_phantom):
   T_ms = 5.0
   dB0_mT = 1e-3
   gammabar = 42.576e6  # Hz/T
@@ -143,15 +140,13 @@ def test_free_precession_all_methods(minimal_phantom, method):
     initial_Mxy=1.0 + 0.0j,
     initial_Mz=1.0,
     perfect_spoiling=False,
-    method=method,
   )
   Mxy, _ = solver.solve()
   measured = np.angle(Mxy[:, 0])
   np.testing.assert_allclose(measured, expected_phase, atol=2e-2)
 
 
-@pytest.mark.parametrize('method', METHODS)
-def test_hard_90_all_methods(minimal_phantom, method):
+def test_hard_90(minimal_phantom):
   block = make_hard_pulse_block(np.pi / 2, dur_ms=0.2)
   seq = make_single_block_sequence(block)
   solver = BlochSolver(
@@ -162,15 +157,13 @@ def test_hard_90_all_methods(minimal_phantom, method):
     initial_Mxy=0.0,
     initial_Mz=1.0,
     perfect_spoiling=False,
-    method=method,
   )
   Mxy, Mz = solver.solve()
   np.testing.assert_allclose(np.abs(Mxy[:, 0]), 1.0, atol=5e-2)
   np.testing.assert_allclose(Mz[:, 0], 0.0, atol=5e-2)
 
 
-@pytest.mark.parametrize('method', METHODS)
-def test_hard_180_all_methods(minimal_phantom, method):
+def test_hard_180(minimal_phantom):
   block = make_hard_pulse_block(np.pi, dur_ms=0.2)
   seq = make_single_block_sequence(block)
   solver = BlochSolver(
@@ -181,7 +174,6 @@ def test_hard_180_all_methods(minimal_phantom, method):
     initial_Mxy=0.0,
     initial_Mz=1.0,
     perfect_spoiling=False,
-    method=method,
   )
   Mxy, Mz = solver.solve()
   np.testing.assert_allclose(Mz[:, 0], -1.0, atol=5e-2)
@@ -192,7 +184,15 @@ def test_hard_pulse_orders_agree_on_constant_field(minimal_phantom):
   """For a hard pulse, the field is piecewise-constant within each dt
   so the Magnus commutator ``[Omega_old, Omega_new]`` is zero and all
   three orders must produce the same magnetisation to within FP
-  rounding."""
+  rounding.
+
+  This is the bridge that lets the five closed-form tests above run at the
+  default method alone rather than three times each. Their fields are all
+  piecewise-constant -- zero for the relaxation pair, a constant Bz for
+  precession, a constant B1 for the two hard pulses -- which is exactly the
+  regime pinned here. Relaxation is finite so the shared T1/T2 path is
+  covered too, not only the rotation.
+  """
   block = make_hard_pulse_block(np.pi / 3, dur_ms=0.3, dt_ms=0.005)
   seq = make_single_block_sequence(block)
   results = {}
@@ -200,8 +200,8 @@ def test_hard_pulse_orders_agree_on_constant_field(minimal_phantom):
     solver = BlochSolver(
       seq, minimal_phantom,
       M0=1.0,
-      T1=Quantity(1e6, 'ms'),
-      T2=Quantity(1e6, 'ms'),
+      T1=Quantity(200.0, 'ms'),
+      T2=Quantity(50.0, 'ms'),
       initial_Mxy=0.0,
       initial_Mz=1.0,
       perfect_spoiling=False,

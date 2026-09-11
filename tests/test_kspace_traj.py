@@ -42,24 +42,12 @@ def test_cartesian_stack_shapes(fov, scanner):
   assert traj.ph_samples == res[1]
   assert traj.slices == res[2]
 
-
-def test_cartesian_stack_kx_monotone_within_line(fov, scanner):
-  traj = CartesianStack(FOV=fov, res=np.array([16, 16, 1]),
-                        oversampling=1, lines_per_shot=1, scanner=scanner)
-  kx = traj.points[0]
-  # Each (line, slice) column should be monotone increasing in the readout.
-  diffs = np.diff(kx, axis=0)
-  assert np.all(diffs >= -1e-6), f'kx not non-decreasing: min={diffs.min()}'
-
-
-def test_cartesian_stack_times_are_non_decreasing(fov, scanner):
-  traj = CartesianStack(FOV=fov, res=np.array([16, 16, 1]),
-                        oversampling=1, lines_per_shot=1, scanner=scanner)
-  t = traj.times.m_as('ms')
-  diffs = np.diff(t, axis=0)
-  assert np.all(diffs >= -1e-6), f't not non-decreasing: min={diffs.min()}'
-
-
+  # Both readout axes advance monotonically within a line: kx because the
+  # readout gradient has one sign, t because it is a clock. The two used to be
+  # separate tests, each rebuilding the trajectory for one np.diff.
+  for arr, what in ((traj.points[0], 'kx'), (traj.times.m_as('ms'), 't')):
+    diffs = np.diff(arr, axis=0)
+    assert np.all(diffs >= -1e-6), f'{what} not non-decreasing: min={diffs.min()}' 
 # ---------------------------------------------------------------------------
 # RadialStack
 # ---------------------------------------------------------------------------

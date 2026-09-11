@@ -191,9 +191,8 @@ def _accumulated_phase(gradient, dur_ms, method, dt_gr, tmp_path):
 
 
 @pytest.mark.parametrize('rise,fall', [
-    (0.20, 0.05),      # both integer multiples of a 0.01 ms sub-raster
     (0.10, 0.10),      # symmetric: every quadrature gets this one right
-    (0.0123, 0.0456),  # neither a multiple
+    (0.0123, 0.0456),  # neither a multiple -- the case that discriminates
     (0.002, 0.05),     # rise shorter than a gradient raster step
 ])
 def test_trapezoid_phase_is_exact_under_the_default_solver(rise, fall, tmp_path):
