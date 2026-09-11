@@ -957,6 +957,18 @@ class BlochSolver:
     delta_B : np.ndarray or float, optional
         Static B0 inhomogeneity field (nodal or scalar, in mT).
         Default is 0.0.
+    b1_map : np.ndarray or complex or None, optional
+        Transmit (B1+) sensitivity, one complex scale per local node: the RF
+        each node actually sees is ``b1_map * rf``. ``1.0`` everywhere is the
+        nominal field, ``0.8`` a node receiving 80% of the nominal flip, and a
+        complex value adds a transmit phase. ``None`` (the default) is the off
+        switch and hands the kernel an EMPTY map, which is not the same as a
+        map of ones: a map of ones would still cost a complex load per node per
+        time step.
+
+        This is the TRANSMIT side only. Receive sensitivity is a signal-side
+        quantity and belongs on the assembler's ``nv`` coil axis, which this
+        does not touch.
     pod_trajectory : POD or None, optional
         Motion trajectory for moving-phantom simulations. Default is None.
     initial_Mxy : np.ndarray or float, optional
@@ -983,6 +995,7 @@ class BlochSolver:
                  T1: Quantity = Quantity(1000.0, 'ms'),
                  T2: Quantity = Quantity(100.0, 'ms'),
                  delta_B: np.ndarray | float = 0.0,
+                 b1_map: np.ndarray | complex | None = None,
                  pod_trajectory: POD | None = None,
                  initial_Mxy: np.ndarray | float = 0.0,
                  initial_Mz: np.ndarray | float = None,
@@ -1023,6 +1036,27 @@ class BlochSolver:
         self.T1 = Quantity(T1.m * ones, T1.units)
         self.T2 = Quantity(T2.m * ones, T2.units)
         self.delta_B = delta_B * ones
+        # Transmit sensitivity. Stored as a complex vector of local-node
+        # length, or None. It is applied at USE TIME inside the kernel rather
+        # than folded into rf_all, which keeps the carried Magnus state
+        # (rf_old) a scalar and every unpack site unchanged -- b1 is
+        # time-invariant, so scaling both trapezoid endpoints is identical to
+        # scaling the pulse.
+        # Accept a scalar, (n,) or (n, 1) and normalise to (n,). Deliberately
+        # NOT the `value * ones` idiom used above: `ones` is (n, 1), so an (n,)
+        # map would broadcast to (n, n) instead of raising.
+        if b1_map is None:
+            self.b1_map = None
+        else:
+            b1 = np.asarray(b1_map, dtype=self._np_cplx).reshape(-1)
+            n_local = ones.shape[0]
+            if b1.size == 1:
+                b1 = np.full(n_local, b1[0], dtype=self._np_cplx)
+            elif b1.size != n_local:
+                raise ValueError(
+                    f"BlochSolver: b1_map must be a scalar or have one entry "
+                    f"per local node ({n_local}); got {b1.size}")
+            self.b1_map = np.ascontiguousarray(b1)
         self.initial_Mxy = initial_Mxy * ones.astype(self._np_cplx)
         self.initial_Mz = initial_Mz * ones if initial_Mz is not None else M0 * ones
         self.pod_trajectory = pod_trajectory
@@ -1157,6 +1191,9 @@ class BlochSolver:
         T1 = np.ascontiguousarray(self.T1.m_as('ms'), dtype=self._np_real)
         T2 = np.ascontiguousarray(self.T2.m_as('ms'), dtype=self._np_real)
         delta_B = np.ascontiguousarray(self.delta_B, dtype=self._np_real)
+        # Empty means "no map"; the kernel branches on size, not on content.
+        b1_map = (np.empty(0, dtype=self._np_cplx) if self.b1_map is None
+                  else np.ascontiguousarray(self.b1_map, dtype=self._np_cplx))
         initial_Mxy = np.ascontiguousarray(self.initial_Mxy, dtype=self._np_cplx)
         initial_Mz = np.ascontiguousarray(self.initial_Mz, dtype=self._np_real)
         Bz_old = np.ascontiguousarray(self._Bz_old, dtype=self._np_real).reshape(-1)
@@ -1310,6 +1347,12 @@ class BlochSolver:
                     Bz_old_big = np.ascontiguousarray(
                         np.repeat(Bz_old, K, axis=0), dtype=self._np_real)
 
+                # b1 is a property of the NODE, so all K isochromats drawn
+                # inside one node share it. Same consecutive-duplicate ordering
+                # create_multi_isochromats uses for every other per-node array.
+                b1_big = (b1_map if b1_map.size == 0
+                          else np.ascontiguousarray(np.repeat(b1_map, K, axis=0)))
+
                 # Solve for the expanded mesh
                 t_call = time.perf_counter()
                 Mxy_hist, Mz_hist, Bz_old_big_out, rf_old_out = solve_kernel(
@@ -1317,7 +1360,7 @@ class BlochSolver:
                     rf_pulses, gradients, dt, regime_idx, Mxy_big, Mz_big,
                     modes_big, weights, has_traj,
                     self._order, Bz_old_big, rf_old,
-                    False, self._B0_mT,
+                    False, self._B0_mT, b1_big,
                 )
                 self.bloch_elapsed += time.perf_counter() - t_call
 
@@ -1349,7 +1392,7 @@ class BlochSolver:
                     initial_Mxy, initial_Mz,
                     modes, weights, has_traj,
                     self._order, Bz_old, rf_old,
-                    False, self._B0_mT,
+                    False, self._B0_mT, b1_map,
                 )
                 self.bloch_elapsed += time.perf_counter() - t_call
 

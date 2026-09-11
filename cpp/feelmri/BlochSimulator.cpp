@@ -63,7 +63,8 @@ MagnetizationState<T> solve_mri_impl(
   Eigen::Ref<const Matrix<T, Dynamic, 1>> Bz_old_init,
   std::complex<T> rf_old_init,
   bool store_history,
-  const T &B0
+  const T &B0,
+  Eigen::Ref<const Matrix<std::complex<T>, Dynamic, 1>> b1_map
 ){
   // The caller's rf!=0 mask is redundant: the kernel derives the rf-free
   // condition from rf_all itself, so a stale or wrong mask cannot corrupt
@@ -78,6 +79,16 @@ MagnetizationState<T> solve_mri_impl(
   // Loop-invariant: zero disables the concomitant term exactly.
   const bool concomitant = (B0 > T(0));
   const T inv_2B0 = concomitant ? T(1) / (T(2) * B0) : T(0);
+
+  // Transmit (B1+) sensitivity, one complex scale per node. An EMPTY map is
+  // the off switch, not a map of ones: a map of ones would still cost a
+  // complex load per node per time step, which is ~20% more traffic through
+  // the node loop's working set.
+  const bool has_b1 = (b1_map.size() != 0);
+  if (has_b1 && b1_map.size() != n_pos) {
+    throw std::invalid_argument(
+        "solve_mri: b1_map must be empty or have one entry per node");
+  }
 
   const int n_out = store_history ? n_time : 1;
 
@@ -189,8 +200,21 @@ MagnetizationState<T> solve_mri_impl(
         ? (rf_new == C(0))
         : (rf_new == C(0) && rf_old == C(0));
 
-    auto advance_nodes = [&]<bool RfFree, bool Conc>() {
+    auto advance_nodes = [&]<bool RfFree, bool Conc, bool B1>() {
       for (int p = 0; p < n_pos; ++p) {
+
+        // Transmit field seen by THIS node. b1 is time-invariant, so
+        // scaling both trapezoid endpoints is identical to scaling the
+        // assembled rotation -- and doing it here means the order-4 terms
+        // pick up the right power automatically: theta_xy is linear in RF
+        // and takes b1, theta_z's commutator is bilinear and takes |b1|^2.
+        // Scaling an assembled term once by b1 would get the second wrong.
+        C rf_n = rf_new, rf_o = rf_old;
+        if constexpr (B1) {
+          const C b1p = b1_map(p);
+          rf_n = b1p * rf_new;
+          rf_o = b1p * rf_old;
+        }
 
         // Concomitant (Maxwell) term. The gradient coil cannot produce a
         // purely linear Bz: Maxwell's equations force a second-order
@@ -226,7 +250,7 @@ MagnetizationState<T> solve_mri_impl(
           if constexpr (RfFree) {
             Bnorm = std::abs(Bz_new);          // == sqrt(Bz^2 + 0)
           } else {
-            Bnorm = std::sqrt(Bz_new*Bz_new + std::norm(rf_new));
+            Bnorm = std::sqrt(Bz_new*Bz_new + std::norm(rf_n));
           }
           if (Bnorm < T(1e-12)) Bnorm = T(1e-12);
           const T nz = Bz_new / Bnorm;
@@ -237,7 +261,7 @@ MagnetizationState<T> solve_mri_impl(
           if constexpr (RfFree) {
             beta_p = C(0);
           } else {
-            const C nxy = rf_new / Bnorm;
+            const C nxy = rf_n / Bnorm;
             beta_p = -i1 * nxy * s;
           }
         } else {
@@ -245,7 +269,7 @@ MagnetizationState<T> solve_mri_impl(
           const T Bz_o = Bz_old(p);
 
           // Order-2 trapezoidal terms.
-          C theta_xy = m2_scale * (rf_old + rf_new);
+          C theta_xy = m2_scale * (rf_o + rf_n);
           T theta_z  = m2_scale * (Bz_o + Bz_new);
 
           if constexpr (Order == 4) {
@@ -253,8 +277,8 @@ MagnetizationState<T> solve_mri_impl(
             // sign squares away in the bilinear cross product. Both RF
             // endpoints are zero on the RfFree path, so the whole term drops.
             if constexpr (!RfFree) {
-              theta_xy -= i1 * m4_scale * (rf_new * Bz_o - rf_old * Bz_new);
-              theta_z  -= m4_scale * std::imag(std::conj(rf_old) * rf_new);
+              theta_xy -= i1 * m4_scale * (rf_n * Bz_o - rf_o * Bz_new);
+              theta_z  -= m4_scale * std::imag(std::conj(rf_o) * rf_n);
             }
           }
 
@@ -334,12 +358,25 @@ MagnetizationState<T> solve_mri_impl(
     // emitted at all rather than computed and multiplied by zero. That matters
     // because the term is off by default and this box cannot resolve a ~5%
     // kernel effect from a single run anyway.
+    //
+    // `has_b1` is invariant over the whole solve and joins the same hoist: the
+    // rf-free condition survives it unchanged, since b1 * 0 == 0.
     if (rf_free) {
-      if (concomitant) { advance_nodes.template operator()<true, true>(); }
-      else             { advance_nodes.template operator()<true, false>(); }
+      if (concomitant) {
+        if (has_b1) { advance_nodes.template operator()<true, true, true>(); }
+        else        { advance_nodes.template operator()<true, true, false>(); }
+      } else {
+        if (has_b1) { advance_nodes.template operator()<true, false, true>(); }
+        else        { advance_nodes.template operator()<true, false, false>(); }
+      }
     } else {
-      if (concomitant) { advance_nodes.template operator()<false, true>(); }
-      else             { advance_nodes.template operator()<false, false>(); }
+      if (concomitant) {
+        if (has_b1) { advance_nodes.template operator()<false, true, true>(); }
+        else        { advance_nodes.template operator()<false, true, false>(); }
+      } else {
+        if (has_b1) { advance_nodes.template operator()<false, false, true>(); }
+        else        { advance_nodes.template operator()<false, false, false>(); }
+      }
     }
 
     if constexpr (Order > 0) {
@@ -382,7 +419,8 @@ MagnetizationState<T> solve_mri_dispatch(
   Eigen::Ref<const Matrix<T, Dynamic, 1>> Bz_old_init,
   std::complex<T> rf_old_init,
   bool store_history,
-  const T &B0
+  const T &B0,
+  Eigen::Ref<const Matrix<std::complex<T>, Dynamic, 1>> b1_map
 ){
   // Constant T1/T2 across nodes is the common case (phantoms built from scalar
   // relaxation times); it lets the relaxation exponentials stay in registers.
@@ -395,7 +433,7 @@ MagnetizationState<T> solve_mri_dispatch(
     return solve_mri_impl<T, ORDER, UNIFORM>(                                  \
         r0, T1, T2, delta_B, M0, gamma, rf_all, G_all, dt, regime_idx,         \
         Mxy_initial, Mz_initial, modes, weights,                               \
-        has_traj, Bz_old_init, rf_old_init, store_history, B0)
+        has_traj, Bz_old_init, rf_old_init, store_history, B0, b1_map)
 
   switch (order) {
     case 0:
@@ -440,12 +478,13 @@ PYBIND11_MODULE(BlochSimulator, m) {
        CVec_f32 Mxy_initial, Vec_f32 Mz_initial,
        Modes_f32 modes, MatDyn_f32 weights, bool has_traj,
        int order, Vec_f32 Bz_old_init, std::complex<f32> rf_old_init,
-       bool store_history, const f32 &B0) {
+       bool store_history, const f32 &B0, CVec_f32 b1_map) {
       return solve_mri_dispatch<f32>(order, r0, T1, T2, delta_B, M0, gamma,
                                      rf_all, G_all, dt, regime_idx,
                                      Mxy_initial, Mz_initial,
                                      modes, weights, has_traj,
-                                     Bz_old_init, rf_old_init, store_history, B0);
+                                     Bz_old_init, rf_old_init, store_history, B0,
+                                     b1_map);
     },
     py::arg("r0"), py::arg("T1"), py::arg("T2"), py::arg("delta_B"),
     py::arg("M0"), py::arg("gamma"), py::arg("rf_all"), py::arg("G_all"),
@@ -454,7 +493,9 @@ PYBIND11_MODULE(BlochSimulator, m) {
     py::arg("has_traj"),
     py::arg("order"), py::arg("Bz_old_init"), py::arg("rf_old_init"),
     py::arg("store_history") = false,
-    py::arg("B0") = 0.0);
+    py::arg("B0") = 0.0,
+    // Empty by default: an absent map, not a map of ones.
+    py::arg("b1_map") = Matrix<std::complex<f32>, Dynamic, 1>());
 
   m.def("solve_mri_f64",
     [](R0_f64 r0, Vec_f64 T1, Vec_f64 T2, Vec_f64 delta_B,
@@ -463,12 +504,13 @@ PYBIND11_MODULE(BlochSimulator, m) {
        CVec_f64 Mxy_initial, Vec_f64 Mz_initial,
        Modes_f64 modes, MatDyn_f64 weights, bool has_traj,
        int order, Vec_f64 Bz_old_init, std::complex<f64> rf_old_init,
-       bool store_history, const f64 &B0) {
+       bool store_history, const f64 &B0, CVec_f64 b1_map) {
       return solve_mri_dispatch<f64>(order, r0, T1, T2, delta_B, M0, gamma,
                                      rf_all, G_all, dt, regime_idx,
                                      Mxy_initial, Mz_initial,
                                      modes, weights, has_traj,
-                                     Bz_old_init, rf_old_init, store_history, B0);
+                                     Bz_old_init, rf_old_init, store_history, B0,
+                                     b1_map);
     },
     py::arg("r0"), py::arg("T1"), py::arg("T2"), py::arg("delta_B"),
     py::arg("M0"), py::arg("gamma"), py::arg("rf_all"), py::arg("G_all"),
@@ -477,5 +519,7 @@ PYBIND11_MODULE(BlochSimulator, m) {
     py::arg("has_traj"),
     py::arg("order"), py::arg("Bz_old_init"), py::arg("rf_old_init"),
     py::arg("store_history") = false,
-    py::arg("B0") = 0.0);
+    py::arg("B0") = 0.0,
+    // Empty by default: an absent map, not a map of ones.
+    py::arg("b1_map") = Matrix<std::complex<f64>, Dynamic, 1>());
 }
