@@ -547,3 +547,66 @@ def test_a_b1_map_reaches_kspace_node_by_node(tmp_path):
       nominal * (weights * np.sin(b1[::-1] * np.pi / 2)).sum() / weights.sum())
   assert abs(permuted - predicted) > 1e-2 * scale, (
     'reversing the map changes nothing here, so the test cannot localise it')
+
+
+def test_a_zero_or_non_finite_static_field_is_refused(tmp_path):
+  """`T2 = 0` inverts to Inf, and `exp(-t*Inf)` is NaN even at `t = 0`, so ONE
+  bad node used to turn EVERY k-space sample into NaN -- not just its own
+  contribution. Nothing rejected it on either side of the boundary.
+
+  A negative T2 is the worse case: it is finite, so there is no NaN to notice
+  and the signal simply GROWS. Measured before the guard, one negative node of
+  125 moved S(5 ms) from 5.888e-08 to 5.920e-08.
+
+  The check cannot be `std::isnan` on the C++ side: the build is -Ofast, which
+  implies -ffinite-math-only and folds that to false. It goes through the same
+  IEEE bit-pattern helper the b1_map guard uses, now shared in `Numeric.h`.
+
+  An INFINITE T2 is not an error -- it inverts to exactly zero and is the
+  idiomatic way to switch relaxation off, which several tests here rely on.
+  """
+  pytest.importorskip('mpi4py')
+  pytest.importorskip('pymetis')
+  pytest.importorskip('meshio')
+  from _phantom_fixtures import make_cube_mesh
+
+  path, _volume = make_cube_mesh(tmp_path / 'cube.vtu', 'tetra', n=2,
+                                 scale=2e-3)
+  phantom = FEMPhantom(path=str(path))
+  phantom.set_assembler(voxel_size=0.0, lorder=2, horder=4,
+                        nodal_approximation=False, lumped=False)
+  n = phantom.local_nodes.shape[0]
+  good_phi = np.zeros(n, dtype=np.float32)
+
+  def t2_with(first):
+    out = np.full(n, 60.0, dtype=np.float32)
+    out[0] = first
+    return out
+
+  for bad in (0.0, -60.0, np.nan):
+    with pytest.raises(ValueError, match='T2'):
+      phantom.set_static_fields(T2=t2_with(bad), phi_dB0=good_phi)
+  for bad in (np.nan, np.inf):
+    poisoned = np.zeros(n, dtype=np.float32)
+    poisoned[0] = bad
+    with pytest.raises(ValueError, match='phi_dB0'):
+      phantom.set_static_fields(T2=np.full(n, 60.0, dtype=np.float32),
+                                phi_dB0=poisoned)
+
+  # The C++ side refuses it too, reached directly so the Python check cannot
+  # be what fires -- the same arrangement the b1_map guard's test uses.
+  for assembler in phantom.assembler:
+    with pytest.raises(Exception, match='T2'):
+      assembler.set_static_fields(t2_with(0.0), good_phi)
+
+  # An infinite T2 is legitimate: no relaxation, so the signal does not decay.
+  phantom.set_static_fields(T2=np.full(n, np.inf, dtype=np.float32),
+                            phi_dB0=good_phi)
+  phantom.update_magnetization(np.ones(n, dtype=np.complex64))
+  zero = np.zeros((1, 1, 1), dtype=np.float32)
+  def at(t_ms):
+    t = np.full((1, 1, 1), t_ms, dtype=np.float32)
+    return abs(complex(np.asarray(phantom.mri_signal(
+        (zero.copy(), zero.copy(), zero.copy()), t, None)).ravel()[0]))
+  assert abs(at(5.0) - at(0.0)) < 1e-6 * at(0.0), (
+    'an infinite T2 should switch relaxation off, not decay')

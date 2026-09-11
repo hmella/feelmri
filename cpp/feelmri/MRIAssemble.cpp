@@ -1,7 +1,10 @@
 #include <vector>
 #include <complex>
 #include <cmath>
+#include <stdexcept>
+#include <string>
 #include <FEUtils.h>
+#include <Numeric.h>
 #include <Eigen/Sparse>
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
@@ -107,6 +110,33 @@ public:
         const Eigen::Array<T, Eigen::Dynamic, 1>& T2,
         const Eigen::Array<T, Eigen::Dynamic, 1>& phi_dB0)
     {
+        // A T2 of zero inverts to Inf and exp(-t*Inf) is NaN even at t = 0,
+        // so ONE bad node poisons every k-space sample rather than its own
+        // contribution -- silently, since the build is -ffinite-math-only and
+        // nothing downstream can test for it. A negative T2 is worse: it is
+        // finite, so it produces a plausible GROWING signal. Checked here and
+        // in Phantom.set_static_fields, the same pairing the row-count guard
+        // uses. feelmri_is_finite is the only test that survives the flag.
+        if (T2.size() != phi_dB0.size())
+            throw std::invalid_argument(
+                "set_static_fields: T2 has " + std::to_string(T2.size()) +
+                " entries and phi_dB0 has " + std::to_string(phi_dB0.size()) +
+                "; they describe the same nodes and must agree.");
+        for (Eigen::Index i = 0; i < T2.size(); ++i)
+        {
+            if (!feelmri_is_positive(T2(i)))
+                throw std::invalid_argument(
+                    "set_static_fields: every T2 must be positive; entry " +
+                    std::to_string(i) + " is " + std::to_string(T2(i)) +
+                    ". Zero inverts to Inf and turns the whole signal into "
+                    "NaN even at t = 0; a negative value makes it grow. An "
+                    "INFINITE T2 is fine and means no relaxation.");
+            if (!feelmri_is_finite(phi_dB0(i)))
+                throw std::invalid_argument(
+                    "set_static_fields: phi_dB0 entry " + std::to_string(i) +
+                    " is not finite, which turns every k-space sample into NaN.");
+        }
+
         // Precompute inverse T2 for faster exponential calculations later
         Eigen::Array<T, Eigen::Dynamic, 1> inv_T2 = T2.inverse();
         const int nne = elems_.cols();

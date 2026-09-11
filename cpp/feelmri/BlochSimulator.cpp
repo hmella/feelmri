@@ -1,4 +1,5 @@
 #include "BlochSimulator.h"
+#include "Numeric.h"
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 #include <pybind11/complex.h>
@@ -47,24 +48,6 @@ using MagnetizationState = std::tuple<
 // apodized-sinc raster is not uniform in dt: the free-running imaging block has
 // 142 distinct dt values over 294 steps, so the naive path re-exponentiates
 // every node on two thirds of all steps.
-// Finiteness test that survives -ffinite-math-only (implied by the default
-// -Ofast build), under which `v != v` and std::isnan are folded away. Reads the
-// IEEE exponent field from the object representation: all ones means Inf or
-// NaN. memcpy is the standard-blessed spelling and compiles to a register move.
-template <typename T>
-inline bool feelmri_is_finite(T value) {
-  static_assert(std::numeric_limits<T>::is_iec559,
-                "feelmri_is_finite assumes IEEE 754 binary32/binary64");
-  using Bits = typename std::conditional<sizeof(T) == 4,
-                                         std::uint32_t, std::uint64_t>::type;
-  static_assert(sizeof(Bits) == sizeof(T), "unexpected floating-point width");
-  Bits bits;
-  std::memcpy(&bits, &value, sizeof(T));
-  const Bits exponent = (sizeof(T) == 4)
-      ? Bits(0x7F800000u) : Bits(0x7FF0000000000000ull);
-  return (bits & exponent) != exponent;
-}
-
 template <typename T, int Order, bool UniformRelax>
 MagnetizationState<T> solve_mri_impl(
   Eigen::Ref<const Matrix<T, Dynamic, 3, RowMajor>> r0,

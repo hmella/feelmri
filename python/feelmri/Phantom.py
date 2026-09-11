@@ -1273,6 +1273,35 @@ class FEMPhantom:
         value given here is applied on top of it: T2\* on both sides decays
         the reversible component twice.
         """
+        # Checked BEFORE the redistribution below, so a bad value is refused
+        # without first paying an Alltoallv, and with a message naming the
+        # entry. The assembler checks again on its own side -- same pairing as
+        # the row-count guard. A T2 of zero inverts to Inf and exp(-t*Inf) is
+        # NaN even at t = 0, so one bad node turns EVERY k-space sample into
+        # NaN rather than spoiling its own contribution; a negative T2 is
+        # finite and merely produces a plausible growing signal. An infinite
+        # T2 is legitimate and means no relaxation.
+        T2_arr = np.asarray(T2)
+        phi_arr = np.asarray(phi_dB0)
+        if T2_arr.shape != phi_arr.shape:
+            raise ValueError(
+                f"set_static_fields: T2 has shape {T2_arr.shape} and phi_dB0 "
+                f"{phi_arr.shape}; they describe the same nodes.")
+        bad = ~(T2_arr > 0.0) | np.isnan(T2_arr)
+        if bad.any():
+            first = int(np.flatnonzero(bad.reshape(-1))[0])
+            raise ValueError(
+                f"set_static_fields: every T2 must be positive; entry {first} "
+                f"is {T2_arr.reshape(-1)[first]}. Zero inverts to Inf and "
+                f"turns the whole signal into NaN even at t = 0. An infinite "
+                f"T2 is fine and means no relaxation.")
+        if not np.all(np.isfinite(phi_arr)):
+            first = int(np.flatnonzero(~np.isfinite(phi_arr.reshape(-1)))[0])
+            raise ValueError(
+                f"set_static_fields: phi_dB0 entry {first} is "
+                f"{phi_arr.reshape(-1)[first]}, which turns every k-space "
+                f"sample into NaN.")
+
         # Remembered so a caller can temporarily perturb them and put them
         # back -- the bin-by-bin readout in simulate_pulseq offsets phi_dB0 by
         # each sub-spin's own frequency and restores this afterwards. Stored
