@@ -697,13 +697,26 @@ def test_finite_bin_sets_revive_and_the_sizing_rule_holds():
 @pytest.fixture(scope='module')
 def wide_phantom(tmp_path_factory):
   """A phantom spread over ~12 cm, so a term quadratic in position is
-  measurable. `minimal_phantom` spans 1 cm, where it is not."""
+  measurable -- `minimal_phantom` spans 1 cm, where it is not -- and with every
+  node at DISTINCT x, y and z.
+
+  The distinctness matters. `make_minimal_tet_mesh` puts four of its five nodes
+  on the axes and the fifth at (s, s, s), so `x*z` and `y*z` are equal at every
+  node: an x-vs-y position-index swap in the concomitant cross terms would be
+  invisible. These coordinates are mutually incommensurate instead.
+  """
   pytest.importorskip('mpi4py')
   pytest.importorskip('pymetis')
   pytest.importorskip('meshio')
-  mesh_dir = tmp_path_factory.mktemp('magnus_wide')
-  mesh_path = mesh_dir / 'wide.vtu'
-  make_minimal_tet_mesh(mesh_path, scale=0.12)
+  import meshio as _meshio
+  mesh_path = tmp_path_factory.mktemp('magnus_wide') / 'wide.vtu'
+  points = np.array([[0.11, -0.03, 0.07],
+                     [-0.05, 0.12, 0.02],
+                     [0.04, 0.06, -0.10],
+                     [-0.09, -0.08, 0.05],
+                     [0.02, -0.11, -0.06]])
+  cells = np.array([[0, 1, 2, 3], [1, 2, 3, 4]])
+  _meshio.write(str(mesh_path), _meshio.Mesh(points, [('tetra', cells)]))
   return FEMPhantom(path=str(mesh_path))
 
 
@@ -733,12 +746,12 @@ def _concomitant_field_mT(positions, G, B0_mT):
   return (Bx**2 + By**2) / (2.0 * B0_mT)
 
 
-def _precess(phantom, block, dtype='float64', **solver_kwargs):
+def _precess(phantom, block, dtype='float64', method='magnus2', **solver_kwargs):
   seq = make_single_block_sequence(block)
   solver = BlochSolver(
     seq, phantom, T1=Quantity(1e9, 'ms'), T2=Quantity(1e9, 'ms'),
     initial_Mxy=1.0 + 0.0j, initial_Mz=0.0, perfect_spoiling=False,
-    dtype=dtype, **solver_kwargs)
+    dtype=dtype, method=method, **solver_kwargs)
   Mxy, _ = solver.solve()
   return Mxy[:, 0]
 
@@ -760,36 +773,55 @@ def test_concomitant_phase_matches_the_maxwell_closed_form(wide_phantom, G):
   B0_mT = scanner.field_strength.m_as('mT')
   gamma = scanner.gamma.m_as('rad/ms/mT')
 
-  block = _gradient_block(G, dur_ms)
-  off = _precess(wide_phantom, block, concomitant_fields=False)
-  on = _precess(wide_phantom, block, concomitant_fields=True)
-
   nodes = wide_phantom.local_nodes.astype(np.float64)
   expected = -gamma * _concomitant_field_mT(nodes, G, B0_mT) * dur_ms
-  # Compared as unit phasors, so the check cannot be fooled by 2*pi wrapping.
-  worst = float(np.abs(np.exp(1j * np.angle(on / off))
-                       - np.exp(1j * expected)).max())
-  assert worst < 1e-5, f'concomitant phase departs from the closed form by {worst:.2e}'
+  block = _gradient_block(G, dur_ms)
+  # All three integrators: order 0 skips the Python Magnus seed entirely, so a
+  # seed that disagreed with the kernel would show up only here.
+  for method in ('cayley_klein', 'magnus2', 'magnus4'):
+    off = _precess(wide_phantom, block, method=method, concomitant_fields=False)
+    on = _precess(wide_phantom, block, method=method, concomitant_fields=True)
+    # Compared as unit phasors, so the check cannot be fooled by 2*pi wrapping.
+    worst = float(np.abs(np.exp(1j * np.angle(on / off))
+                         - np.exp(1j * expected)).max())
+    assert worst < 1e-5, (
+      f'{method}: concomitant phase departs from the closed form by {worst:.2e}')
 
 
-def test_concomitant_field_is_never_negative(wide_phantom):
-  """Bc is `(Bx^2 + By^2)/(2 B0)` -- a sum of squares -- so it cannot be
-  negative for ANY gradient or position, and the accumulated phase can only
-  ever be <= 0. A wrong sign on a cross term is the way that breaks."""
-  rng = np.random.default_rng(11)
+def test_concomitant_phase_can_only_ever_retard(wide_phantom):
+  """Bc is `(Bx^2 + By^2)/(2 B0)`, a sum of squares, so the phase it adds can
+  only ever be negative -- for every gradient and every position.
+
+  The previous version of this test looped 200 random gradients through the
+  test's OWN helper, which is unfalsifiable and touches no library code, and
+  its end-to-end half passed with the feature disabled (`on == off` gives
+  `angle == 0`, which satisfies `<= 0`). Both halves are replaced: the sign is
+  read off the SOLVER, and the test first requires the term to be doing
+  something, so a silently disabled feature fails instead of passing.
+  """
+  rng = np.random.default_rng(5)
   scanner = Scanner()
   B0_mT = scanner.field_strength.m_as('mT')
+  gamma = scanner.gamma.m_as('rad/ms/mT')
   nodes = wide_phantom.local_nodes.astype(np.float64)
-  for _ in range(200):
-    G = rng.uniform(-40.0, 40.0, 3)
-    assert _concomitant_field_mT(nodes, G, B0_mT).min() >= 0.0
-
-  # And end to end, on the sign of the phase the solver actually delivers.
-  block = _gradient_block((14.0, -11.0, 19.0), 4.0)
-  off = _precess(wide_phantom, block, concomitant_fields=False)
-  on = _precess(wide_phantom, block, concomitant_fields=True)
-  assert np.all(np.angle(on / off) <= 1e-9), (
-    'the concomitant term advanced the phase; it can only ever retard it')
+  for _ in range(4):
+    G = tuple(rng.uniform(-30.0, 30.0, 3))
+    # Keep the accumulated phase inside one turn. np.angle wraps, so a phase
+    # past -pi comes back POSITIVE and would look like a sign error -- which is
+    # how the first version of this test failed.
+    per_ms = gamma * float(_concomitant_field_mT(nodes, G, B0_mT).max())
+    dur_ms = min(5.0, 0.8 * np.pi / per_ms)
+    block = _gradient_block(G, dur_ms)
+    off = _precess(wide_phantom, block, concomitant_fields=False)
+    on = _precess(wide_phantom, block, concomitant_fields=True)
+    phase = np.angle(on / off)
+    assert np.abs(phase).max() > 1e-3, (
+      f'G={np.round(G, 1)} produced no concomitant phase at all; the test '
+      f'would pass with the feature disabled')
+    assert phase.max() <= 1e-9, (
+      f'G={np.round(G, 1)}: the concomitant term ADVANCED the phase by '
+      f'{phase.max():.3e}. Bc is a sum of squares and can only retard it, so '
+      f'a cross-term sign is wrong.')
 
 
 def _shaped_rf_block(scale, dur_ms=1.0, n=64, dt_ms=0.02):
@@ -924,6 +956,30 @@ def test_cpmg_echoes_reach_exp_minus_t_over_t2_with_the_ensemble_on(
     np.testing.assert_allclose(got, expected, atol=1e-3,
                                err_msg=f'{lineshape} K={K} {dtype}')
 
+  # exp(-2 n tau / T2) is ALSO what the solver returns with no ensemble at all,
+  # so the loop above passes with t2_prime disabled, with every bin offset
+  # zeroed, or with every offset negated. Sample BETWEEN two echoes as well:
+  # there the ensemble must be dephased, and nothing but the ensemble can do
+  # that.
+  midpoint = _echo_train(1, tau_ms)
+  midpoint.blocks[-1].store_magnetization = True      # tau after the echo
+  solver = BlochSolver(
+    midpoint, minimal_phantom, T1=Quantity(1e9, 'ms'), T2=Quantity(T2_ms, 'ms'),
+    initial_Mxy=0.0 + 0.0j, initial_Mz=1.0, perfect_spoiling=False,
+    dtype='float64', t2_prime=Quantity(T2_prime_ms, 'ms'), spectral_bins=32)
+  Mxy, _ = solver.solve()
+  at_echo, after_echo = np.abs(Mxy[0, 0]), np.abs(Mxy[0, 1])
+  # The echo carries the irreversible loss only; tau later the ensemble has
+  # dephased again by its own lineshape on top of it.
+  want_echo = np.exp(-2 * tau_ms / T2_ms)
+  want_after = (np.exp(-0.5 * (tau_ms / T2_prime_ms)**2)
+                * np.exp(-3 * tau_ms / T2_ms))
+  assert abs(at_echo - want_echo) < 2e-3, (
+    f'echo is {at_echo:.4f}, expected {want_echo:.4f}')
+  assert abs(after_echo - want_after) < 2e-3, (
+    f'tau past the echo got {after_echo:.4f}, expected {want_after:.4f}. With '
+    f'the ensemble disabled this point reads {np.exp(-3 * tau_ms / T2_ms):.4f}')
+
 
 def test_a_stimulated_echo_survives_being_stored_in_mz(minimal_phantom):
   """90 - t1 - 90 - t2 - 90 - t1. The second pulse parks the dephased pattern
@@ -997,15 +1053,35 @@ def test_a_spin_echo_refocuses_delta_b_and_t2_prime_together(minimal_phantom):
   seq = _echo_train(1, tau_ms)
   floor = np.exp(-2 * tau_ms / T2_ms)
 
-  for delta_B in (0.0, 1e-3, -4e-3):
+  # PER-NODE, not scalar. A spatially uniform offset contributes the same phase
+  # to every bin of every node, factors straight out, and cannot affect
+  # abs(Mxy) at all -- so the earlier scalar loop asserted the same number
+  # three times and would have passed with delta_B ignored entirely.
+  n_nodes = minimal_phantom.local_nodes.shape[0]
+  spread = np.linspace(-4e-3, 4e-3, n_nodes).reshape(-1, 1)
+  for delta_B in (np.zeros((n_nodes, 1)), spread):
     solver = BlochSolver(
       seq, minimal_phantom, T1=Quantity(1e9, 'ms'), T2=Quantity(T2_ms, 'ms'),
       delta_B=delta_B, initial_Mxy=0.0 + 0.0j, initial_Mz=1.0,
       perfect_spoiling=False, dtype='float64',
       t2_prime=Quantity(T2_prime_ms, 'ms'), spectral_bins=64)
     Mxy, _ = solver.solve()
-    assert abs(abs(Mxy[0, 0]) - floor) < 2e-3, (
-      f'delta_B={delta_B}: echo is {abs(Mxy[0, 0]):.4f}, expected {floor:.4f}')
+    # Every node, not just node 0: a per-node offset makes them differ before
+    # the 180 and identical after it.
+    np.testing.assert_allclose(np.abs(Mxy[:, 0]), floor, atol=2e-3)
+
+  # And the negative control: without the 180, the same per-node offset leaves
+  # the nodes visibly out of step, so the assertion above is not vacuous.
+  no_refocus = _echo_train(0, tau_ms)
+  no_refocus.blocks[-1].store_magnetization = True
+  solver = BlochSolver(
+    no_refocus, minimal_phantom, T1=Quantity(1e9, 'ms'),
+    T2=Quantity(T2_ms, 'ms'), delta_B=spread, initial_Mxy=0.0 + 0.0j,
+    initial_Mz=1.0, perfect_spoiling=False, dtype='float64',
+    t2_prime=Quantity(T2_prime_ms, 'ms'), spectral_bins=64)
+  Mxy, _ = solver.solve()
+  assert np.ptp(np.angle(Mxy[:, -1])) > 0.5, (
+    'the per-node delta_B should leave the nodes out of phase without a 180')
 
 
 def test_the_sub_ensemble_survives_a_second_solve_call(minimal_phantom):
