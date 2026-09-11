@@ -680,3 +680,413 @@ def test_finite_bin_sets_revive_and_the_sizing_rule_holds():
       f'gaussian K={K} tracks to tau/T2\' = {reach[K]:.2f}, expected '
       f'{expected:.2f}; the 5 * tau_max / T2\' sizing rule has moved')
     assert reach[K] > 0.2 * K, 'the documented 0.2*K rule must be conservative'
+
+
+# ---------------------------------------------------------------------------
+# 5. Audit coverage: concomitant fields, B1+, and their interactions
+# ---------------------------------------------------------------------------
+#
+# Written during the audit of the `realism` branch, which found that of its
+# fifteen commits exactly one carried test code. `concomitant_fields` and
+# `b1_map` had none at all, and the parts of each that nothing executed were
+# the parts most able to hide a sign error: three of the four concomitant terms
+# (the shipped example drives one axis) and the order-4 |b1|^2 path (the
+# example uses a hard pulse with no gradient, where the commutator vanishes).
+
+
+@pytest.fixture(scope='module')
+def wide_phantom(tmp_path_factory):
+  """A phantom spread over ~12 cm, so a term quadratic in position is
+  measurable. `minimal_phantom` spans 1 cm, where it is not."""
+  pytest.importorskip('mpi4py')
+  pytest.importorskip('pymetis')
+  pytest.importorskip('meshio')
+  mesh_dir = tmp_path_factory.mktemp('magnus_wide')
+  mesh_path = mesh_dir / 'wide.vtu'
+  make_minimal_tet_mesh(mesh_path, scale=0.12)
+  return FEMPhantom(path=str(mesh_path))
+
+
+def _gradient_block(G_mT_per_m, dur_ms, dt_ms=0.002):
+  """A constant gradient on all three axes at once."""
+  scanner = Scanner()
+  gradients = [
+    Gradient(timings=Quantity(np.array([0.0, dur_ms]), 'ms'),
+             amplitudes=Quantity(np.array([G_mT_per_m[a]] * 2), 'mT/m'),
+             scanner=scanner, ref=Quantity(0.0, 'ms'), time=Quantity(0.0, 'ms'),
+             axis=a)
+    for a in range(3)]
+  return SequenceBlock(gradients=gradients, dur=Quantity(dur_ms, 'ms'),
+                       dt=Quantity(dt_ms, 'ms'), empty=False,
+                       store_magnetization=True)
+
+
+def _concomitant_field_mT(positions, G, B0_mT):
+  """Bc = (Bx^2 + By^2) / (2 B0) for a linear gradient set, where
+  Bx = Gx*z - Gz*x/2 and By = Gy*z - Gz*y/2. Written in the factored form the
+  kernel does NOT use, so the test is independent of the expanded expression
+  it is checking."""
+  Gx, Gy, Gz = G
+  x, y, z = positions[:, 0], positions[:, 1], positions[:, 2]
+  Bx = Gx * z - 0.5 * Gz * x
+  By = Gy * z - 0.5 * Gz * y
+  return (Bx**2 + By**2) / (2.0 * B0_mT)
+
+
+def _precess(phantom, block, dtype='float64', **solver_kwargs):
+  seq = make_single_block_sequence(block)
+  solver = BlochSolver(
+    seq, phantom, T1=Quantity(1e9, 'ms'), T2=Quantity(1e9, 'ms'),
+    initial_Mxy=1.0 + 0.0j, initial_Mz=0.0, perfect_spoiling=False,
+    dtype=dtype, **solver_kwargs)
+  Mxy, _ = solver.solve()
+  return Mxy[:, 0]
+
+
+@pytest.mark.parametrize('G', [(18.0, 0.0, 12.0), (0.0, -20.0, 15.0),
+                               (11.0, -9.0, -17.0)],
+                         ids=['Gx_Gz', 'Gy_Gz', 'oblique'])
+def test_concomitant_phase_matches_the_maxwell_closed_form(wide_phantom, G):
+  """Every term, including the two CROSS terms, against the closed form.
+
+  The shipped example drives one axis, so `(Gx^2+Gy^2)z^2` and both
+  `-Gx*Gz*x*z` terms are executed by nothing else: a sign flip or a dropped
+  factor of two on either cross term would pass the whole suite.
+
+  Measured over random gradients and positions, the agreement is 1.2e-7 rad.
+  """
+  dur_ms = 6.0
+  scanner = Scanner()
+  B0_mT = scanner.field_strength.m_as('mT')
+  gamma = scanner.gamma.m_as('rad/ms/mT')
+
+  block = _gradient_block(G, dur_ms)
+  off = _precess(wide_phantom, block, concomitant_fields=False)
+  on = _precess(wide_phantom, block, concomitant_fields=True)
+
+  nodes = wide_phantom.local_nodes.astype(np.float64)
+  expected = -gamma * _concomitant_field_mT(nodes, G, B0_mT) * dur_ms
+  # Compared as unit phasors, so the check cannot be fooled by 2*pi wrapping.
+  worst = float(np.abs(np.exp(1j * np.angle(on / off))
+                       - np.exp(1j * expected)).max())
+  assert worst < 1e-5, f'concomitant phase departs from the closed form by {worst:.2e}'
+
+
+def test_concomitant_field_is_never_negative(wide_phantom):
+  """Bc is `(Bx^2 + By^2)/(2 B0)` -- a sum of squares -- so it cannot be
+  negative for ANY gradient or position, and the accumulated phase can only
+  ever be <= 0. A wrong sign on a cross term is the way that breaks."""
+  rng = np.random.default_rng(11)
+  scanner = Scanner()
+  B0_mT = scanner.field_strength.m_as('mT')
+  nodes = wide_phantom.local_nodes.astype(np.float64)
+  for _ in range(200):
+    G = rng.uniform(-40.0, 40.0, 3)
+    assert _concomitant_field_mT(nodes, G, B0_mT).min() >= 0.0
+
+  # And end to end, on the sign of the phase the solver actually delivers.
+  block = _gradient_block((14.0, -11.0, 19.0), 4.0)
+  off = _precess(wide_phantom, block, concomitant_fields=False)
+  on = _precess(wide_phantom, block, concomitant_fields=True)
+  assert np.all(np.angle(on / off) <= 1e-9), (
+    'the concomitant term advanced the phase; it can only ever retard it')
+
+
+def _shaped_rf_block(scale, dur_ms=1.0, n=64, dt_ms=0.02):
+  """A COMPLEX, time-varying pulse. Needed for the order-4 commutator to be
+  non-zero: a real hard pulse on resonance makes both correction terms vanish
+  identically, so it cannot test how b1 enters them."""
+  t = np.linspace(0.0, dur_ms, n)
+  envelope = np.sinc(4 * (t / dur_ms - 0.5)) * np.exp(1j * 3.0 * t / dur_ms)
+  rf = RF(timings=Quantity(t, 'ms'),
+          waveform=Quantity(0.25 * scale * envelope, 'mT'),
+          scanner=Scanner(), ref=Quantity(0.0, 'ms'), time=Quantity(0.0, 'ms'),
+          shape='custom')
+  gradient = Gradient(timings=Quantity(np.array([0.0, dur_ms]), 'ms'),
+                      amplitudes=Quantity(np.array([12.0, 12.0]), 'mT/m'),
+                      scanner=Scanner(), ref=Quantity(0.0, 'ms'),
+                      time=Quantity(0.0, 'ms'), axis=0)
+  return SequenceBlock(rf_pulses=[rf], gradients=[gradient],
+                       dur=Quantity(dur_ms, 'ms'), dt=Quantity(dt_ms, 'ms'),
+                       empty=False, store_magnetization=True)
+
+
+def test_b1_scaling_is_identical_to_scaling_the_pulse(wide_phantom):
+  """A UNIFORM b1 = c must equal scaling the pulse by c, exactly.
+
+  This is the only check with teeth on the order-4 terms, where `theta_xy` is
+  linear in RF and takes b1 while `theta_z`'s commutator is bilinear and takes
+  |b1|^2. Substituting the scaled RF into both endpoints gets that right for
+  free; scaling the assembled rotation once would get the second wrong.
+
+  It needs a complex, time-varying pulse under a gradient -- with a real hard
+  pulse the commutator vanishes and the test passes under either scaling. The
+  magnus2-vs-magnus4 gap below is the proof that it is live here.
+  """
+  c = 0.73 * np.exp(0.4j)
+
+  def run(scale_pulse, b1, method):
+    solver = BlochSolver(
+      make_single_block_sequence(_shaped_rf_block(scale_pulse)), wide_phantom,
+      T1=Quantity(1e9, 'ms'), T2=Quantity(1e9, 'ms'),
+      initial_Mxy=0.0 + 0.0j, initial_Mz=1.0, perfect_spoiling=False,
+      dtype='float64', method=method, b1_map=b1)
+    Mxy, Mz = solver.solve()
+    return Mxy[:, 0], Mz[:, 0]
+
+  live = np.abs(run(c, None, 'magnus2')[0] - run(c, None, 'magnus4')[0]).max()
+  assert live > 1e-6, (
+    f'the order-4 commutator contributes only {live:.2e} here, so this test '
+    f'would pass under a wrong b1 power; make the pulse less trivial')
+
+  for method in ('cayley_klein', 'magnus2', 'magnus4'):
+    scaled_pulse = run(c, None, method)
+    via_map = run(1.0, c, method)
+    worst = max(float(np.abs(scaled_pulse[0] - via_map[0]).max()),
+                float(np.abs(scaled_pulse[1] - via_map[1]).max()))
+    assert worst < 1e-12, (
+      f'{method}: b1_map={c} differs from scaling the pulse by {worst:.2e}')
+
+
+def test_b1_map_sets_the_flip_and_the_transmit_phase_per_node(minimal_phantom):
+  """Per-node |b1| scales the flip exactly, and arg(b1) is a transmit phase
+  that lands on Mxy without touching its magnitude."""
+  n_nodes = minimal_phantom.local_nodes.shape[0]
+  magnitude = np.linspace(1.0, 0.0, n_nodes)
+  phase = np.linspace(-1.3, 0.7, n_nodes)
+  b1 = magnitude * np.exp(1j * phase)
+  block = make_hard_pulse_block(np.pi / 2, dur_ms=0.002, dt_ms=1e-4)
+
+  def run(b1_map):
+    solver = BlochSolver(
+      make_single_block_sequence(block), minimal_phantom,
+      T1=Quantity(1e9, 'ms'), T2=Quantity(1e9, 'ms'),
+      initial_Mxy=0.0 + 0.0j, initial_Mz=1.0, perfect_spoiling=False,
+      dtype='float64', b1_map=b1_map)
+    Mxy, Mz = solver.solve()
+    return Mxy[:, 0], Mz[:, 0]
+
+  Mxy, Mz = run(b1)
+  nominal, _ = run(None)
+
+  delivered = np.arctan2(np.abs(Mxy), Mz)
+  np.testing.assert_allclose(delivered, (np.pi / 2) * magnitude, atol=1e-6)
+  # The transmit phase rotates the axis the pulse tips onto, and nothing else.
+  turned = np.abs(np.exp(1j * np.angle(Mxy[:-1]))
+                  - np.exp(1j * (np.angle(nominal[:-1]) + phase[:-1])))
+  assert turned.max() < 1e-6, f'transmit phase off by {turned.max():.2e}'
+
+
+def _echo_train(n_echoes, tau_ms, pulse_ms=0.002):
+  """90 -- tau -- [180 -- tau(ECHO) -- tau] x n. Only the echo instants carry
+  store_magnetization, so the returned columns are the echoes and nothing
+  else."""
+  seq = Sequence()
+  ninety = make_hard_pulse_block(np.pi / 2, dur_ms=pulse_ms, dt_ms=1e-4)
+  ninety.store_magnetization = False
+  seq.add_block(ninety)
+  seq.add_block(make_empty_block(tau_ms, dt_ms=tau_ms))
+  seq.blocks[-1].store_magnetization = False
+  for _ in range(n_echoes):
+    refocus = make_hard_pulse_block(np.pi, dur_ms=pulse_ms, dt_ms=1e-4)
+    refocus.store_magnetization = False
+    seq.add_block(refocus)
+    seq.add_block(make_empty_block(tau_ms, dt_ms=tau_ms))     # the echo
+    seq.add_block(make_empty_block(tau_ms, dt_ms=tau_ms))
+    seq.blocks[-1].store_magnetization = False
+  return seq
+
+
+def test_cpmg_echoes_reach_exp_minus_t_over_t2_with_the_ensemble_on(
+        minimal_phantom):
+  """Six echoes, with T2' short enough that the signal is essentially gone
+  between them. Every echo must still land on exp(-2 n tau / T2): the
+  reversible part is fully refocused and only T2 survives.
+
+  This is the strongest test of persistence across block boundaries -- 19
+  blocks, with coherence that has to survive every stitch.
+  """
+  T2_ms, T2_prime_ms, tau_ms, n_echoes = 200.0, 8.0, 12.0, 6
+  seq = _echo_train(n_echoes, tau_ms)
+  expected = np.exp(-2 * tau_ms * np.arange(1, n_echoes + 1) / T2_ms)
+
+  for lineshape, K, dtype in (('gaussian', 32, 'float64'),
+                              ('uniform', 32, 'float64'),
+                              ('gaussian', 8, 'float64')):
+    solver = BlochSolver(
+      seq, minimal_phantom, T1=Quantity(1e9, 'ms'), T2=Quantity(T2_ms, 'ms'),
+      initial_Mxy=0.0 + 0.0j, initial_Mz=1.0, perfect_spoiling=False,
+      dtype=dtype, t2_prime=Quantity(T2_prime_ms, 'ms'), spectral_bins=K,
+      lineshape=lineshape)
+    Mxy, _ = solver.solve()
+    assert Mxy.shape[1] == n_echoes, 'only the echoes should be stored'
+    got = np.abs(Mxy[0])
+    np.testing.assert_allclose(got, expected, atol=1e-3,
+                               err_msg=f'{lineshape} K={K} {dtype}')
+
+
+def test_a_stimulated_echo_survives_being_stored_in_mz(minimal_phantom):
+  """90 - t1 - 90 - t2 - 90 - t1. The second pulse parks the dephased pattern
+  along z, where it does not dephase; the third brings it back and it rephases
+  t1 later at exactly HALF the magnetization -- only one of the two halves of
+  cos(phi) refocuses.
+
+  Nothing else in the suite plays three pulses on one magnetization, and this
+  is the only test of the ensemble surviving a trip through Mz.
+
+  t1/T2' = 8 is deliberate: the ideal 1/2 assumes the other coherence pathways
+  are dead at the echo, which at ratio 4 they are not (it reads 0.466 there).
+  """
+  t1, t2, T2_prime_ms = 16.0, 40.0, 2.0
+  seq = Sequence()
+  for dur in (None, t1, None, t2, None, t1):
+    if dur is None:
+      pulse = make_hard_pulse_block(np.pi / 2, dur_ms=0.002, dt_ms=1e-4)
+      pulse.store_magnetization = False
+      seq.add_block(pulse)
+    else:
+      seq.add_block(make_empty_block(dur, dt_ms=dur))
+      seq.blocks[-1].store_magnetization = False
+  seq.blocks[-1].store_magnetization = True          # the stimulated echo
+
+  solver = BlochSolver(
+    seq, minimal_phantom, T1=Quantity(1e9, 'ms'), T2=Quantity(1e9, 'ms'),
+    initial_Mxy=0.0 + 0.0j, initial_Mz=1.0, perfect_spoiling=False,
+    dtype='float64', t2_prime=Quantity(T2_prime_ms, 'ms'), spectral_bins=256)
+  Mxy, _ = solver.solve()
+  assert abs(abs(Mxy[0, 0]) - 0.5) < 5e-3, (
+    f'stimulated echo is {abs(Mxy[0, 0]):.4f}, expected 0.5')
+
+
+def test_b1_map_and_a_per_node_t2_prime_stay_aligned(minimal_phantom):
+  """Two INDEPENDENT per-node maps, both expanded K-fold by np.repeat, given
+  deliberately opposite orderings. If the two expansions disagreed, each node
+  would silently get another node's constant -- and nothing else would notice,
+  because the aggregate decay and the echo amplitude would both still be
+  right."""
+  n_nodes = minimal_phantom.local_nodes.shape[0]
+  b1 = np.linspace(1.0, 0.3, n_nodes)
+  t2_prime = np.linspace(4.0, 30.0, n_nodes)        # opposite order
+  t_ms = 10.0
+
+  seq = Sequence()
+  pulse = make_hard_pulse_block(np.pi / 2, dur_ms=0.002, dt_ms=1e-4)
+  pulse.store_magnetization = False
+  seq.add_block(pulse)
+  seq.add_block(make_empty_block(t_ms, dt_ms=t_ms))
+
+  solver = BlochSolver(
+    seq, minimal_phantom, T1=Quantity(1e9, 'ms'), T2=Quantity(1e9, 'ms'),
+    initial_Mxy=0.0 + 0.0j, initial_Mz=1.0, perfect_spoiling=False,
+    dtype='float64', b1_map=b1,
+    t2_prime=Quantity(t2_prime, 'ms'), spectral_bins=64)
+  Mxy, _ = solver.solve()
+
+  expected = np.sin(np.pi / 2 * b1) * np.exp(-0.5 * (t_ms / t2_prime)**2)
+  np.testing.assert_allclose(np.abs(Mxy[:, 0]), expected, atol=2e-4)
+  # A scrambled pairing must be clearly distinguishable, or the test is vacuous.
+  scrambled = np.sin(np.pi / 2 * b1) * np.exp(-0.5 * (t_ms / t2_prime[::-1])**2)
+  assert np.abs(expected - scrambled).max() > 0.1
+
+
+def test_a_spin_echo_refocuses_delta_b_and_t2_prime_together(minimal_phantom):
+  """`t2_prime` rides the same per-node `delta_B` channel a caller may already
+  be using, so the two superpose. Both are static, so a 180 must refocus BOTH:
+  the echo lands on exp(-2 tau/T2) whatever the mean offset is."""
+  T2_ms, T2_prime_ms, tau_ms = 300.0, 6.0, 20.0
+  seq = _echo_train(1, tau_ms)
+  floor = np.exp(-2 * tau_ms / T2_ms)
+
+  for delta_B in (0.0, 1e-3, -4e-3):
+    solver = BlochSolver(
+      seq, minimal_phantom, T1=Quantity(1e9, 'ms'), T2=Quantity(T2_ms, 'ms'),
+      delta_B=delta_B, initial_Mxy=0.0 + 0.0j, initial_Mz=1.0,
+      perfect_spoiling=False, dtype='float64',
+      t2_prime=Quantity(T2_prime_ms, 'ms'), spectral_bins=64)
+    Mxy, _ = solver.solve()
+    assert abs(abs(Mxy[0, 0]) - floor) < 2e-3, (
+      f'delta_B={delta_B}: echo is {abs(Mxy[0, 0]):.4f}, expected {floor:.4f}')
+
+
+def test_the_sub_ensemble_survives_a_second_solve_call(minimal_phantom):
+  """`solve(start=..., end=...)` in a per-shot loop is how every steady-state
+  example in the repo drives the solver. The carried state used to be stored
+  bin-expanded and re-expanded on the next call, so the SECOND call raised.
+
+  Split so the 180 lands in a different call from the dephasing it undoes: the
+  echo can only rephase if the ensemble crossed the call boundary intact.
+  """
+  tau_ms = 25.0
+  seq = _echo_train(1, tau_ms)
+  solver = BlochSolver(
+    seq, minimal_phantom, T1=Quantity(1e9, 'ms'), T2=Quantity(1e9, 'ms'),
+    initial_Mxy=0.0 + 0.0j, initial_Mz=1.0, perfect_spoiling=False,
+    dtype='float64', t2_prime=Quantity(5.0, 'ms'), spectral_bins=64)
+
+  solver.solve(start=0, end=2)                      # 90 + tau: dephases
+  assert abs(solver.initial_Mxy[0, 0]) < 1e-3, 'should have dephased by tau'
+  Mxy, _ = solver.solve(start=2, end=5)             # 180 + tau: must rephase
+  assert abs(Mxy[0, 0]) > 0.999, (
+    f'the echo reached {abs(Mxy[0, 0]):.6f}; the ensemble did not survive the '
+    f'call boundary')
+
+  # And a caller who RESETS the state between calls must be honoured, not
+  # silently resumed from the carried ensemble.
+  solver.solve(start=0, end=2)
+  n_nodes = minimal_phantom.local_nodes.shape[0]
+  solver.initial_Mxy = np.zeros((n_nodes, 1), dtype=np.complex128)
+  solver.initial_Mz = np.ones((n_nodes, 1))
+  Mxy, _ = solver.solve(start=2, end=5)
+  assert abs(Mxy[0, 0]) < 1e-6, 'the reset was ignored'
+
+
+def test_the_new_features_hold_up_at_the_default_float32(wide_phantom,
+                                                         minimal_phantom):
+  """float32 is the DEFAULT, and every test written for these features when
+  they landed used float64. Tolerances are the measured float32 gaps, so this
+  pins the precision rather than merely exercising the path."""
+  scanner = Scanner()
+  B0_mT = scanner.field_strength.m_as('mT')
+  gamma = scanner.gamma.m_as('rad/ms/mT')
+
+  # Concomitant. The floor here is NOT the concomitant term: it is the LINEAR
+  # phase, which reaches 3852 rad over this geometry and is represented to
+  # float32 precision, so the on/off ratio cancels it only to eps32 * 3852 =
+  # 4.6e-4 rad. Asserting that bound rather than a magic number, because it is
+  # what the number actually means -- the concomitant phase itself is 3.34 rad.
+  G, dur_ms = (16.0, -12.0, 20.0), 5.0
+  block = _gradient_block(G, dur_ms)
+  off = _precess(wide_phantom, block, dtype='float32', concomitant_fields=False)
+  on = _precess(wide_phantom, block, dtype='float32', concomitant_fields=True)
+  nodes = wide_phantom.local_nodes.astype(np.float64)
+  want = -gamma * _concomitant_field_mT(nodes, G, B0_mT) * dur_ms
+  worst = float(np.abs(np.exp(1j * np.angle(on / off)) - np.exp(1j * want)).max())
+  linear_phase = gamma * float(np.abs(nodes @ np.asarray(G)).max()) * dur_ms
+  floor = np.finfo(np.float32).eps * linear_phase
+  assert worst < 2 * floor, (
+    f'concomitant in float32 is off by {worst:.2e}, above the {floor:.2e} that '
+    f'the {linear_phase:.0f} rad linear phase alone accounts for')
+
+  # B1+: float32 costs 3.3e-4 degrees of flip.
+  solver = BlochSolver(
+    make_single_block_sequence(make_hard_pulse_block(np.pi / 2, dur_ms=0.5)),
+    minimal_phantom, T1=Quantity(1e9, 'ms'), T2=Quantity(1e9, 'ms'),
+    initial_Mxy=0.0 + 0.0j, initial_Mz=1.0, perfect_spoiling=False,
+    dtype='float32', b1_map=0.8)
+  Mxy, Mz = solver.solve()
+  flip = np.rad2deg(np.arctan2(np.abs(Mxy[0, 0]), Mz[0, 0]))
+  assert abs(flip - 72.0) < 1e-2, f'float32 flip is {flip:.4f} deg, want 72'
+
+  # T2': float32 warns, and with no background field costs 2.2e-4 relative.
+  seq = Sequence()
+  pulse = make_hard_pulse_block(np.pi / 2, dur_ms=0.002, dt_ms=1e-4)
+  pulse.store_magnetization = False
+  seq.add_block(pulse)
+  seq.add_block(make_empty_block(20.0, dt_ms=20.0))
+  with pytest.warns(UserWarning, match='float32'):
+    solver = BlochSolver(
+      seq, minimal_phantom, T1=Quantity(1e9, 'ms'), T2=Quantity(1e9, 'ms'),
+      initial_Mxy=0.0 + 0.0j, initial_Mz=1.0, perfect_spoiling=False,
+      dtype='float32', t2_prime=Quantity(20.0, 'ms'), spectral_bins=32)
+  Mxy, _ = solver.solve()
+  assert abs(abs(Mxy[0, 0]) - np.exp(-0.5)) < 1e-3
