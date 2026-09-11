@@ -13,10 +13,14 @@ import pytest
 
 EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "examples"
 
-# Example scripts run their own internal pipeline via subprocess with
-# a 180 s per-script budget. They intentionally exceed the new global
-# 30 s pytest-timeout default; apply a 240 s per-test override.
-pytestmark = pytest.mark.timeout(240)
+# Each script runs a full pipeline in a subprocess with a 180 s budget,
+# well past the global 30 s pytest-timeout default. Measured, the 13 of
+# them are 97 s -- half the suite's wall clock -- so they carry `slow`
+# and leave `-m "not slow"` a fast suite. CI does not deselect them.
+pytestmark = [
+    pytest.mark.slow,
+    pytest.mark.timeout(240),
+]
 
 
 @pytest.mark.parametrize("script", [
