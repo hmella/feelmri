@@ -364,3 +364,186 @@ def test_adc_frequency_offset_tunes_the_receiver(tmp_path):
       f'a receiver tuned to gammabar*Gx*{x0_mm} mm = {freq:.1f} Hz left the '
       f'rod at {tuned:+.3f} mm instead of DC. About {2 * x0_mm:+.1f} mm means '
       f'the frequency term lost its negation and doubled the offset')
+
+
+# ---------------------------------------------------------------------------
+# The realism features, carried into k-space
+# ---------------------------------------------------------------------------
+#
+# Every test of concomitant_fields and b1_map stops at the solver's returned
+# magnetization; no example or test had ever called update_magnetization with
+# one, so nothing the two features produce had reached the assembler at all.
+#
+# Both tests below pin the whole chain against a closed form by first measuring
+# the assembler's own nodal weights. At k = 0 and t = 0 the signal is
+# ``S = sum_n m_n Mxy_n`` with ``m_n = integral of basis function n``, which is
+# linear in the nodal vector -- so handing it a unit vector per node recovers
+# the weights, and the prediction that follows is exact rather than a
+# tolerance. The weights differ from node to node on an irregular mesh, so a
+# handoff that paired the wrong rows cannot pass.
+
+
+def _irregular_phantom(path):
+  """Five nodes at mutually incommensurate coordinates spread over ~20 cm, so a
+  term quadratic in position is large and every nodal weight is distinct."""
+  import meshio
+  points = np.array([[0.11, -0.03, 0.07],
+                     [-0.05, 0.12, 0.02],
+                     [0.04, 0.06, -0.10],
+                     [-0.09, -0.08, 0.05],
+                     [0.02, -0.11, -0.06]])
+  meshio.write(str(path), meshio.Mesh(points, [('tetra',
+                                                np.array([[0, 1, 2, 3],
+                                                          [1, 2, 3, 4]]))]))
+  phantom = FEMPhantom(path=str(path))
+  phantom.set_assembler(voxel_size=0.0, lorder=2, horder=4,
+                        nodal_approximation=False, lumped=False)
+  n = phantom.local_nodes.shape[0]
+  phantom.set_static_fields(T2=np.full(n, 1e9, dtype=np.float32),
+                            phi_dB0=np.zeros(n, dtype=np.float32))
+  return phantom
+
+
+def _signal_at_dc(phantom, mxy):
+  phantom.update_magnetization(np.ascontiguousarray(mxy, dtype=np.complex64))
+  zero = np.zeros((1, 1, 1), dtype=np.float32)
+  return complex(np.asarray(phantom.mri_signal(
+      (zero.copy(), zero.copy(), zero.copy()), zero.copy(), None)).ravel()[0])
+
+
+def _nodal_weights(phantom):
+  """``m_n = integral of basis function n``, read off the assembler itself."""
+  n = phantom.local_nodes.shape[0]
+  weights = np.zeros(n, dtype=np.complex128)
+  for i in range(n):
+    unit = np.zeros(n, dtype=np.complex64)
+    unit[i] = 1.0
+    weights[i] = _signal_at_dc(phantom, unit)
+  return weights
+
+
+def test_concomitant_phase_reaches_kspace(tmp_path):
+  """Phase the solver accumulates from the Maxwell term must appear in the
+  k-space signal, with the magnitude the closed form gives.
+
+  The gradient is a BIPOLAR pair, so the linear term `G.x` refocuses exactly
+  and everything left at the snapshot is concomitant. `mri_signal` has no B0
+  argument and no quadratic spatial channel of its own, so this is the only
+  way the term can reach a readout: carried on the magnetization.
+  """
+  pytest.importorskip('mpi4py')
+  pytest.importorskip('pymetis')
+  pytest.importorskip('meshio')
+  from pint import Quantity as Q_
+  from feelmri.Bloch import BlochSolver, Sequence, SequenceBlock
+  from feelmri.MRObjects import Gradient, Scanner
+
+  scanner = Scanner()
+  gamma = scanner.gamma.m_as('rad/ms/mT')
+  B0_mT = scanner.field_strength.m_as('mT')
+  G, dur_ms = 20.0, 4.0
+
+  def lobe(amplitude):
+    gradient = Gradient(timings=Q_(np.array([0.0, dur_ms]), 'ms'),
+                        amplitudes=Q_(np.array([amplitude, amplitude]), 'mT/m'),
+                        scanner=scanner, ref=Q_(0.0, 'ms'), time=Q_(0.0, 'ms'),
+                        axis=2)
+    return SequenceBlock(gradients=[gradient], dur=Q_(dur_ms, 'ms'),
+                         dt=Q_(0.01, 'ms'), empty=False)
+
+  def run(concomitant):
+    phantom = _irregular_phantom(tmp_path / f'conc_{concomitant}.vtu')
+    seq = Sequence()
+    seq.add_block(lobe(+G))
+    closing = lobe(-G)
+    closing.store_magnetization = True
+    seq.add_block(closing)
+    Mxy, _Mz = BlochSolver(
+      sequence=seq, phantom=phantom, M0=1.0, T1=Q_(1e9, 'ms'),
+      T2=Q_(1e9, 'ms'), initial_Mxy=1.0 + 0.0j, initial_Mz=0.0,
+      dtype='float64', perfect_spoiling=False,
+      concomitant_fields=concomitant).solve()
+    return phantom, Mxy[:, -1]
+
+  # Control: with the term off the two lobes cancel and every node is still at
+  # its initial value, so the signal is the mesh volume with no phase.
+  phantom_off, mxy_off = run(False)
+  weights = _nodal_weights(phantom_off)
+  off = _signal_at_dc(phantom_off, mxy_off)
+  assert abs(off - weights.sum()) < 1e-6 * abs(weights.sum()), (
+    'the bipolar pair did not refocus with the concomitant term off')
+
+  phantom_on, mxy_on = run(True)
+  nodes = phantom_on.local_nodes.astype(np.float64)
+  # Gx = Gy = 0, so Bc collapses to (Gz^2/4)(x^2 + y^2) / (2 B0), and both
+  # lobes contribute the same amount because it goes as G^2.
+  second_moment = 2.0 * G**2 * dur_ms
+  bc_phase = -gamma * (second_moment / 4.0) * (
+      nodes[:, 0]**2 + nodes[:, 1]**2) / (2.0 * B0_mT)
+  predicted = complex((weights * np.exp(1j * bc_phase)).sum())
+
+  got = _signal_at_dc(phantom_on, mxy_on)
+  scale = float(np.abs(weights).sum())
+  assert abs(got - predicted) < 2e-5 * scale, (
+    f'k-space carries {got:.6e} where the closed-form concomitant phase '
+    f'predicts {predicted:.6e}')
+  # ... and the term did something, so the agreement is not with zero phase.
+  assert abs(got - off) > 0.1 * scale, (
+    f'the concomitant term changed the DC signal by only '
+    f'{abs(got - off) / scale:.2e} of the volume; this case cannot discriminate')
+
+
+def test_a_b1_map_reaches_kspace_node_by_node(tmp_path):
+  """A per-node transmit sensitivity must weight each node's contribution to
+  the signal by `sin(b1_n * nominal flip)`, at that node and not another.
+
+  The nodal weights differ by a factor of three on this mesh, so a map applied
+  to the wrong rows changes the answer.
+  """
+  pytest.importorskip('mpi4py')
+  pytest.importorskip('pymetis')
+  pytest.importorskip('meshio')
+  from pint import Quantity as Q_
+  from feelmri.Bloch import BlochSolver, Sequence, SequenceBlock
+  from feelmri.MRObjects import RF, Scanner
+
+  scanner = Scanner()
+  gamma = scanner.gamma.m_as('rad/ms/mT')
+  dur_ms, n_samples = 0.2, 64
+
+  def run(phantom, b1_map):
+    amplitude = (np.pi / 2) / (gamma * dur_ms)
+    pulse = RF(waveform=Q_(np.full(n_samples, amplitude, dtype=complex), 'mT'),
+               timings=Q_(np.linspace(0.0, dur_ms, n_samples), 'ms'))
+    block = SequenceBlock(rf_pulses=[pulse], dur=Q_(dur_ms, 'ms'))
+    block.store_magnetization = True
+    seq = Sequence()
+    seq.add_block(block)
+    Mxy, _Mz = BlochSolver(
+      sequence=seq, phantom=phantom, M0=1.0, T1=Q_(1e9, 'ms'),
+      T2=Q_(1e9, 'ms'), initial_Mxy=0.0, initial_Mz=1.0, dtype='float64',
+      perfect_spoiling=False, b1_map=b1_map).solve()
+    return _signal_at_dc(phantom, Mxy[:, -1])
+
+  phantom = _irregular_phantom(tmp_path / 'b1.vtu')
+  weights = _nodal_weights(phantom)
+  assert float(np.abs(weights).max() / np.abs(weights).min()) > 2.0, (
+    'the nodal weights are too uniform for this test to localise the map')
+
+  nominal = run(phantom, None)
+  b1 = np.array([1.0, 0.8, 0.5, 0.3, 0.0])
+  mapped = run(phantom, b1)
+
+  # The flip is linear in b1 for a hard pulse, so node n ends at sin(b1_n*90).
+  predicted = nominal * complex(
+      (weights * np.sin(b1 * np.pi / 2)).sum() / weights.sum())
+  scale = abs(nominal)
+  assert abs(mapped - predicted) < 1e-5 * scale, (
+    f'k-space reads {mapped:.6e} where the per-node flips predict '
+    f'{predicted:.6e}')
+  # A permuted map is the failure this is built to catch; show the case can
+  # see one.
+  permuted = complex(
+      nominal * (weights * np.sin(b1[::-1] * np.pi / 2)).sum() / weights.sum())
+  assert abs(permuted - predicted) > 1e-2 * scale, (
+    'reversing the map changes nothing here, so the test cannot localise it')

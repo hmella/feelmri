@@ -1495,3 +1495,50 @@ def test_a_one_dimensional_per_node_array_is_accepted_between_solves(
   short.delta_B = np.full(n_nodes - 1, 2e-3)
   with pytest.raises(ValueError, match='delta_B'):
     short.solve()
+
+
+def test_the_spoiler_seed_carries_the_concomitant_field(wide_phantom):
+  """A spoiler block solved WITH a gradient, which is the only arrangement that
+  can see the concomitant term in the jittered Magnus seed.
+
+  The existing spoiler test runs at G = 0, where Bc is proportional to G^2 and
+  therefore exactly zero, so the seed at `Bloch.py`'s spoiler branch was
+  executed and never checked. Here the gradient is constant over the block, so
+  the trapezoidal average equals the end-of-interval value and `magnus2` must
+  reproduce `cayley_klein` EXACTLY -- and `cayley_klein` never reads the seed,
+  which is what makes it the reference.
+
+  Measured on this phantom at dt = 0.5 ms, worst |Mxy| difference against
+  cayley_klein:
+
+      seed as shipped                       4.7e-16
+      concomitant term dropped from it      4.9e-2   (9.8e-3 at dt = 0.1,
+                                                      i.e. the O(dt) block
+                                                      boundary error)
+      seed taken at the node centres        8.3e-01
+
+  so the tolerance below separates the right answer from either mistake by
+  thirteen orders of magnitude.
+  """
+  G, dur_ms, dt_ms = (14.0, -9.0, 20.0), 4.0, 0.5
+
+  def run(method):
+    block = _gradient_block(G, dur_ms, dt_ms=dt_ms)
+    block.spoiler = True
+    return _precess(wide_phantom, block, method=method,
+                    concomitant_fields=True, isochromat_K=8,
+                    isochromat_seed=0)
+
+  reference = run('cayley_klein')
+  # The spoiler has to have done something, or the comparison is between two
+  # undephased states and proves nothing.
+  assert np.abs(reference).max() < 0.8, (
+    f'the spoiler left |Mxy| at {np.abs(reference).max():.4f} of 1.0, so the '
+    f'isochromats are not dephasing and the seed cannot matter')
+
+  for method in ('magnus2', 'magnus4'):
+    gap = float(np.abs(run(method) - reference).max())
+    assert gap < 1e-12, (
+      f'{method} differs from cayley_klein by {gap:.3e} on a CONSTANT field, '
+      f'where the trapezoidal average is exact -- the jittered Magnus seed '
+      f'is not the field the kernel then integrates')
