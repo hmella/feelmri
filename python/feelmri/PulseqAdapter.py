@@ -1,31 +1,28 @@
-
 """
-Python translation of Pulseq.jl reader utilities (behavior-preserving, more Pythonic).
+Reader and FEelMRI bridge for Pulseq `.seq` files.
 
-This module provides tools to read Pulseq `.seq` files in a way that mirrors the
-logic of the original Julia implementation, but using idiomatic Python.
+The file format is a flat list of sections: a version, a table of definitions,
+a block table indexing into per-event libraries, and a shape library holding
+run-length-compressed waveforms. Reading it is therefore a two-stage job --
+parse each section into its library, then resolve every block's event ids
+against those libraries -- and this module keeps that separation.
 
-It implements:
-- read_version
-- read_definitions
-- read_signature
-- read_blocks
-- read_events
-- read_labels
-- read_extension_blocks
-- read_shapes
-- compress_shape
-- decompress_shape
-- read_Grad
-- read_RF
-- read_ADC
-- read_extension
-- read_seq  (returns a Sequence object)
-- fix_first_last_grads
+Format versions 1.2 through 1.5 are supported. The RF, ADC and
+arbitrary-gradient rows gained columns at 1.5, so those three reads dispatch on
+the declared version and assert the row length afterwards; a file whose header
+disagrees with its rows fails loudly rather than drifting silently by a column.
 
-NOTE: This is a self‑contained module. It does not depend on the rest of KomaMRI,
-so types like Sequence, Grad, RF, ADC, Trigger, LabelSet, LabelInc are defined here
-in a simplified but compatible fashion.
+The section readers are `read_version`, `read_definitions`, `read_signature`,
+`read_blocks`, `read_events`, `read_labels`, `read_extension_blocks` and
+`read_shapes`; `compress_shape` / `decompress_shape` implement the format's
+derivative-plus-repeat-count encoding. `read_Grad`, `read_RF`, `read_ADC` and
+`read_extension` turn a library row into an event, and `read_seq` drives the
+whole read and returns a `PulseqSequence`. `import_pulseq` is the entry point
+that converts one into the `feelmri.Bloch` objects the solver takes.
+
+The event types defined here (`Grad`, `RF`, `ADC`, `Trigger`, `LabelSet`,
+`LabelInc`) carry only what the format stores, and stay separate from the
+`feelmri.MRObjects` classes they are converted into.
 """
 
 from __future__ import annotations
@@ -137,7 +134,6 @@ class Version:
 def read_version(io) -> Version:
     """
     Read the [VERSION] section of a sequence file.
-    Mirrors the behavior of the Julia `read_version`.
     """
     pulseq_version = Version.from_file(io)
 
@@ -190,7 +186,7 @@ def read_definitions(io) -> Dict[str, Any]:
         else:
             defs[key] = parsed
 
-    # Default values (matching Julia code)
+    # Raster defaults for files that omit them, in seconds.
     defs.setdefault("BlockDurationRaster", 1e-5)
     defs.setdefault("GradientRasterTime", 1e-5)
     defs.setdefault("RadiofrequencyRasterTime", 1e-6)
@@ -301,7 +297,7 @@ def read_events(io, scale: List[float],
         if not parts:
             break
         if len(parts) != n_vals + 1:
-            # Julia breaks when the scanf result count != EventLength
+            # A short row ends the section: the table is over.
             break
         eid = int(float(parts[0]))
 
@@ -348,7 +344,7 @@ def read_labels(io, event_library: Optional[Dict[int, Dict[str, Any]]] = None
         val_str = parts[2]
         event_library[eid] = {"data": [val_int, val_str]}
         if len(parts) != 3:
-            # Julia breaks when scanf result count != 3
+            # A short row ends the section: the table is over.
             break
 
     return event_library
@@ -417,7 +413,7 @@ def read_shapes(io, force_convert_uncompressed: bool):
     """
     shape_library: Dict[int, Tuple[int, np.ndarray]] = {}
 
-    # Skip the first line after [SHAPES] (Julia reads and discards it)
+    # The line after [SHAPES] is a comment header and carries no data.
     _ = io.readline()
 
     while True:
@@ -543,7 +539,7 @@ def decompress_shape(num_samples: int,
 
     # Differences: when zero, subsequent samples are equal (marker for repeats).
     data_pack_diff = data_pack[1:] - data_pack[:-1]
-    # Julia uses 1-based indices for markers; we emulate that by +1.
+    # A marker indexes the sample AFTER the repeated one, hence the +1.
     markers = np.where(data_pack_diff == 0)[0] + 1  # 1-based
 
     count_pack = 1       # 1-based index into compressed data
@@ -798,7 +794,9 @@ def _apply_rotation_to_grads(R: np.ndarray,
 def fix_first_last_grads(seq: PulseqSequence) -> None:
     """
     Update Sequence with first/last points for gradients.
-    Mirrors the logic of Julia `fix_first_last_grads!`.
+
+    Only needed below v1.5, where the boundary samples are absent from the file
+    and have to be reconstructed from the shape and the preceding block.
     """
     grad_prev_last = [0.0, 0.0, 0.0]
 
@@ -831,8 +829,9 @@ def fix_first_last_grads(seq: PulseqSequence) -> None:
                     # time-shaped case – last sample is last amplitude
                     gr.last = float(A[-1])
                 else:
-                    # uniformly-shaped case (extended trapezoid)
-                    # replicate Julia odd-step construction
+                    # Uniformly-shaped case (extended trapezoid): the
+                    # boundary sample follows from an alternating-sign
+                    # cumulative sum over the amplitudes.
                     odd_step1 = np.concatenate(([gr.first], 2.0 * A))
                     idx = np.arange(1, odd_step1.size + 1)
                     sign_vec = (idx % 2) * 2 - 1
@@ -1154,7 +1153,6 @@ def read_extension(extension_library: Dict[int, Dict[str, Any]],
 def read_seq(filename: str, gamma: float = GAMMA) -> PulseqSequence:
     """
     Read a Pulseq `.seq` file and return a PulseqSequence object.
-    This follows the control flow of the Julia `read_seq` function.
 
     ``gamma`` (Hz/T) converts the file's Hz/m gradients and Hz RF amplitudes
     into T/m and T. It must be the SAME constant the solver later multiplies
@@ -1351,8 +1349,7 @@ def read_seq(filename: str, gamma: float = GAMMA) -> PulseqSequence:
 
         # For versions prior to 1.4.0 blockDurations have not been initialized
         if not block_durations:
-            # blockDurations is treated as a list indexed by block index 1..N in Julia.
-            # Here we construct a dict with same semantics.
+            # Durations are keyed by block id, not by position.
             for bid in block_events.keys():
                 idelay = delay_ind_tmp.get(bid, 0)
                 delay = 0.0
@@ -1405,8 +1402,8 @@ def read_seq(filename: str, gamma: float = GAMMA) -> PulseqSequence:
         )
 
         # Apply ROTATIONS extension(s) to the (gx, gy, gz) triple in place.
-        # Per Pulseq spec §2.8.4 and KomaMRI ReadPulseq.jl `_apply_rotations_to_owned_sequence`,
-        # the rotation acts on gradient amplitudes (scalar trapezoid or per-sample shaped).
+        # Per Pulseq spec §2.8.4 the rotation acts on gradient amplitudes,
+        # whether a scalar trapezoid or a per-sample shape.
         for ext in ext_list:
             if isinstance(ext, Rotation):
                 gx, gy, gz = _apply_rotation_to_grads(ext.matrix, gx, gy, gz)
@@ -1429,7 +1426,7 @@ def read_seq(filename: str, gamma: float = GAMMA) -> PulseqSequence:
     # v1.5 k-space-calculation API.
     seq.DEF["__pulseq_path__"] = os.path.abspath(filename)
 
-    # Guessing recon dimensions (approximate mirrors of Julia logic)
+    # Recon dimensions are not in the file; infer them from the events.
     # Nx
     if "Nx" not in seq.DEF:
         nx = max((adc.num for adc in seq.ADC), default=0)
