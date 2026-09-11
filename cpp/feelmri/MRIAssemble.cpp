@@ -243,6 +243,18 @@ public:
         const Eigen::SparseMatrix<T>& M, 
         const Eigen::Matrix<C, Eigen::Dynamic, Eigen::Dynamic>& Mxy)
     {
+        // Same check as update_magnetization, for the same reason: this writes
+        // the SAME f_Mxy_nodes_ / f_Mxy_dirty_ that every signal path reads by
+        // middleRows(q_start, q_count), so an over-long array stays in bounds
+        // and silently mispairs rows against node positions. The sparse product
+        // below would catch it only through eigen_assert, which -DNDEBUG
+        // compiles out.
+        if (Mxy.rows() != nb_nodes_) {
+            throw std::invalid_argument(
+                "update_nodal_magnetization: expected " +
+                std::to_string(nb_nodes_) + " rows (one per node), got " +
+                std::to_string(Mxy.rows()));
+        }
         nv_ = (int)Mxy.cols();
         // Keep the nodal copy so a quadrature call on this group projects the
         // current magnetization.
