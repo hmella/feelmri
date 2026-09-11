@@ -1664,3 +1664,85 @@ def test_sub_sampling_the_ramps_is_paid_only_when_concomitant_is_on(
   assert gap < 1e-12, (
     f'refining the raster moved the feature-OFF answer by {gap:.3e}; the '
     f'linear term is supposed to be exact from the trapezoid corners')
+
+
+@pytest.mark.slow
+def test_balanced_ssfp_reaches_its_closed_form_per_node(minimal_phantom):
+  """The COHERENT steady state, which nothing in the suite pinned.
+
+  The spoiled one is covered (`test_spoiled_steady_state_matches_the_closed_form`
+  on flash_tr_v15). This is the other side: no spoiling at all, alternating RF
+  phase, and coherence that has to survive 1600 block boundaries carrying the
+  Magnus state. It is the regime `perfect_spoiling=False` exists for.
+
+  On resonance the steady state immediately after the pulse is
+
+      M+ = M0 sin(a) (1 - E1) / (1 - (E1 - E2) cos(a) - E1 E2)
+
+  **The closed form was checked independently before it was used here**, by
+  iterating the ideal-pulse Bloch map to its fixed point in numpy: 8.6e-15
+  relative. That matters because the formula is quoted for the echo in some
+  references, which differs by a factor sqrt(E2).
+
+  Every node carries a different `b1_map`, so each has its own flip angle and
+  its own closed form **in one solve** -- a per-node check of b1 in a coherent
+  multi-block steady state, where a flip error compounds over TRs. The other
+  b1 tests are all single-pulse.
+
+  Two traps, both measured: the steady state is not reached at 400 TRs (the
+  error reads 3.4e-3 there against 5.0e-5 at 800), and the residual scales with
+  the PULSE WIDTH, not with dt -- 2.5e-3 at 0.05 ms, 1.0e-4 at 0.01, 2.0e-5 at
+  0.002 -- because the closed form assumes an instantaneous pulse and the
+  solver relaxes during it.
+  """
+  T1_ms, T2_ms, TR_ms, pulse_ms, n_tr = 600.0, 100.0, 5.0, 0.002, 800
+  nominal = np.radians(15.0)
+  scanner = Scanner()
+  gamma = scanner.gamma.m_as('rad/ms/mT')
+  n_nodes = minimal_phantom.local_nodes.shape[0]
+  b1 = np.linspace(0.2, 1.8, n_nodes)
+
+  def pulse(phase_rad, n_samples=4):
+    amplitude = nominal / (gamma * pulse_ms)
+    return RF(waveform=Quantity(np.full(n_samples, amplitude, dtype=complex), 'mT'),
+              timings=Quantity(np.linspace(0.0, pulse_ms, n_samples), 'ms'),
+              phase_offset=Quantity(phase_rad, 'rad'))
+
+  seq = Sequence()
+  for i in range(n_tr):
+    block = SequenceBlock(rf_pulses=[pulse(0.0 if i % 2 == 0 else np.pi)],
+                          dur=Quantity(pulse_ms, 'ms'))
+    block.store_magnetization = (i == n_tr - 1)
+    seq.add_block(block)
+    seq.add_block(SequenceBlock(dur=Quantity(TR_ms - pulse_ms, 'ms'),
+                                dt=Quantity(TR_ms - pulse_ms, 'ms')))
+
+  Mxy, _Mz = BlochSolver(
+    seq, minimal_phantom, M0=1.0, T1=Quantity(T1_ms, 'ms'),
+    T2=Quantity(T2_ms, 'ms'), initial_Mxy=0.0, initial_Mz=1.0,
+    perfect_spoiling=False, dtype='float64', b1_map=b1).solve()
+
+  E1, E2 = np.exp(-TR_ms / T1_ms), np.exp(-TR_ms / T2_ms)
+
+  def closed_form(flip):
+    return (np.sin(flip) * (1.0 - E1)
+            / (1.0 - (E1 - E2) * np.cos(flip) - E1 * E2))
+
+  expected = closed_form(b1 * nominal)
+  got = np.abs(Mxy[:, -1])
+
+  # The nodes must actually differ, or a map applied to the wrong ones would
+  # not show. Measured spread on these b1 values: ~5.9x.
+  assert expected.max() / expected.min() > 3.0, (
+    'these flip angles no longer separate the nodes')
+  worst = float(np.abs(got / expected - 1.0).max())
+  assert worst < 5e-4, (
+    f'the balanced steady state is off its closed form by {worst:.2e} per node;'
+    f' measured 5.0e-5 at this pulse width and TR count')
+  # Reversing the map must move every node, so the agreement above is a
+  # per-node one and not an average.
+  reversed_gap = float(np.abs(closed_form(b1[::-1] * nominal) / expected
+                              - 1.0).max())
+  assert reversed_gap > 0.5, (
+    'a reversed b1 map would give nearly the same answer here, so this case '
+    'cannot localise the map')
