@@ -641,3 +641,170 @@ def test_a_zero_or_non_finite_static_field_is_refused(tmp_path):
         (zero.copy(), zero.copy(), zero.copy()), t, None)).ravel()[0]))
   assert abs(at(5.0) - at(0.0)) < 1e-6 * at(0.0), (
     'an infinite T2 should switch relaxation off, not decay')
+
+
+# ---------------------------------------------------------------------------
+# Concomitant fields DURING the readout
+# ---------------------------------------------------------------------------
+#
+# The assembler's phase was linear in position: `-k.x` plus a static
+# `-phi.t`. The Maxwell term is quadratic, so it cannot be folded into either,
+# and concomitant phase accrued inside an ADC window was simply absent.
+# Measured on epi_v142 at 1.5 T that is -5.50 rad at z = 5 cm and -22.0 rad at
+# x = z = 10 cm over its 103 ms train.
+
+
+def _maxwell_fixture(tmp_path, name):
+  """Five nodes at incommensurate coordinates spread over ~20 cm, so all four
+  Maxwell terms are live and none of them is degenerate."""
+  import meshio
+  points = np.array([[0.11, -0.03, 0.07],
+                     [-0.05, 0.12, 0.02],
+                     [0.04, 0.06, -0.10],
+                     [-0.09, -0.08, 0.05],
+                     [0.02, -0.11, -0.06]])
+  path = tmp_path / name
+  meshio.write(str(path), meshio.Mesh(points, [('tetra', np.array([[0, 1, 2, 3],
+                                                                  [1, 2, 4, 3]]))]))
+  phantom = FEMPhantom(path=str(path))
+  phantom.set_assembler(voxel_size=0.0, lorder=2, horder=4,
+                        nodal_approximation=False, lumped=False)
+  n = phantom.local_nodes.shape[0]
+  phantom.set_static_fields(T2=np.full(n, 1e9, dtype=np.float32),
+                            phi_dB0=np.zeros(n, dtype=np.float32))
+  phantom.update_magnetization(np.ones(n, dtype=np.complex64))
+  return phantom, points
+
+
+def _constant_gradient_coefficients(amps, dur_ms, scanner, scale=1.0):
+  from pint import Quantity as Q_
+
+  from feelmri import maxwell_moments, maxwell_phase_coefficients
+  from feelmri.Bloch import Sequence, SequenceBlock
+  from feelmri.MRObjects import Gradient
+
+  timings = np.array([0.0, dur_ms])
+  gradients = [Gradient(timings=Q_(timings, 'ms'),
+                        amplitudes=Q_(np.array([a, a]), 'mT/m'), scanner=scanner,
+                        ref=Q_(0.0, 'ms'), time=Q_(0.0, 'ms'), axis=axis)
+               for axis, a in enumerate(amps)]
+  seq = Sequence()
+  seq.add_block(SequenceBlock(gradients=gradients, dur=Q_(dur_ms, 'ms'),
+                              dt=Q_(0.01, 'ms'), empty=False))
+  times = np.array([0.0, dur_ms])
+  coef = maxwell_phase_coefficients(maxwell_moments(seq, 0.0, times), scanner)
+  return times, coef * scale
+
+
+def _nodal_phase(coef_row, points):
+  x, y, z = points[:, 0], points[:, 1], points[:, 2]
+  return (coef_row[0] * z ** 2 + coef_row[1] * (x ** 2 + y ** 2)
+          + coef_row[2] * x * z + coef_row[3] * y * z)
+
+
+@pytest.mark.parametrize('scale, tag', [(1.0, '1 rad'), (20.0, '20 rad')])
+def test_the_concomitant_readout_term_matches_its_closed_form(tmp_path, scale, tag):
+  """`signal_sum` is an unweighted sum over nodes, so `S = sum_n exp(i phi_n)`
+  is exact -- no quadrature, no interpolation, nothing to approximate.
+
+  **Do not use the quadrature path as a nodal reference.** It evaluates the
+  phase AT the quadrature points, whereas a nodal prediction interpolates
+  `exp(i phi)` from the nodes; at a 1 rad phase over a 20 cm element the two
+  differ by 46%. That is physics, not a defect, and it cost a wrong alarm here.
+
+  The 20 rad case is the one that matters: the assembler works in float32 and
+  its phase already carries hundreds of radians of `k.x`, so what has to be
+  shown is that a term of the size this feature exists to model survives.
+  """
+  from feelmri.MRObjects import Scanner
+
+  phantom, points = _maxwell_fixture(tmp_path, f'maxwell_{tag.split()[0]}.vtu')
+  scanner = Scanner()
+  times, coef = _constant_gradient_coefficients((14.0, -9.0, 20.0), 3.0,
+                                                scanner, scale=scale)
+  zero = np.zeros((2, 1, 1), dtype=np.float32)
+  t3 = times.reshape(2, 1, 1).astype(np.float32)
+  pts = (zero.copy(), zero.copy(), zero.copy())
+
+  got = np.asarray(phantom.signal_sum(pts, t3, None, maxwell=coef)).ravel()[1]
+  phase = _nodal_phase(coef[1], points)
+  expected = complex(np.exp(1j * phase).sum())
+
+  assert np.abs(phase).max() > 0.5, 'this case produces no concomitant phase'
+  assert abs(got - expected) < 1e-5 * points.shape[0], (
+    f'{tag}: signal_sum reads {got:.6f} where the closed form over nodes gives '
+    f'{expected:.6f}, at a phase span of {np.abs(phase).max():.3f} rad')
+
+
+def test_zero_coefficients_are_bit_identical_to_the_term_being_off(tmp_path):
+  """The new branch must not perturb anything by itself. With the feature off
+  entirely the whole suite and the 24-case kernel A/B are unchanged; this pins
+  the remaining case, where the branch runs but the coefficients are zero."""
+  from feelmri.MRObjects import Scanner
+
+  phantom, _points = _maxwell_fixture(tmp_path, 'maxwell_zero.vtu')
+  times, coef = _constant_gradient_coefficients((14.0, -9.0, 20.0), 3.0, Scanner())
+  zero = np.zeros((2, 1, 1), dtype=np.float32)
+  t3 = times.reshape(2, 1, 1).astype(np.float32)
+  pts = (zero.copy(), zero.copy(), zero.copy())
+
+  off = np.asarray(phantom.signal_sum(pts, t3, None))
+  zeros = np.asarray(phantom.signal_sum(pts, t3, None,
+                                        maxwell=np.zeros_like(coef)))
+  assert np.array_equal(off, zeros), 'zero coefficients changed the signal'
+  # ... and the case is not vacuous: real coefficients do change it.
+  live = np.asarray(phantom.signal_sum(pts, t3, None, maxwell=coef))
+  assert not np.allclose(off, live)
+
+
+def test_the_readout_term_follows_a_moving_phantom(tmp_path):
+  """The term is quadratic in the CURRENT position, so under a POD trajectory
+  it must be evaluated at the displaced coordinates -- exactly as `-k.x` is.
+  A constant displacement must therefore be indistinguishable from building
+  the phantom at the displaced position."""
+  pytest.importorskip('meshio')
+  import meshio
+  from feelmri.Motion import POD
+  from feelmri.MRObjects import Scanner
+
+  phantom, points = _maxwell_fixture(tmp_path, 'maxwell_moving.vtu')
+  shift = np.array([0.03, -0.02, 0.025])
+  n = points.shape[0]
+  data = np.zeros((n, 3, 4), dtype=np.float32)
+  for axis in range(3):
+    data[:, axis, :] = shift[axis]
+  pod = POD(data=data, times=np.linspace(0.0, 5.0, 4), n_modes=1)
+
+  shifted_path = tmp_path / 'maxwell_shifted.vtu'
+  meshio.write(str(shifted_path), meshio.Mesh(
+    points + shift, [('tetra', np.array([[0, 1, 2, 3], [1, 2, 4, 3]]))]))
+  shifted = FEMPhantom(path=str(shifted_path))
+  shifted.set_assembler(voxel_size=0.0, lorder=2, horder=4,
+                        nodal_approximation=False, lumped=False)
+  shifted.set_static_fields(T2=np.full(n, 1e9, dtype=np.float32),
+                            phi_dB0=np.zeros(n, dtype=np.float32))
+  shifted.update_magnetization(np.ones(n, dtype=np.complex64))
+
+  # Scaled up: at a ~1 rad phase a 3 cm shift moves it by only 0.05 rad, which
+  # is too weak to tell a moving phantom from a still one. At the ~20 rad scale
+  # the feature exists to model, the same shift moves it by a full radian.
+  times, coef = _constant_gradient_coefficients((14.0, -9.0, 20.0), 3.0,
+                                                Scanner(), scale=20.0)
+  zero = np.zeros((2, 1, 1), dtype=np.float32)
+  t3 = times.reshape(2, 1, 1).astype(np.float32)
+  pts = (zero.copy(), zero.copy(), zero.copy())
+
+  moving = np.asarray(phantom.signal_sum(pts, t3, pod, maxwell=coef)).ravel()[1]
+  static = np.asarray(shifted.signal_sum(pts, t3, None, maxwell=coef)).ravel()[1]
+  assert abs(moving - static) < 1e-4 * n, (
+    f'a moving phantom reads {moving:.6f} where the statically shifted one '
+    f'gives {static:.6f}; the term is not following the displacement')
+  # The displacement must actually matter. Checked on the PHASE rather than on
+  # the summed signal: the sum partly cancels across nodes, so it understates
+  # how different the two configurations are.
+  moved_phase = _nodal_phase(coef[1], points + shift)
+  rest_phase = _nodal_phase(coef[1], points)
+  assert np.abs(moved_phase - rest_phase).max() > 0.1, (
+    f'the shift changes the concomitant phase by only '
+    f'{np.abs(moved_phase - rest_phase).max():.3e} rad, so this case cannot '
+    f'tell a moving phantom from a still one')

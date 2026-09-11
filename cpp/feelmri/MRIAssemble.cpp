@@ -321,7 +321,8 @@ public:
         const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& modes_y,
         const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& modes_z,
         const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& weights,
-        bool has_traj)
+        bool has_traj,
+        const std::vector<Tensor3> &maxwell)
     {
         const C i1(T(0), T(1));
         const T two_pi  = T(2) * T(M_PI);
@@ -342,9 +343,43 @@ public:
         Eigen::Matrix<C, Eigen::Dynamic, 1> fourier_block(BLOCK_SIZE);
         Eigen::Array<T, Eigen::Dynamic, 1> f_mag(BLOCK_SIZE), f_po(BLOCK_SIZE);
         Eigen::Array<T, Eigen::Dynamic, 1> dx0(BLOCK_SIZE), dx1(BLOCK_SIZE), dx2(BLOCK_SIZE);
+        // z^2, x^2+y^2, x*z and y*z at the CURRENT position. Rebuilt inside the
+        // update_time guard below so they follow a POD trajectory exactly as
+        // the linear term does; they are a function of position alone, so the
+        // per-unique-time caching that guard provides is the right one.
+        const int maxwell_scratch = maxwell.empty() ? 0 : BLOCK_SIZE;
+        Eigen::Array<T, Eigen::Dynamic, 1> mzz(maxwell_scratch), mrr(maxwell_scratch),
+                                           mxz(maxwell_scratch), myz(maxwell_scratch);
 
         // Flatten the per-sample scalars once; S is small (one readout).
+        // Concomitant (Maxwell) phase. Four coefficients per sample multiplying
+        // four fixed spatial monomials -- the quadratic counterpart of k, and
+        // the only channel here that is not linear in position. They arrive in
+        // rad/m^2 with every sign and the factor of 4 already folded in by
+        // maxwell_phase_coefficients, so nothing here knows about B0 or about
+        // the Maxwell expression itself: three copies of that expression exist
+        // already and must not become four. EMPTY means off.
+        const bool has_maxwell = !maxwell.empty();
+        if (has_maxwell && maxwell.size() != 4) {
+            throw std::invalid_argument(
+                "signal: maxwell must be empty or hold exactly 4 coefficient "
+                "arrays (z^2, x^2+y^2, x*z, y*z); got " +
+                std::to_string(maxwell.size()));
+        }
+        for (std::size_t c = 0; c < maxwell.size(); ++c) {
+            if (maxwell[c].dimension(0) != kloc[0].dimension(0)
+                || maxwell[c].dimension(1) != kloc[0].dimension(1)
+                || maxwell[c].dimension(2) != kloc[0].dimension(2)) {
+                throw std::invalid_argument(
+                    "signal: maxwell coefficient " + std::to_string(c) +
+                    " does not have the same shape as the k-space trajectory.");
+            }
+        }
         Eigen::Array<T, Eigen::Dynamic, 1> tv(S), kxv(S), kyv(S), kzv(S);
+        Eigen::Array<T, Eigen::Dynamic, 1> c0v(has_maxwell ? S : 0),
+                                           c1v(has_maxwell ? S : 0),
+                                           c2v(has_maxwell ? S : 0),
+                                           c3v(has_maxwell ? S : 0);
         for (uint i = 0, row = 0; i < nb_meas; ++i)
         for (uint j = 0; j < nb_lines; ++j)
         for (uint k = 0; k < nb_kz; ++k, ++row) {
@@ -352,6 +387,12 @@ public:
             kxv(row) = two_pi * kloc[0](i, j, k);
             kyv(row) = two_pi * kloc[1](i, j, k);
             kzv(row) = two_pi * kloc[2](i, j, k);
+            if (has_maxwell) {
+                c0v(row) = maxwell[0](i, j, k);
+                c1v(row) = maxwell[1](i, j, k);
+                c2v(row) = maxwell[2](i, j, k);
+                c3v(row) = maxwell[3](i, j, k);
+            }
         }
 
         kspace_mat.setZero();
@@ -391,6 +432,20 @@ public:
                         dx1.head(q_count) = x1b + (modes_y.middleRows(q_start, q_count) * w).array();
                         dx2.head(q_count) = x2b + (modes_z.middleRows(q_start, q_count) * w).array();
                     }
+                    if (has_maxwell) {
+                        if (has_traj) {
+                            mzz.head(q_count) = dx2.head(q_count) * dx2.head(q_count);
+                            mrr.head(q_count) = dx0.head(q_count) * dx0.head(q_count)
+                                              + dx1.head(q_count) * dx1.head(q_count);
+                            mxz.head(q_count) = dx0.head(q_count) * dx2.head(q_count);
+                            myz.head(q_count) = dx1.head(q_count) * dx2.head(q_count);
+                        } else {
+                            mzz.head(q_count) = x2b * x2b;
+                            mrr.head(q_count) = x0b * x0b + x1b * x1b;
+                            mxz.head(q_count) = x0b * x2b;
+                            myz.head(q_count) = x1b * x2b;
+                        }
+                    }
                     // Ownership mask: interface nodes carry weight 0 on every rank
                     // but their canonical owner.
                     f_mag.head(q_count) = ownb * (-tij * invT2b).exp();
@@ -401,7 +456,31 @@ public:
                     t_old = tij;
                 }
 
-                if (has_traj) {
+                // One expression per branch, never a running +=: under -ffast-math
+                // a += regroups the FMAs and the feature-off build stops being
+                // bit-identical to the build that predates this term. The two
+                // branches below the maxwell ones are textually unchanged for
+                // exactly that reason.
+                if (has_maxwell) {
+                    const T m0 = c0v(row), m1 = c1v(row), m2 = c2v(row), m3 = c3v(row);
+                    if (has_traj) {
+                        phase_block.head(q_count) = f_po.head(q_count)
+                                                    - kx * dx0.head(q_count)
+                                                    - ky * dx1.head(q_count)
+                                                    - kz * dx2.head(q_count)
+                                                    + m0 * mzz.head(q_count)
+                                                    + m1 * mrr.head(q_count)
+                                                    + m2 * mxz.head(q_count)
+                                                    + m3 * myz.head(q_count);
+                    } else {
+                        phase_block.head(q_count) = f_po.head(q_count)
+                                                    - kx * x0b - ky * x1b - kz * x2b
+                                                    + m0 * mzz.head(q_count)
+                                                    + m1 * mrr.head(q_count)
+                                                    + m2 * mxz.head(q_count)
+                                                    + m3 * myz.head(q_count);
+                    }
+                } else if (has_traj) {
                     phase_block.head(q_count) = f_po.head(q_count)
                                                 - kx * dx0.head(q_count)
                                                 - ky * dx1.head(q_count)
@@ -435,7 +514,8 @@ public:
         const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& modes_y,
         const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& modes_z,
         const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& weights,
-        bool has_traj)
+        bool has_traj,
+        const std::vector<Tensor3> &maxwell)
     {
         // This function is structurally identical to signal_sum, except it integrates 
         // using the pre-computed mass-matrix projection (f_M_Mxy_nodes_) instead of raw Mxy.
@@ -455,8 +535,42 @@ public:
         Eigen::Matrix<C, Eigen::Dynamic, 1> fourier_block(BLOCK_SIZE);
         Eigen::Array<T, Eigen::Dynamic, 1> f_mag(BLOCK_SIZE), f_po(BLOCK_SIZE);
         Eigen::Array<T, Eigen::Dynamic, 1> dx0(BLOCK_SIZE), dx1(BLOCK_SIZE), dx2(BLOCK_SIZE);
+        // z^2, x^2+y^2, x*z and y*z at the CURRENT position. Rebuilt inside the
+        // update_time guard below so they follow a POD trajectory exactly as
+        // the linear term does; they are a function of position alone, so the
+        // per-unique-time caching that guard provides is the right one.
+        const int maxwell_scratch = maxwell.empty() ? 0 : BLOCK_SIZE;
+        Eigen::Array<T, Eigen::Dynamic, 1> mzz(maxwell_scratch), mrr(maxwell_scratch),
+                                           mxz(maxwell_scratch), myz(maxwell_scratch);
 
+        // Concomitant (Maxwell) phase. Four coefficients per sample multiplying
+        // four fixed spatial monomials -- the quadratic counterpart of k, and
+        // the only channel here that is not linear in position. They arrive in
+        // rad/m^2 with every sign and the factor of 4 already folded in by
+        // maxwell_phase_coefficients, so nothing here knows about B0 or about
+        // the Maxwell expression itself: three copies of that expression exist
+        // already and must not become four. EMPTY means off.
+        const bool has_maxwell = !maxwell.empty();
+        if (has_maxwell && maxwell.size() != 4) {
+            throw std::invalid_argument(
+                "signal: maxwell must be empty or hold exactly 4 coefficient "
+                "arrays (z^2, x^2+y^2, x*z, y*z); got " +
+                std::to_string(maxwell.size()));
+        }
+        for (std::size_t c = 0; c < maxwell.size(); ++c) {
+            if (maxwell[c].dimension(0) != kloc[0].dimension(0)
+                || maxwell[c].dimension(1) != kloc[0].dimension(1)
+                || maxwell[c].dimension(2) != kloc[0].dimension(2)) {
+                throw std::invalid_argument(
+                    "signal: maxwell coefficient " + std::to_string(c) +
+                    " does not have the same shape as the k-space trajectory.");
+            }
+        }
         Eigen::Array<T, Eigen::Dynamic, 1> tv(S), kxv(S), kyv(S), kzv(S);
+        Eigen::Array<T, Eigen::Dynamic, 1> c0v(has_maxwell ? S : 0),
+                                           c1v(has_maxwell ? S : 0),
+                                           c2v(has_maxwell ? S : 0),
+                                           c3v(has_maxwell ? S : 0);
         for (uint i = 0, row = 0; i < nb_meas; ++i)
         for (uint j = 0; j < nb_lines; ++j)
         for (uint k = 0; k < nb_kz; ++k, ++row) {
@@ -464,6 +578,12 @@ public:
             kxv(row) = two_pi * kloc[0](i, j, k);
             kyv(row) = two_pi * kloc[1](i, j, k);
             kzv(row) = two_pi * kloc[2](i, j, k);
+            if (has_maxwell) {
+                c0v(row) = maxwell[0](i, j, k);
+                c1v(row) = maxwell[1](i, j, k);
+                c2v(row) = maxwell[2](i, j, k);
+                c3v(row) = maxwell[3](i, j, k);
+            }
         }
 
         kspace_mat.setZero();
@@ -495,6 +615,20 @@ public:
                         dx1.head(q_count) = x1b + (modes_y.middleRows(q_start, q_count) * w).array();
                         dx2.head(q_count) = x2b + (modes_z.middleRows(q_start, q_count) * w).array();
                     }
+                    if (has_maxwell) {
+                        if (has_traj) {
+                            mzz.head(q_count) = dx2.head(q_count) * dx2.head(q_count);
+                            mrr.head(q_count) = dx0.head(q_count) * dx0.head(q_count)
+                                              + dx1.head(q_count) * dx1.head(q_count);
+                            mxz.head(q_count) = dx0.head(q_count) * dx2.head(q_count);
+                            myz.head(q_count) = dx1.head(q_count) * dx2.head(q_count);
+                        } else {
+                            mzz.head(q_count) = x2b * x2b;
+                            mrr.head(q_count) = x0b * x0b + x1b * x1b;
+                            mxz.head(q_count) = x0b * x2b;
+                            myz.head(q_count) = x1b * x2b;
+                        }
+                    }
                     f_mag.head(q_count) = (-tij * invT2b).exp();
                     // exp(-i*phi*t), which continues the solver's own
                     // exp(-i*gamma*delta_B*t); only this term is negated,
@@ -503,7 +637,31 @@ public:
                     t_old = tij;
                 }
 
-                if (has_traj) {
+                // One expression per branch, never a running +=: under -ffast-math
+                // a += regroups the FMAs and the feature-off build stops being
+                // bit-identical to the build that predates this term. The two
+                // branches below the maxwell ones are textually unchanged for
+                // exactly that reason.
+                if (has_maxwell) {
+                    const T m0 = c0v(row), m1 = c1v(row), m2 = c2v(row), m3 = c3v(row);
+                    if (has_traj) {
+                        phase_block.head(q_count) = f_po.head(q_count)
+                                                    - kx * dx0.head(q_count)
+                                                    - ky * dx1.head(q_count)
+                                                    - kz * dx2.head(q_count)
+                                                    + m0 * mzz.head(q_count)
+                                                    + m1 * mrr.head(q_count)
+                                                    + m2 * mxz.head(q_count)
+                                                    + m3 * myz.head(q_count);
+                    } else {
+                        phase_block.head(q_count) = f_po.head(q_count)
+                                                    - kx * x0b - ky * x1b - kz * x2b
+                                                    + m0 * mzz.head(q_count)
+                                                    + m1 * mrr.head(q_count)
+                                                    + m2 * mxz.head(q_count)
+                                                    + m3 * myz.head(q_count);
+                    }
+                } else if (has_traj) {
                     phase_block.head(q_count) = f_po.head(q_count)
                                                 - kx * dx0.head(q_count)
                                                 - ky * dx1.head(q_count)
@@ -535,9 +693,11 @@ public:
         const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& modes_y,
         const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& modes_z,
         const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& weights,
-        bool has_traj)
+        bool has_traj,
+        const std::vector<Tensor3> &maxwell)
     {
-        return signal(kloc, t, modes_x, modes_y, modes_z, weights, has_traj); // Logic is identical to signal(), wrapped for compatibility
+        return signal(kloc, t, modes_x, modes_y, modes_z, weights, has_traj,
+                      maxwell); // Logic is identical to signal(), wrapped for compatibility
     }
 
     // =========================================================================
@@ -554,7 +714,8 @@ public:
         const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& modes_y,
         const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& modes_z,
         const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& weights,
-        bool has_traj)
+        bool has_traj,
+        const std::vector<Tensor3> &maxwell)
     {
         // Only path that reads f_Mxy_, so the nodal -> quadrature projection is
         // performed here rather than on every magnetization update.
@@ -576,10 +737,44 @@ public:
         Eigen::Matrix<C, Eigen::Dynamic, 1> fourier_block(BLOCK_SIZE);
         Eigen::Array<T, Eigen::Dynamic, 1> f_mag(BLOCK_SIZE), f_po(BLOCK_SIZE);
         Eigen::Array<T, Eigen::Dynamic, 1> dx0(BLOCK_SIZE), dx1(BLOCK_SIZE), dx2(BLOCK_SIZE);
+        // z^2, x^2+y^2, x*z and y*z at the CURRENT position. Rebuilt inside the
+        // update_time guard below so they follow a POD trajectory exactly as
+        // the linear term does; they are a function of position alone, so the
+        // per-unique-time caching that guard provides is the right one.
+        const int maxwell_scratch = maxwell.empty() ? 0 : BLOCK_SIZE;
+        Eigen::Array<T, Eigen::Dynamic, 1> mzz(maxwell_scratch), mrr(maxwell_scratch),
+                                           mxz(maxwell_scratch), myz(maxwell_scratch);
 
         if (has_traj) ensure_quadrature_modes(modes_x, modes_y, modes_z);
 
+        // Concomitant (Maxwell) phase. Four coefficients per sample multiplying
+        // four fixed spatial monomials -- the quadratic counterpart of k, and
+        // the only channel here that is not linear in position. They arrive in
+        // rad/m^2 with every sign and the factor of 4 already folded in by
+        // maxwell_phase_coefficients, so nothing here knows about B0 or about
+        // the Maxwell expression itself: three copies of that expression exist
+        // already and must not become four. EMPTY means off.
+        const bool has_maxwell = !maxwell.empty();
+        if (has_maxwell && maxwell.size() != 4) {
+            throw std::invalid_argument(
+                "signal: maxwell must be empty or hold exactly 4 coefficient "
+                "arrays (z^2, x^2+y^2, x*z, y*z); got " +
+                std::to_string(maxwell.size()));
+        }
+        for (std::size_t c = 0; c < maxwell.size(); ++c) {
+            if (maxwell[c].dimension(0) != kloc[0].dimension(0)
+                || maxwell[c].dimension(1) != kloc[0].dimension(1)
+                || maxwell[c].dimension(2) != kloc[0].dimension(2)) {
+                throw std::invalid_argument(
+                    "signal: maxwell coefficient " + std::to_string(c) +
+                    " does not have the same shape as the k-space trajectory.");
+            }
+        }
         Eigen::Array<T, Eigen::Dynamic, 1> tv(S), kxv(S), kyv(S), kzv(S);
+        Eigen::Array<T, Eigen::Dynamic, 1> c0v(has_maxwell ? S : 0),
+                                           c1v(has_maxwell ? S : 0),
+                                           c2v(has_maxwell ? S : 0),
+                                           c3v(has_maxwell ? S : 0);
         for (uint i = 0, row = 0; i < nb_meas; ++i)
         for (uint j = 0; j < nb_lines; ++j)
         for (uint k = 0; k < nb_kz; ++k, ++row) {
@@ -587,6 +782,12 @@ public:
             kxv(row) = two_pi * kloc[0](i, j, k);
             kyv(row) = two_pi * kloc[1](i, j, k);
             kzv(row) = two_pi * kloc[2](i, j, k);
+            if (has_maxwell) {
+                c0v(row) = maxwell[0](i, j, k);
+                c1v(row) = maxwell[1](i, j, k);
+                c2v(row) = maxwell[2](i, j, k);
+                c3v(row) = maxwell[3](i, j, k);
+            }
         }
 
         kspace_mat.setZero();
@@ -619,6 +820,20 @@ public:
                         dx1.head(q_count) = x1b + (mq_y_.middleRows(q_start, q_count) * w).array();
                         dx2.head(q_count) = x2b + (mq_z_.middleRows(q_start, q_count) * w).array();
                     }
+                    if (has_maxwell) {
+                        if (has_traj) {
+                            mzz.head(q_count) = dx2.head(q_count) * dx2.head(q_count);
+                            mrr.head(q_count) = dx0.head(q_count) * dx0.head(q_count)
+                                              + dx1.head(q_count) * dx1.head(q_count);
+                            mxz.head(q_count) = dx0.head(q_count) * dx2.head(q_count);
+                            myz.head(q_count) = dx1.head(q_count) * dx2.head(q_count);
+                        } else {
+                            mzz.head(q_count) = x2b * x2b;
+                            mrr.head(q_count) = x0b * x0b + x1b * x1b;
+                            mxz.head(q_count) = x0b * x2b;
+                            myz.head(q_count) = x1b * x2b;
+                        }
+                    }
                     // T2 decay pre-multiplied by the quadrature weight
                     f_mag.head(q_count) = wqb * (-tij * invT2b).exp();
                     // exp(-i*phi*t), which continues the solver's own
@@ -628,7 +843,31 @@ public:
                     t_old = tij;
                 }
 
-                if (has_traj) {
+                // One expression per branch, never a running +=: under -ffast-math
+                // a += regroups the FMAs and the feature-off build stops being
+                // bit-identical to the build that predates this term. The two
+                // branches below the maxwell ones are textually unchanged for
+                // exactly that reason.
+                if (has_maxwell) {
+                    const T m0 = c0v(row), m1 = c1v(row), m2 = c2v(row), m3 = c3v(row);
+                    if (has_traj) {
+                        phase_block.head(q_count) = f_po.head(q_count)
+                                                    - kx * dx0.head(q_count)
+                                                    - ky * dx1.head(q_count)
+                                                    - kz * dx2.head(q_count)
+                                                    + m0 * mzz.head(q_count)
+                                                    + m1 * mrr.head(q_count)
+                                                    + m2 * mxz.head(q_count)
+                                                    + m3 * myz.head(q_count);
+                    } else {
+                        phase_block.head(q_count) = f_po.head(q_count)
+                                                    - kx * x0b - ky * x1b - kz * x2b
+                                                    + m0 * mzz.head(q_count)
+                                                    + m1 * mrr.head(q_count)
+                                                    + m2 * mxz.head(q_count)
+                                                    + m3 * myz.head(q_count);
+                    }
+                } else if (has_traj) {
                     phase_block.head(q_count) = f_po.head(q_count)
                                                 - kx * dx0.head(q_count)
                                                 - ky * dx1.head(q_count)
@@ -749,23 +988,27 @@ PYBIND11_MODULE(MRIAssemble, m)
              py::arg("kloc"), py::arg("t"),
              py::arg("modes_x"), py::arg("modes_y"), py::arg("modes_z"), 
              py::arg("weights"), py::arg("has_traj"),
+             py::arg("maxwell") = std::vector<Assembler::Tensor3>{},
              "Simulate MRI k-space signal summing over nodes with pre-computed POD fields.")
 
         .def("signal_full", &Assembler::signal_full,
              py::arg("kloc"), py::arg("t"),
              py::arg("modes_x"), py::arg("modes_y"), py::arg("modes_z"), 
              py::arg("weights"), py::arg("has_traj"),
+             py::arg("maxwell") = std::vector<Assembler::Tensor3>{},
              "Simulate MRI k-space signal over quadrature points with pre-computed POD fields.")
 
         .def("signal", &Assembler::signal,
              py::arg("kloc"), py::arg("t"),
              py::arg("modes_x"), py::arg("modes_y"), py::arg("modes_z"), 
              py::arg("weights"), py::arg("has_traj"),
+             py::arg("maxwell") = std::vector<Assembler::Tensor3>{},
              "Simulate MRI k-space signal over quadrature points with pre-computed POD fields.")
 
         .def("signal_nodal", &Assembler::signal_nodal,
              py::arg("kloc"), py::arg("t"),
              py::arg("modes_x"), py::arg("modes_y"), py::arg("modes_z"), 
              py::arg("weights"), py::arg("has_traj"),
+             py::arg("maxwell") = std::vector<Assembler::Tensor3>{},
              "Simulate MRI k-space signal using ultra-fast nodal mass matrix integration.");
 }

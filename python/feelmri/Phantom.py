@@ -195,6 +195,33 @@ class FEMPhantom:
             cache[key] = hit
         return hit[1], hit[2], hit[3]
 
+    @staticmethod
+    def _maxwell_inputs(maxwell, kspace_times):
+        """Split concomitant phase coefficients into the assembler's container.
+
+        ``maxwell`` is ``(N, 4)`` in rad/m^2 -- the output of
+        :func:`feelmri.maxwell_phase_coefficients`, which owns the sign
+        convention. It is handed over as four arrays shaped like the k-space
+        trajectory, the same container ``kspace_points`` uses, so the assembler
+        flattens it with the loop it already has. An empty list means off, and
+        costs nothing: the kernel branches on it once, outside both loops.
+        """
+        if maxwell is None:
+            return []
+        m = np.asarray(maxwell)
+        if m.ndim != 2 or m.shape[1] != 4:
+            raise ValueError(
+                f"mri_signal: maxwell must be (N, 4) phase coefficients in "
+                f"rad/m^2, got shape {m.shape}. Build it with "
+                f"maxwell_phase_coefficients, which carries the signs.")
+        shape = np.shape(kspace_times)
+        if m.shape[0] != int(np.prod(shape)):
+            raise ValueError(
+                f"mri_signal: {m.shape[0]} maxwell coefficients against "
+                f"{int(np.prod(shape))} k-space samples.")
+        return [np.ascontiguousarray(m[:, c].reshape(shape), dtype=np.float32)
+                for c in range(4)]
+
     def _prepare_pod_data(self, kspace_times, pod):
         """Helper to extract and format POD data for zero-copy C++ execution."""
         has_traj = pod is not None
@@ -1341,7 +1368,8 @@ class FEMPhantom:
     def _set_static_fields_local(self, T2, phi_dB0):
         [a.set_static_fields(T2, phi_dB0) for a in self.assembler]
 
-    def mri_signal(self, kspace_points, kspace_times, pod=None):
+    def mri_signal(self, kspace_points, kspace_times, pod=None,
+                   maxwell=None):
         """Compute the MRI k-space signal using the configured assembler(s).
 
         Uses nodal integration for the first assembler group when
@@ -1369,6 +1397,7 @@ class FEMPhantom:
             
         with self._using('signal'):
             t_cpp, m_x, m_y, m_z, w, has_traj = self._prepare_pod_data(kspace_times, pod)
+            mw = self._maxwell_inputs(maxwell, kspace_times)
 
             eval_helper = []
             for i, a in enumerate(self.assembler):
@@ -1377,10 +1406,11 @@ class FEMPhantom:
                 else:
                     eval_helper.append(a.signal)
 
-            return sum([signal(kspace_points, t_cpp, m_x, m_y, m_z, w, has_traj)
+            return sum([signal(kspace_points, t_cpp, m_x, m_y, m_z, w, has_traj, mw)
                         for signal in eval_helper])
 
-    def signal(self, kspace_points, kspace_times, pod=None):
+    def signal(self, kspace_points, kspace_times, pod=None,
+                   maxwell=None):
         """Compute the k-space signal using full Gauss integration.
 
         Parameters
@@ -1402,10 +1432,12 @@ class FEMPhantom:
             raise NotImplementedError("Lists of trajectories must be combined using PODSum before evaluation.")
         with self._using('signal'):
             t_cpp, m_x, m_y, m_z, w, has_traj = self._prepare_pod_data(kspace_times, pod)
-            return sum([a.signal(kspace_points, t_cpp, m_x, m_y, m_z, w, has_traj)
+            mw = self._maxwell_inputs(maxwell, kspace_times)
+            return sum([a.signal(kspace_points, t_cpp, m_x, m_y, m_z, w, has_traj, mw)
                         for a in self.assembler])
 
-    def signal_nodal(self, kspace_points, kspace_times, pod=None):
+    def signal_nodal(self, kspace_points, kspace_times, pod=None,
+                   maxwell=None):
         """Compute the k-space signal using ultra-fast nodal mass matrix integration.
 
         Parameters
@@ -1431,10 +1463,12 @@ class FEMPhantom:
         # large-element group through the quadrature path, for the whole mesh.
         with self._using('signal'):
             t_cpp, m_x, m_y, m_z, w, has_traj = self._prepare_pod_data(kspace_times, pod)
+            mw = self._maxwell_inputs(maxwell, kspace_times)
             return self.assembler[0].signal_nodal(kspace_points, t_cpp, m_x, m_y, m_z,
-                                                  w, has_traj)
+                                                  w, has_traj, mw)
 
-    def signal_sum(self, kspace_points, kspace_times, pod=None):
+    def signal_sum(self, kspace_points, kspace_times, pod=None,
+                   maxwell=None):
         """Compute the k-space signal by summing nodal contributions.
 
         Parameters
@@ -1459,5 +1493,6 @@ class FEMPhantom:
         # nodal quantity over groups would count each node once per group.
         with self._using('signal'):
             t_cpp, m_x, m_y, m_z, w, has_traj = self._prepare_pod_data(kspace_times, pod)
+            mw = self._maxwell_inputs(maxwell, kspace_times)
             return self.assembler[0].signal_sum(kspace_points, t_cpp, m_x, m_y, m_z,
-                                                w, has_traj)
+                                                w, has_traj, mw)
