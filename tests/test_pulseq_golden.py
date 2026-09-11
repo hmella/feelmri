@@ -4,8 +4,7 @@ import numpy as np
 import pytest
 from pathlib import Path
 
-from conftest import skip_if_pypulseq_too_old
-from feelmri.PulseqAdapter import import_pulseq
+from conftest import SEQ_FILES, seq_ids, skip_if_pypulseq_too_old
 
 # Absolute regression on what each bundled .seq imports to. The timing gate in
 # test_pulseq_timing.py is a RELATIVE check -- it compares our reading of a
@@ -20,17 +19,12 @@ from feelmri.PulseqAdapter import import_pulseq
 
 pytestmark = pytest.mark.pulseq
 
-DATA_DIR = Path(__file__).resolve().parent / 'data'
-EXAMPLES_DIR = Path(__file__).resolve().parent.parent / 'examples' / 'pulseq'
-GOLDEN_DIR = DATA_DIR / 'golden'
-
-SEQ_FILES = sorted(DATA_DIR.glob('*.seq')) + sorted(EXAMPLES_DIR.glob('*.seq'))
+GOLDEN_DIR = Path(__file__).resolve().parent / 'data' / 'golden'
 
 RTOL = 1e-9
 
 
-def _summary(seq_path):
-  imp = import_pulseq(seq_path)
+def _summary(imp):
   seq = imp.feelmri_seq
 
   n_rf = sum(len(b.rf_pulses) for b in seq.blocks)
@@ -84,11 +78,11 @@ def _compare(got, want, path):
         f'{path}: {key} is {a}, golden says {b}')
 
 
-@pytest.mark.parametrize('seq_path', SEQ_FILES, ids=lambda p: p.stem)
-def test_import_matches_golden(seq_path):
+@pytest.mark.parametrize('seq_path', SEQ_FILES, ids=seq_ids(SEQ_FILES))
+def test_import_matches_golden(seq_path, pulseq_import):
   skip_if_pypulseq_too_old(seq_path)
   golden = GOLDEN_DIR / f'{seq_path.stem}.json'
-  summary = _summary(seq_path)
+  summary = _summary(pulseq_import(seq_path))
 
   if os.getenv('FEELMRI_UPDATE_GOLDEN', '0') == '1':
     GOLDEN_DIR.mkdir(parents=True, exist_ok=True)

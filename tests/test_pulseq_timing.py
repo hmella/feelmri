@@ -1,123 +1,55 @@
 import numpy as np
 import pytest
-from pathlib import Path
 
-from conftest import skip_if_pypulseq_too_old
-from feelmri.PulseqAdapter import import_pulseq
+from conftest import (SEQ_FILES, pypulseq_block_durations_ms, seq_ids,
+                      skip_if_pypulseq_too_old)
 
-# Timings of the imported sequence must match the Pulseq file. pypulseq is the
-# reference: its block_durations, duration() and adc_times() are read directly
-# and compared against the feelmri blocks.
+# The parser gate: what the in-house reader makes of a .seq file, against what
+# pypulseq makes of the SAME file. Four properties, one test each, every one
+# parametrised over every bundled fixture, so a failure names both the property
+# and the file.
+#
+# Four, not nine. Block count, absolute start times and total duration are the
+# length, the cumulative sum and the sum of the per-block duration array, so
+# they cannot fail while it passes -- they are folded into one test rather than
+# run as three more sweeps over fifteen files.
+#
+# What this gate CANNOT catch is an error the two readers share; that is what
+# test_pulseq_native_equivalence.py and test_pulseq_analytical.py are for.
 
 pytestmark = pytest.mark.pulseq
-
-DATA_DIR = Path(__file__).parent / 'data'
-EXAMPLES_DIR = Path(__file__).parent.parent / 'examples' / 'pulseq'
-
-SEQ_FILES = sorted(DATA_DIR.glob('*.seq')) + sorted(EXAMPLES_DIR.glob('*.seq'))
 
 # Time tolerance in ms. The block raster is 10 us, so anything at this level is
 # floating point noise rather than a timing difference.
 TOL_MS = 1e-9
 
 
-def _ids(paths):
-    return [p.stem for p in paths]
+@pytest.mark.parametrize('seq_path', SEQ_FILES, ids=seq_ids(SEQ_FILES))
+def test_timing_grid_matches(seq_path, pulseq_import, pypulseq_ref):
+    """Block count, per-block duration, absolute start and total duration.
 
+    The four are one property. `time_extent[0]` is the running sum of the
+    durations and `seq.dur` their total, so asserting them separately over
+    fifteen fixtures re-runs the same comparison three more times; asserting
+    them together still names which of the four broke.
+    """
+    ref = pypulseq_ref(seq_path)
+    imp = pulseq_import(seq_path)
+    blocks = imp.feelmri_seq.blocks
 
-@pytest.fixture(scope='module')
-def pulseq_sequences():
-    # tests/data/rotation_minimal.seq is skipped: it uses the ROTATIONS
-    # extension, which pypulseq does not implement at all, so there is no
-    # reference to compare against. The file itself is valid.
-    pp = pytest.importorskip('pypulseq')
-    out = {}
-    for path in SEQ_FILES:
-        seq = pp.Sequence()
-        try:
-            seq.read(str(path), detect_rf_use=False)
-        except Exception:
-            continue
-        out[path] = seq
-    return out
+    assert len(blocks) == len(ref.block_durations)
 
+    expected = pypulseq_block_durations_ms(ref)
+    got = np.array([b.dur.m_as('ms') for b in blocks])
+    assert np.abs(expected - got).max() < TOL_MS, 'per-block duration'
 
-def _reference(sequences, seq_path):
-    if seq_path not in sequences:
-        # Two distinct reasons pypulseq may refuse a file: it is too old for
-        # the format (say so precisely), or the file uses an extension it does
-        # not implement at all -- ROTATIONS, which it has no support for.
-        skip_if_pypulseq_too_old(seq_path)
-        pytest.skip(f'pypulseq does not implement an extension used by '
-                    f'{seq_path.name}; no reference available')
-    return sequences[seq_path]
+    # The absolute start of every block, which is where drift accumulates.
+    expected_start = np.concatenate(([0.0], np.cumsum(expected)[:-1]))
+    got_start = np.array([b.time_extent[0].m_as('ms') for b in blocks])
+    assert np.abs(expected_start - got_start).max() < TOL_MS, 'block start time'
 
-
-def _durations_ms(pp_seq):
-    # block_durations is a dict keyed from 1 in pypulseq 1.5
-    n = len(pp_seq.block_durations)
-    return np.array([pp_seq.block_durations[i + 1] for i in range(n)]) * 1e3
-
-
-@pytest.mark.parametrize('seq_path', SEQ_FILES, ids=_ids(SEQ_FILES))
-def test_block_count_matches(seq_path, pulseq_sequences):
-    ref = _reference(pulseq_sequences, seq_path)
-    imp = import_pulseq(seq_path)
-    assert len(imp.feelmri_seq.blocks) == len(ref.block_durations)
-
-
-@pytest.mark.parametrize('seq_path', SEQ_FILES, ids=_ids(SEQ_FILES))
-def test_block_durations_match(seq_path, pulseq_sequences):
-    ref = _reference(pulseq_sequences, seq_path)
-    imp = import_pulseq(seq_path)
-    expected = _durations_ms(ref)
-    got = np.array([b.dur.m_as('ms') for b in imp.feelmri_seq.blocks])
-    assert np.abs(expected - got).max() < TOL_MS
-
-
-@pytest.mark.parametrize('seq_path', SEQ_FILES, ids=_ids(SEQ_FILES))
-def test_block_start_times_match(seq_path, pulseq_sequences):
-    # The absolute start of every block, which is where drift accumulates
-    ref = _reference(pulseq_sequences, seq_path)
-    imp = import_pulseq(seq_path)
-    expected = np.concatenate(([0.0], np.cumsum(_durations_ms(ref))[:-1]))
-    got = np.array([b.time_extent[0].m_as('ms') for b in imp.feelmri_seq.blocks])
-    assert np.abs(expected - got).max() < TOL_MS
-
-
-@pytest.mark.parametrize('seq_path', SEQ_FILES, ids=_ids(SEQ_FILES))
-def test_total_duration_matches(seq_path, pulseq_sequences):
-    ref = _reference(pulseq_sequences, seq_path)
-    imp = import_pulseq(seq_path)
-    expected = ref.duration()[0] * 1e3
-    got = imp.feelmri_seq.dur.m_as('ms')
-    assert abs(expected - got) < TOL_MS
-
-
-@pytest.mark.parametrize('seq_path', SEQ_FILES, ids=_ids(SEQ_FILES))
-def test_every_block_is_integrated(seq_path):
-    skip_if_pypulseq_too_old(seq_path)
-    # A block needs at least two raster points, otherwise the kernel takes no
-    # step and the block evolves the magnetization not at all. Delays with no
-    # events are the usual case, and in a spin echo they carry the T2 weighting.
-    imp = import_pulseq(seq_path)
-    unstepped = [i for i, b in enumerate(imp.feelmri_seq.blocks)
-                 if b.dur.m_as('ms') > 0 and len(b.discrete_times) < 2]
-    assert not unstepped, (
-        f'{len(unstepped)} block(s) of nonzero duration get no integration step: '
-        f'{unstepped[:10]}')
-
-
-@pytest.mark.parametrize('seq_path', SEQ_FILES, ids=_ids(SEQ_FILES))
-def test_adc_sample_times_match(seq_path, pulseq_sequences):
-    ref = _reference(pulseq_sequences, seq_path)
-    imp = import_pulseq(seq_path)
-    if not imp.readouts:
-        pytest.skip('no ADC in this sequence')
-    got = np.concatenate([r.times for r in imp.readouts])
-    expected = ref.adc_times()[0] * 1e3   # (t_adc, freq/phase offsets)
-    assert got.size == expected.size
-    assert np.abs(np.sort(got) - np.sort(expected)).max() < 1e-6
+    assert abs(ref.duration()[0] * 1e3
+               - imp.feelmri_seq.dur.m_as('ms')) < TOL_MS, 'total duration'
 
 
 def _pp_gradients_hz_per_m(wf, t_ms, t0, t1):
@@ -137,8 +69,8 @@ def _pp_gradients_hz_per_m(wf, t_ms, t0, t1):
     return out
 
 
-@pytest.mark.parametrize('seq_path', SEQ_FILES, ids=_ids(SEQ_FILES))
-def test_gradient_waveforms_match(seq_path, pulseq_sequences):
+@pytest.mark.parametrize('seq_path', SEQ_FILES, ids=seq_ids(SEQ_FILES))
+def test_gradient_waveforms_match(seq_path, pulseq_import, pypulseq_ref):
     # The gradient the solver integrates must be the gradient pypulseq plays.
     # This is what catches a shaped gradient laid down half a raster off, one
     # missing the first/last boundary samples of a v1.5 file, or a gamma that
@@ -146,8 +78,8 @@ def test_gradient_waveforms_match(seq_path, pulseq_sequences):
     from feelmri.MRObjects import Scanner
     gammabar = Scanner().gammabar.m_as('Hz/T')
 
-    ref = _reference(pulseq_sequences, seq_path)
-    imp = import_pulseq(seq_path)
+    ref = pypulseq_ref(seq_path)
+    imp = pulseq_import(seq_path)
     wf = ref.waveforms_and_times()[0]
     pp_times_ms = [np.asarray(np.asarray(w)[0]) * 1e3 for w in wf if np.asarray(w).size]
 
@@ -184,36 +116,52 @@ def test_gradient_waveforms_match(seq_path, pulseq_sequences):
         f'max |delta| = {worst:.4g} Hz/m against a peak of {peak:.4g}')
 
 
-@pytest.mark.parametrize('seq_path', SEQ_FILES, ids=_ids(SEQ_FILES))
-def test_block_adc_times_match(seq_path, pulseq_sequences):
-    # ReadoutWindow.times comes from pypulseq, so it cannot catch a mistake in
-    # the in-house read_ADC. The block's own ADC does: its dwell and delay
-    # convention (half a dwell into the first sample) has to agree.
-    ref = _reference(pulseq_sequences, seq_path)
-    imp = import_pulseq(seq_path)
-    got = []
-    for block in imp.feelmri_seq.blocks:
-        if block.adc is None:
-            continue
-        got.append(block.time_extent[0].m_as('ms') + block.adc.times.m_as('ms'))
+@pytest.mark.parametrize('seq_path', SEQ_FILES, ids=seq_ids(SEQ_FILES))
+def test_adc_times_match(seq_path, pulseq_import, pypulseq_ref):
+    """The in-house read_ADC, and the readout-window partition over it.
+
+    Two different claims, and only the first tests our own parser.
+    ReadoutWindow.times is sliced out of calculate_kspace, so comparing it
+    against adc_times() compares pypulseq with itself. It still says something
+    the block-level check does not -- that the windows between them cover every
+    ADC sample exactly once, with none dropped or double-counted by the
+    grouping in _identify_readout_groups.
+    """
+    ref = pypulseq_ref(seq_path)
+    imp = pulseq_import(seq_path)
+    expected = np.sort(ref.adc_times()[0] * 1e3)
+
+    # 1. The block's own ADC: its dwell and delay convention (half a dwell into
+    #    the first sample) has to agree with the file.
+    got = [block.time_extent[0].m_as('ms') + block.adc.times.m_as('ms')
+           for block in imp.feelmri_seq.blocks if block.adc is not None]
     if not got:
         pytest.skip('no ADC in this sequence')
     got = np.sort(np.concatenate(got))
-    expected = np.sort(ref.adc_times()[0] * 1e3)
-    assert got.size == expected.size
-    assert np.abs(got - expected).max() < 1e-6
+    assert got.size == expected.size, 'in-house ADC sample count'
+    assert np.abs(got - expected).max() < 1e-6, 'in-house ADC sample times'
+
+    # 2. The windows partition those samples.
+    windowed = np.sort(np.concatenate([r.times for r in imp.readouts]))
+    assert windowed.size == expected.size, 'readout windows drop or repeat samples'
+    assert np.abs(windowed - expected).max() < 1e-6, 'readout window coverage'
 
 
-@pytest.mark.parametrize('seq_path', SEQ_FILES, ids=_ids(SEQ_FILES))
-def test_rf_waveforms_match(seq_path, pulseq_sequences):
+@pytest.mark.parametrize('seq_path', SEQ_FILES, ids=seq_ids(SEQ_FILES))
+def test_rf_waveforms_match(seq_path, pulseq_import, pypulseq_ref):
     # The last leg of the in-house-parser-vs-pypulseq comparison. RF has the
     # same half-raster convention that the gradients do: read_RF shifts the
     # delay by dt_rf/2 for a uniform raster, and this is what pins it.
+    #
+    # Pinning the samples pointwise at 1e-9 of peak also pins every functional
+    # of them -- the flip angle gamma*INT(B1 dt) included, which is why there is
+    # no separate flip-angle round trip here. The delivered flip through the
+    # SOLVER is a different question, and lives in test_pulseq_analytical.py.
     from feelmri.MRObjects import Scanner
     gammabar = Scanner().gammabar.m_as('Hz/T')
 
-    ref = _reference(pulseq_sequences, seq_path)
-    imp = import_pulseq(seq_path)
+    ref = pypulseq_ref(seq_path)
+    imp = pulseq_import(seq_path)
 
     n_checked = 0
     for i in range(1, len(ref.block_durations) + 1):
