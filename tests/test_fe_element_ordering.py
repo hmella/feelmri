@@ -88,12 +88,14 @@ def test_reference_element_has_reference_volume(cell_type):
 # assembler takes its absolute value -- so a P1 tetrahedron cannot detect an
 # ordering error by volume. That is exactly why the meshio/Basix mismatch was
 # invisible on ``tetra`` meshes, and why the rest of the suite never caught it.
-# tetra and wedge are the two cell types whose meshio and Basix orderings
-# coincide (a simplex permutation only flips the sign of det J, and the code
-# takes abs; Basix's prism vertices are the VTK wedge order), so a permutation
-# error is undetectable on them by construction. These are the two that can
-# fail, and the two that did before 2026-08-26.
-ORDER_SENSITIVE = ['tetra10', 'hexahedron']
+# Only `tetra` is permutation-blind: a permutation of a SIMPLEX's vertices
+# changes the sign of det J and nothing else, and the code takes abs. That
+# argument does not extend to a prism -- swapping two wedge vertices gives a
+# twisted cell whose det J changes sign inside it, and the measured volume
+# drops from 0.5 to 0.2887. So wedge belongs here even though its meshio ->
+# Basix permutation is the identity today: this is the test that keeps
+# test_reference_element_has_reference_volume[wedge] from passing for free.
+ORDER_SENSITIVE = [c for c in CELL_TYPES if c != 'tetra']
 
 
 def test_linear_tetra_volume_is_permutation_invariant():

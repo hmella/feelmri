@@ -544,18 +544,28 @@ def test_import_reads_with_the_scanner_gamma(adapter):
   """The Hz/m in the file must be divided by the same gamma the solver
   multiplies back, or every encoding phase is off by their ratio."""
   from feelmri.MRObjects import Scanner
-  seq_path = SEQ_FILES[0]
+  # Named, not SEQ_FILES[0]. The list moved from examples/pulseq to
+  # tests/data, which silently changed [0] from epi_pypulseq (115 blocks with
+  # a scalar gx) to arb_v15 (0 of 8 -- every gx is an array or zero), and the
+  # loop below then skipped every block without asserting anything.
+  seq_path = DATA_DIR / 'gre_v15.seq'
   skip_if_pypulseq_too_old(seq_path)
   scanner = Scanner(field_strength=Quantity(3.0, 'T'))
   default = adapter.read_seq(str(seq_path))
   matched = adapter.read_seq(str(seq_path),
                              gamma=scanner.gammabar.m_as('Hz/T'))
   ratio = adapter.GAMMA / scanner.gammabar.m_as('Hz/T')
+  checked = 0
   for (gx_d, _, _), (gx_m, _, _) in zip(default.GR, matched.GR):
     if isinstance(gx_d.A, np.ndarray) or gx_d.A == 0.0:
       continue
+    checked += 1
     assert gx_m.A == pytest.approx(gx_d.A * ratio, rel=1e-12)
     break
+
+  assert checked > 0, (
+    f'{seq_path.name} has no block with a scalar non-zero gx, so the '
+    f'assertion above never ran and this test proved nothing')
 
 
 def test_pulseq_import_disables_perfect_spoiling(adapter):
