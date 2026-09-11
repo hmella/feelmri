@@ -134,6 +134,7 @@ if __name__ == '__main__':
                          T1=parameters.Phantom.T1.to('ms'),
                          T2=parameters.Phantom.T2star.to('ms'), 
                          delta_B=delta_B0.m_as('mT').reshape((-1, 1)),
+                         concomitant_fields=True,
                          pod_trajectory=pod_velocity)
 
     # Update reference time for second lobe (rotate function keep the time reference of the original gradient)
@@ -196,6 +197,24 @@ if __name__ == '__main__':
   # Set static fields
   phantom.set_static_fields(T2=T2star.m_as('ms'), phi_dB0=delta_omega0.m_as('rad/ms'))
 
+  # Concomitant fields during the readout. The solver carries the term up to
+  # the magnetization snapshot -- the slice select and, crucially here, the
+  # VENC bipolar, which is exactly the construction Maxwell fields spoil. The
+  # readout's own gradients are not in the solver's sequence at all, they live
+  # in the trajectory, so their contribution has to be added on the signal
+  # side. The two sets are disjoint, so nothing is counted twice.
+  #
+  # maxwell_coefficients integrates the trajectory's real waveform, prephasers
+  # included: on this geometry they carry 52% of the window's whole
+  # integral(Gx^2 + Gy^2) dt, and 59% of it has accumulated by the first ADC
+  # sample. An estimate built from the sampled k-space sees none of that,
+  # because the sampling starts after the prephasers are over. This works here
+  # because t_start puts them at positive times, i.e. after the snapshot.
+  # It also applies both rotations implied by the oblique MPS orientation --
+  # the gradients are along logical axes while Bc is B0-aligned, and the nodes
+  # are in the imaging frame.
+  maxwell = traj.maxwell_coefficients(scanner)
+
   # Iterate over cardiac phases
   for fr in range(Nb_frames):
 
@@ -209,7 +228,8 @@ if __name__ == '__main__':
       phantom.update_magnetization(Mxy_PC[:, fr, :])
 
       # Generate 4D flow image
-      K[:,:,:,:,fr] = phantom.mri_signal(traj.points, traj.times.m_as('ms'), pod_velocity)
+      K[:,:,:,:,fr] = phantom.mri_signal(traj.points, traj.times.m_as('ms'), pod_velocity,
+                                         maxwell=maxwell)
 
   # Gather results
   K = gather_data(K)

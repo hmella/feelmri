@@ -58,8 +58,10 @@ def _phase_from_helpers(seq, t0, sample_times, nodes=NODES):
   coef = maxwell_phase_coefficients(maxwell_moments(seq, t0, sample_times),
                                     SCANNER)
   x, y, z = nodes[:, 0], nodes[:, 1], nodes[:, 2]
-  return (coef[:, 0:1] * z ** 2 + coef[:, 1:2] * (x ** 2 + y ** 2)
-          + coef[:, 2:3] * x * z + coef[:, 3:4] * y * z)
+  # Six coefficients over x^2, y^2, z^2, xy, xz, yz -- the general symmetric
+  # form, which collapses to the B0-aligned four when no rotation is given.
+  return (coef[:, 0:1] * x ** 2 + coef[:, 1:2] * y ** 2 + coef[:, 2:3] * z ** 2
+          + coef[:, 3:4] * x * y + coef[:, 4:5] * x * z + coef[:, 5:6] * y * z)
 
 
 def _phase_by_dense_quadrature(seq, t0, t1, n_points, nodes=NODES):
@@ -232,3 +234,156 @@ def test_the_kspace_helper_agrees_where_both_are_exact():
   # The three columns this case does drive must be non-trivial, or the
   # agreement above is agreement about zero.
   assert np.abs(from_gradients[-1, [0, 1, 2]]).min() > 0.1 * scale
+
+
+# ---------------------------------------------------------------------------
+# The native-trajectory path: `Trajectory.maxwell_coefficients`
+# ---------------------------------------------------------------------------
+
+def _oblique(deg=25.0):
+  th = np.deg2rad(deg)
+  return np.array([[np.cos(th), 0.0, np.sin(th)],
+                   [0.0, 1.0, 0.0],
+                   [-np.sin(th), 0.0, np.cos(th)]])
+
+
+def _cartesian(MPS_ori=None, t_start_ms=1.0, res=(16, 4, 1)):
+  from feelmri import CartesianStack
+  return CartesianStack(FOV=Q_(np.array([0.30, 0.30, 0.008]), 'm'),
+                        res=np.asarray(res), oversampling=1, lines_per_shot=1,
+                        scanner=SCANNER, t_start=Q_(t_start_ms, 'ms'),
+                        MPS_ori=MPS_ori)
+
+
+def _dense_phase_from_trajectory(traj, t1, nodes_img, n=40001):
+  """-gamma integral(Bc) dt from the library's own `_concomitant_mT`, in the
+  PHYSICAL frame: logical gradients rotated by MPS_ori, imaging-frame nodes
+  rotated the same way. That is the statement the two rotations inside
+  `maxwell_coefficients` have to add up to."""
+  R = np.asarray(traj.MPS_ori, dtype=float)
+  fine = np.linspace(0.0, t1, n)
+  G = np.zeros((n, 3))
+  for g in traj.gradients:
+    G[:, g.axis] += np.interp(fine,
+                              np.asarray(g.timings.m_as('ms'), dtype=float),
+                              np.asarray(g.amplitudes.m_as('mT/m'), dtype=float),
+                              left=0.0, right=0.0)
+  G_phys = G @ R.T
+  nodes_phys = np.asarray(nodes_img, dtype=float) @ R.T
+  bc = np.array([_concomitant_mT(nodes_phys, G_phys[i], B0_MT) for i in range(n)])
+  return -GAMMA * np.trapezoid(bc, fine, axis=0)
+
+
+@pytest.mark.parametrize('oblique', [False, True], ids=['axial', 'oblique'])
+def test_a_native_readout_reproduces_the_concomitant_field(oblique):
+  """End to end on a real `CartesianStack`: the retained waveforms, the
+  prephaser, and BOTH rotations, against the library's own field expression
+  integrated densely in the physical frame.
+
+  The oblique case is the one that matters. `Bc` is `(Bx^2 + By^2)/(2 B0)`, so
+  it singles out z and there is no rotation under which an oblique acquisition
+  reduces to an axial one -- the two parametrisations below genuinely differ
+  (asserted), and both have to be right separately.
+  """
+  R = _oblique() if oblique else np.eye(3)
+  traj = _cartesian(MPS_ori=R)
+  coef = traj.maxwell_coefficients(SCANNER)
+  times = np.asarray(traj.times.m_as('ms'), dtype=float).reshape(-1)
+  nodes = np.array([[0.12, -0.06, 0.004],
+                    [-0.09, 0.10, -0.003],
+                    [0.05, 0.05, 0.002]])
+
+  x, y, z = nodes[:, 0], nodes[:, 1], nodes[:, 2]
+  got = (coef[:, 0:1] * x ** 2 + coef[:, 1:2] * y ** 2 + coef[:, 2:3] * z ** 2
+         + coef[:, 3:4] * x * y + coef[:, 4:5] * x * z + coef[:, 5:6] * y * z)
+
+  worst = 0.0
+  for idx in (0, times.size // 2, times.size - 1):
+    ref = _dense_phase_from_trajectory(traj, times[idx], nodes)
+    assert np.abs(ref).max() > 1e-6, 'this sample carries no phase at all'
+    worst = max(worst, float(np.abs(got[idx] - ref).max()
+                             / np.abs(ref).max()))
+  # MPS_ori is stored float32, which sets the floor at ~7e-8.
+  assert worst < 1e-6, f'the trajectory coefficients are off by {worst:.2e}'
+
+
+def test_an_oblique_readout_is_not_an_axial_one_in_disguise():
+  """Guards the test above against passing for the wrong reason: if the two
+  parametrisations agreed, dropping either rotation would still pass."""
+  nodes = np.array([[0.12, -0.06, 0.004]])
+  x, y, z = nodes[:, 0], nodes[:, 1], nodes[:, 2]
+
+  def phase(traj):
+    c = traj.maxwell_coefficients(SCANNER)
+    return (c[:, 0] * x ** 2 + c[:, 1] * y ** 2 + c[:, 2] * z ** 2
+            + c[:, 3] * x * y + c[:, 4] * x * z + c[:, 5] * y * z)
+
+  axial, oblique = phase(_cartesian()), phase(_cartesian(MPS_ori=_oblique()))
+  rel = float(np.abs(axial - oblique).max() / np.abs(axial).max())
+  assert rel > 0.05, (
+    f'the oblique and axial readouts differ by only {rel:.2e}; this geometry '
+    f'no longer separates the rotated case from the unrotated one')
+
+
+def test_the_retained_waveforms_carry_the_prephaser():
+  """The reason `CartesianStack` keeps its gradients at all.
+
+  `maxwell_moments_from_kspace` recovers `G` from the SAMPLED k, so it starts
+  at the first ADC sample and the prephaser is simply not in its window. The
+  moment is already non-zero there, and on the geometry
+  `examples/phase_contrast.py` uses the prephasers carry 52% of the whole
+  window.
+  """
+  traj = _cartesian()
+  # ONE readout line. Flattening the whole stack interleaves lines whose
+  # clocks restart, and `np.gradient` over that produces division by zero
+  # rather than a gradient -- against which any assertion passes.
+  times = np.asarray(traj.times.m_as('ms'), dtype=float)[:, 0, 0]
+  assert np.all(np.diff(times) > 0.0), 'the line is not monotonic in time'
+
+  moments = maxwell_moments(traj.gradients, 0.0, times)
+  a_first, a_last = moments[0, 0], moments[-1, 0]
+  assert a_first > 0.0, 'nothing was integrated before the first ADC sample'
+  assert a_first / a_last > 0.01, (
+    f'the pre-sample share is {a_first / a_last:.4f}; this case no longer '
+    f'demonstrates what the k-derived helper misses')
+
+  from_k = maxwell_moments_from_kspace(
+    np.asarray(traj.points[0], dtype=float)[:, 0, 0],
+    np.asarray(traj.points[1], dtype=float)[:, 0, 0],
+    np.asarray(traj.points[2], dtype=float)[:, 0, 0], times, SCANNER)
+  assert np.all(np.isfinite(from_k)), 'the k-derived moments are not finite'
+  # Both start their clock at their own origin, so both read zero at the first
+  # sample. What the waveform integral has that this one cannot is everything
+  # BEFORE that sample, and it is the whole of `a_first`.
+  assert from_k[0, 0] == 0.0
+  assert abs(from_k[-1, 0] - (a_last - a_first)) / a_last < 0.05, (
+    f'the k-derived moment over the sampled window is {from_k[-1, 0]:.3f} '
+    f'against {a_last - a_first:.3f} from the waveform; the two should differ '
+    f'only by the readout ramp the sampling does not resolve')
+
+
+def test_a_trajectory_without_retained_gradients_refuses():
+  """RadialStack and SpiralStack build their k analytically and keep no
+  waveform, so the exact moments are out of reach. Refused, not approximated
+  behind the caller's back."""
+  from feelmri import RadialStack
+  traj = RadialStack(FOV=Q_(np.array([0.30, 0.30, 0.008]), 'm'),
+                     res=np.array([16, 4, 1]), oversampling=1,
+                     lines_per_shot=1, scanner=SCANNER)
+  with pytest.raises(NotImplementedError, match='does not retain'):
+    traj.maxwell_coefficients(SCANNER)
+
+
+def test_gradient_activity_before_the_origin_is_warned_about():
+  """The prephasers run over `[t_start - dur, t_start]`, so a trajectory built
+  without `t_start` puts them at NEGATIVE times, outside any forward
+  integration from 0 -- and the result is then quietly missing the larger part
+  of the moment. The trajectory does not know where the excitation was, so it
+  warns rather than guessing an origin."""
+  traj = _cartesian(t_start_ms=0.0)
+  earliest = min(float(np.asarray(g.timings.m_as('ms')).min())
+                 for g in traj.gradients)
+  assert earliest < 0.0, 'this case no longer places activity before 0 ms'
+  with pytest.warns(UserWarning, match='before the integration origin'):
+    traj.maxwell_coefficients(SCANNER)

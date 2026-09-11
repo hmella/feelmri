@@ -2309,7 +2309,22 @@ def _gradient_moment_between(feelmri_seq, t0_ms: float, t1_ms: float,
   return total * 1e-6 * gammabar_hz_per_t
 
 
-def maxwell_moments(feelmri_seq, t0_ms: float, sample_times_ms) -> np.ndarray:
+def _flatten_gradients(source):
+  """Every Gradient in a Sequence, or the iterable itself if it already is one.
+
+  The moments need the SUMMED field per axis, so they are computed from one
+  flat list rather than block by block: a gradient is zero outside its own
+  support, so blocks that do not overlap contribute nothing and nothing has to
+  be clipped.
+  """
+  blocks = getattr(source, 'blocks', None)
+  if blocks is None:
+    return list(source)
+  return [g for block in blocks for g in block.gradients]
+
+
+def maxwell_moments(source, t0_ms: float, sample_times_ms,
+                    rotation=None) -> np.ndarray:
   """Time-integrated gradient products that drive the concomitant field.
 
   The Maxwell term is
@@ -2330,6 +2345,17 @@ def maxwell_moments(feelmri_seq, t0_ms: float, sample_times_ms) -> np.ndarray:
   components of ``k`` play for the linear term: a second trajectory, not a
   second field model. :func:`maxwell_phase_coefficients` turns them into the
   rad/m^2 the assembler wants.
+
+  ``rotation`` maps the gradients into the PHYSICAL frame, in the sense
+  ``G_physical = rotation @ G_logical``. The products below are B0-aligned, so
+  a trajectory whose gradients are defined along logical (readout / phase /
+  slice) axes must supply it or the squares are formed on the wrong axes. The
+  same matrix then goes to :func:`maxwell_phase_coefficients`, which handles
+  the matching rotation of the positions.
+
+  ``source`` is a :class:`feelmri.Bloch.Sequence` or any iterable of
+  :class:`feelmri.MRObjects.Gradient` -- the latter is what the native
+  trajectory classes hand over, since they carry gradients without a sequence.
 
   Returns ``(N, 4)`` float64 in ``(mT/m)^2 ms``, integrated FORWARD from
   ``t0_ms``, so ``out[0]`` is zero whenever the first sample sits at ``t0_ms``.
@@ -2370,31 +2396,30 @@ def maxwell_moments(feelmri_seq, t0_ms: float, sample_times_ms) -> np.ndarray:
   if t_last <= t0_ms:
     return np.zeros((times.size, 4), dtype=float)
 
+  gradients = _flatten_gradients(source)
+
   # The union grid: the origin, every sample, and every gradient corner that
   # falls inside. Adding corners to a piecewise-linear waveform is lossless,
   # and it is what makes the closed forms below exact.
   corners = [np.array([float(t0_ms), t_last]), times]
-  for block in feelmri_seq.blocks:
-    if (block.time_extent[1].m_as('ms') <= t0_ms
-        or block.time_extent[0].m_as('ms') >= t_last):
-      continue
-    for g in block.gradients:
-      corners.append(np.asarray(g.timings.m_as('ms'), dtype=float))
+  for g in gradients:
+    corners.append(np.asarray(g.timings.m_as('ms'), dtype=float))
   grid = np.unique(np.concatenate(corners))
   grid = grid[(grid >= t0_ms) & (grid <= t_last)]
 
   # The SUMMED amplitude per axis. Every gradient is zero outside its own
-  # support (interp1d is built with fill_value=0.0), so blocks that do not
-  # overlap contribute nothing and the sum is gap-free.
+  # support (its interpolator is built with fill_value=0.0), so the sum is
+  # gap-free and nothing needs clipping to a block.
   G = np.zeros((grid.size, 3), dtype=float)
-  for block in feelmri_seq.blocks:
-    if (block.time_extent[1].m_as('ms') <= t0_ms
-        or block.time_extent[0].m_as('ms') >= t_last):
-      continue
-    for g in block.gradients:
-      ts = np.asarray(g.timings.m_as('ms'), dtype=float)
-      amp = np.asarray(g.amplitudes.m_as('mT/m'), dtype=float)
-      G[:, g.axis] += np.interp(grid, ts, amp, left=0.0, right=0.0)
+  for g in gradients:
+    ts = np.asarray(g.timings.m_as('ms'), dtype=float)
+    amp = np.asarray(g.amplitudes.m_as('mT/m'), dtype=float)
+    G[:, g.axis] += np.interp(grid, ts, amp, left=0.0, right=0.0)
+  if rotation is not None:
+    R = np.asarray(rotation, dtype=float)
+    if R.shape != (3, 3):
+      raise ValueError(f"maxwell_moments: rotation must be 3x3, got {R.shape}")
+    G = G @ R.T
 
   # Exact on each piecewise-linear segment:
   #   integral A^2 dt  = h (A0^2 + A0 A1 + A1^2)/3
@@ -2417,19 +2442,37 @@ def maxwell_moments(feelmri_seq, t0_ms: float, sample_times_ms) -> np.ndarray:
   return cumulative[np.searchsorted(grid, times)]
 
 
-def maxwell_phase_coefficients(moments, scanner) -> np.ndarray:
+def maxwell_phase_coefficients(moments, scanner, rotation=None) -> np.ndarray:
   """Turn :func:`maxwell_moments` output into the rad/m^2 the assembler adds.
 
   **The sign convention lives here and nowhere else.** The assembler ADDS
-  ``p0 z^2 + p1 (x^2+y^2) + p2 x z + p3 y z`` to its phase, so every sign and
-  the factor of 4 on the ``(x^2+y^2)`` term are folded in on this side. That
-  keeps ``MRIAssemble.cpp`` free of any knowledge of B0 or of the Maxwell
-  expression -- which matters, because three copies of that expression already
-  exist (the kernel and the two Magnus seeds) and they must not drift apart.
+
+      p0 x^2 + p1 y^2 + p2 z^2 + p3 x y + p4 x z + p5 y z
+
+  to its phase, so every sign, the factor of 4 on the transverse term and the
+  1/B0 are folded in on this side. That keeps ``MRIAssemble.cpp`` free of any
+  knowledge of B0, of the Maxwell expression, or of the imaging geometry --
+  which matters, because three copies of that expression already exist (the
+  kernel and the two Magnus seeds) and they must not drift apart.
 
   The solver precesses as ``exp(-i gamma Bz t)``, so the phase is
-  ``-gamma * integral(Bc) dt``; expanding that against the column order of
-  :func:`maxwell_moments` gives the four coefficients below.
+  ``-gamma * integral(Bc) dt``. ``Bc`` is a quadratic form in PHYSICAL
+  position, ``x^T M x / (2 B0)``, with
+
+      M = [[b/4,   0, -c/2],
+           [  0, b/4, -d/2],
+           [-c/2, -d/2,  a]]
+
+  for the four moments ``(a, b, c, d)`` of :func:`maxwell_moments`.
+
+  ``rotation`` is the 3x3 matrix relating the coordinates the assembler will
+  use to the physical ones, in the sense ``x_physical = rotation @ x_assembler``
+  -- which is what :meth:`FEMPhantom.orient` leaves behind, since it applies
+  ``nodes @ MPS_ori``. Pass it whenever the phantom has been oriented, or the
+  Maxwell expression is evaluated in the imaging frame and treats the slice
+  normal as B0. With no rotation the form is B0-aligned: ``p0 == p1``, ``p3``
+  is zero, and the six coefficients collapse to the four the field naturally
+  has.
   """
   m = np.asarray(moments, dtype=float)
   if m.ndim != 2 or m.shape[1] != 4:
@@ -2442,11 +2485,29 @@ def maxwell_phase_coefficients(moments, scanner) -> np.ndarray:
         f"maxwell_phase_coefficients: the concomitant term scales as 1/B0, so "
         f"a zero or negative field strength ({scanner.field_strength}) is "
         f"undefined, not merely weak.")
-  out = np.empty_like(m)
-  out[:, 0] = -gamma * m[:, 0] / (2.0 * B0)          # z^2
-  out[:, 1] = -gamma * m[:, 1] / (8.0 * B0)          # (x^2 + y^2), the /4 folded
-  out[:, 2] = +gamma * m[:, 2] / (2.0 * B0)          # x z
-  out[:, 3] = +gamma * m[:, 3] / (2.0 * B0)          # y z
+
+  a, b, c, d = m[:, 0], m[:, 1], m[:, 2], m[:, 3]
+  form = np.zeros((m.shape[0], 3, 3), dtype=float)
+  form[:, 0, 0] = form[:, 1, 1] = 0.25 * b
+  form[:, 2, 2] = a
+  form[:, 0, 2] = form[:, 2, 0] = -0.5 * c
+  form[:, 1, 2] = form[:, 2, 1] = -0.5 * d
+  if rotation is not None:
+    R = np.asarray(rotation, dtype=float)
+    if R.shape != (3, 3):
+      raise ValueError(
+          f"maxwell_phase_coefficients: rotation must be 3x3, got {R.shape}")
+    # phi = x_phys^T M x_phys with x_phys = R x_assembler.
+    form = np.einsum('ki,nkl,lj->nij', R, form, R)
+
+  scale = -gamma / (2.0 * B0)
+  out = np.empty((m.shape[0], 6), dtype=float)
+  out[:, 0] = scale * form[:, 0, 0]          # x^2
+  out[:, 1] = scale * form[:, 1, 1]          # y^2
+  out[:, 2] = scale * form[:, 2, 2]          # z^2
+  out[:, 3] = scale * 2.0 * form[:, 0, 1]    # x y
+  out[:, 4] = scale * 2.0 * form[:, 0, 2]    # x z
+  out[:, 5] = scale * 2.0 * form[:, 1, 2]    # y z
   return out
 
 

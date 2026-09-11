@@ -343,27 +343,34 @@ public:
         Eigen::Matrix<C, Eigen::Dynamic, 1> fourier_block(BLOCK_SIZE);
         Eigen::Array<T, Eigen::Dynamic, 1> f_mag(BLOCK_SIZE), f_po(BLOCK_SIZE);
         Eigen::Array<T, Eigen::Dynamic, 1> dx0(BLOCK_SIZE), dx1(BLOCK_SIZE), dx2(BLOCK_SIZE);
-        // z^2, x^2+y^2, x*z and y*z at the CURRENT position. Rebuilt inside the
-        // update_time guard below so they follow a POD trajectory exactly as
-        // the linear term does; they are a function of position alone, so the
-        // per-unique-time caching that guard provides is the right one.
+        // x^2, y^2, z^2, xy, xz and yz at the CURRENT position. Rebuilt inside
+        // the update_time guard below so they follow a POD trajectory exactly
+        // as the linear term does; they are a function of position alone, so
+        // the per-unique-time caching that guard provides is the right one.
         const int maxwell_scratch = maxwell.empty() ? 0 : BLOCK_SIZE;
-        Eigen::Array<T, Eigen::Dynamic, 1> mzz(maxwell_scratch), mrr(maxwell_scratch),
+        Eigen::Array<T, Eigen::Dynamic, 1> mxx(maxwell_scratch), myy(maxwell_scratch),
+                                           mzz(maxwell_scratch), mxy(maxwell_scratch),
                                            mxz(maxwell_scratch), myz(maxwell_scratch);
 
         // Flatten the per-sample scalars once; S is small (one readout).
-        // Concomitant (Maxwell) phase. Four coefficients per sample multiplying
-        // four fixed spatial monomials -- the quadratic counterpart of k, and
-        // the only channel here that is not linear in position. They arrive in
-        // rad/m^2 with every sign and the factor of 4 already folded in by
-        // maxwell_phase_coefficients, so nothing here knows about B0 or about
-        // the Maxwell expression itself: three copies of that expression exist
-        // already and must not become four. EMPTY means off.
+        // Concomitant (Maxwell) phase: a general symmetric quadratic form in
+        // position, six coefficients per sample over x^2, y^2, z^2, xy, xz and
+        // yz. This is the quadratic counterpart of k and the only channel here
+        // that is not linear in position.
+        //
+        // Six rather than four because the form is only B0-aligned in the
+        // scanner's physical frame; once the phantom has been oriented, the
+        // same field is a general quadratic form in the imaging coordinates
+        // this loop works in. The rotation, the signs and the 1/B0 are all
+        // folded in by maxwell_phase_coefficients, so nothing here knows about
+        // B0, about the Maxwell expression, or about the geometry -- three
+        // copies of that expression exist already and must not become four.
+        // EMPTY means off.
         const bool has_maxwell = !maxwell.empty();
-        if (has_maxwell && maxwell.size() != 4) {
+        if (has_maxwell && maxwell.size() != 6) {
             throw std::invalid_argument(
-                "signal: maxwell must be empty or hold exactly 4 coefficient "
-                "arrays (z^2, x^2+y^2, x*z, y*z); got " +
+                "signal: maxwell must be empty or hold exactly 6 coefficient "
+                "arrays (x^2, y^2, z^2, xy, xz, yz); got " +
                 std::to_string(maxwell.size()));
         }
         for (std::size_t c = 0; c < maxwell.size(); ++c) {
@@ -379,7 +386,9 @@ public:
         Eigen::Array<T, Eigen::Dynamic, 1> c0v(has_maxwell ? S : 0),
                                            c1v(has_maxwell ? S : 0),
                                            c2v(has_maxwell ? S : 0),
-                                           c3v(has_maxwell ? S : 0);
+                                           c3v(has_maxwell ? S : 0),
+                                           c4v(has_maxwell ? S : 0),
+                                           c5v(has_maxwell ? S : 0);
         for (uint i = 0, row = 0; i < nb_meas; ++i)
         for (uint j = 0; j < nb_lines; ++j)
         for (uint k = 0; k < nb_kz; ++k, ++row) {
@@ -392,6 +401,8 @@ public:
                 c1v(row) = maxwell[1](i, j, k);
                 c2v(row) = maxwell[2](i, j, k);
                 c3v(row) = maxwell[3](i, j, k);
+                c4v(row) = maxwell[4](i, j, k);
+                c5v(row) = maxwell[5](i, j, k);
             }
         }
 
@@ -434,14 +445,17 @@ public:
                     }
                     if (has_maxwell) {
                         if (has_traj) {
+                            mxx.head(q_count) = dx0.head(q_count) * dx0.head(q_count);
+                            myy.head(q_count) = dx1.head(q_count) * dx1.head(q_count);
                             mzz.head(q_count) = dx2.head(q_count) * dx2.head(q_count);
-                            mrr.head(q_count) = dx0.head(q_count) * dx0.head(q_count)
-                                              + dx1.head(q_count) * dx1.head(q_count);
+                            mxy.head(q_count) = dx0.head(q_count) * dx1.head(q_count);
                             mxz.head(q_count) = dx0.head(q_count) * dx2.head(q_count);
                             myz.head(q_count) = dx1.head(q_count) * dx2.head(q_count);
                         } else {
+                            mxx.head(q_count) = x0b * x0b;
+                            myy.head(q_count) = x1b * x1b;
                             mzz.head(q_count) = x2b * x2b;
-                            mrr.head(q_count) = x0b * x0b + x1b * x1b;
+                            mxy.head(q_count) = x0b * x1b;
                             mxz.head(q_count) = x0b * x2b;
                             myz.head(q_count) = x1b * x2b;
                         }
@@ -462,23 +476,28 @@ public:
                 // branches below the maxwell ones are textually unchanged for
                 // exactly that reason.
                 if (has_maxwell) {
-                    const T m0 = c0v(row), m1 = c1v(row), m2 = c2v(row), m3 = c3v(row);
+                    const T m0 = c0v(row), m1 = c1v(row), m2 = c2v(row),
+                            m3 = c3v(row), m4 = c4v(row), m5 = c5v(row);
                     if (has_traj) {
                         phase_block.head(q_count) = f_po.head(q_count)
                                                     - kx * dx0.head(q_count)
                                                     - ky * dx1.head(q_count)
                                                     - kz * dx2.head(q_count)
-                                                    + m0 * mzz.head(q_count)
-                                                    + m1 * mrr.head(q_count)
-                                                    + m2 * mxz.head(q_count)
-                                                    + m3 * myz.head(q_count);
+                                                    + m0 * mxx.head(q_count)
+                                                    + m1 * myy.head(q_count)
+                                                    + m2 * mzz.head(q_count)
+                                                    + m3 * mxy.head(q_count)
+                                                    + m4 * mxz.head(q_count)
+                                                    + m5 * myz.head(q_count);
                     } else {
                         phase_block.head(q_count) = f_po.head(q_count)
                                                     - kx * x0b - ky * x1b - kz * x2b
-                                                    + m0 * mzz.head(q_count)
-                                                    + m1 * mrr.head(q_count)
-                                                    + m2 * mxz.head(q_count)
-                                                    + m3 * myz.head(q_count);
+                                                    + m0 * mxx.head(q_count)
+                                                    + m1 * myy.head(q_count)
+                                                    + m2 * mzz.head(q_count)
+                                                    + m3 * mxy.head(q_count)
+                                                    + m4 * mxz.head(q_count)
+                                                    + m5 * myz.head(q_count);
                     }
                 } else if (has_traj) {
                     phase_block.head(q_count) = f_po.head(q_count)
@@ -535,26 +554,33 @@ public:
         Eigen::Matrix<C, Eigen::Dynamic, 1> fourier_block(BLOCK_SIZE);
         Eigen::Array<T, Eigen::Dynamic, 1> f_mag(BLOCK_SIZE), f_po(BLOCK_SIZE);
         Eigen::Array<T, Eigen::Dynamic, 1> dx0(BLOCK_SIZE), dx1(BLOCK_SIZE), dx2(BLOCK_SIZE);
-        // z^2, x^2+y^2, x*z and y*z at the CURRENT position. Rebuilt inside the
-        // update_time guard below so they follow a POD trajectory exactly as
-        // the linear term does; they are a function of position alone, so the
-        // per-unique-time caching that guard provides is the right one.
+        // x^2, y^2, z^2, xy, xz and yz at the CURRENT position. Rebuilt inside
+        // the update_time guard below so they follow a POD trajectory exactly
+        // as the linear term does; they are a function of position alone, so
+        // the per-unique-time caching that guard provides is the right one.
         const int maxwell_scratch = maxwell.empty() ? 0 : BLOCK_SIZE;
-        Eigen::Array<T, Eigen::Dynamic, 1> mzz(maxwell_scratch), mrr(maxwell_scratch),
+        Eigen::Array<T, Eigen::Dynamic, 1> mxx(maxwell_scratch), myy(maxwell_scratch),
+                                           mzz(maxwell_scratch), mxy(maxwell_scratch),
                                            mxz(maxwell_scratch), myz(maxwell_scratch);
 
-        // Concomitant (Maxwell) phase. Four coefficients per sample multiplying
-        // four fixed spatial monomials -- the quadratic counterpart of k, and
-        // the only channel here that is not linear in position. They arrive in
-        // rad/m^2 with every sign and the factor of 4 already folded in by
-        // maxwell_phase_coefficients, so nothing here knows about B0 or about
-        // the Maxwell expression itself: three copies of that expression exist
-        // already and must not become four. EMPTY means off.
+        // Concomitant (Maxwell) phase: a general symmetric quadratic form in
+        // position, six coefficients per sample over x^2, y^2, z^2, xy, xz and
+        // yz. This is the quadratic counterpart of k and the only channel here
+        // that is not linear in position.
+        //
+        // Six rather than four because the form is only B0-aligned in the
+        // scanner's physical frame; once the phantom has been oriented, the
+        // same field is a general quadratic form in the imaging coordinates
+        // this loop works in. The rotation, the signs and the 1/B0 are all
+        // folded in by maxwell_phase_coefficients, so nothing here knows about
+        // B0, about the Maxwell expression, or about the geometry -- three
+        // copies of that expression exist already and must not become four.
+        // EMPTY means off.
         const bool has_maxwell = !maxwell.empty();
-        if (has_maxwell && maxwell.size() != 4) {
+        if (has_maxwell && maxwell.size() != 6) {
             throw std::invalid_argument(
-                "signal: maxwell must be empty or hold exactly 4 coefficient "
-                "arrays (z^2, x^2+y^2, x*z, y*z); got " +
+                "signal: maxwell must be empty or hold exactly 6 coefficient "
+                "arrays (x^2, y^2, z^2, xy, xz, yz); got " +
                 std::to_string(maxwell.size()));
         }
         for (std::size_t c = 0; c < maxwell.size(); ++c) {
@@ -570,7 +596,9 @@ public:
         Eigen::Array<T, Eigen::Dynamic, 1> c0v(has_maxwell ? S : 0),
                                            c1v(has_maxwell ? S : 0),
                                            c2v(has_maxwell ? S : 0),
-                                           c3v(has_maxwell ? S : 0);
+                                           c3v(has_maxwell ? S : 0),
+                                           c4v(has_maxwell ? S : 0),
+                                           c5v(has_maxwell ? S : 0);
         for (uint i = 0, row = 0; i < nb_meas; ++i)
         for (uint j = 0; j < nb_lines; ++j)
         for (uint k = 0; k < nb_kz; ++k, ++row) {
@@ -583,6 +611,8 @@ public:
                 c1v(row) = maxwell[1](i, j, k);
                 c2v(row) = maxwell[2](i, j, k);
                 c3v(row) = maxwell[3](i, j, k);
+                c4v(row) = maxwell[4](i, j, k);
+                c5v(row) = maxwell[5](i, j, k);
             }
         }
 
@@ -617,14 +647,17 @@ public:
                     }
                     if (has_maxwell) {
                         if (has_traj) {
+                            mxx.head(q_count) = dx0.head(q_count) * dx0.head(q_count);
+                            myy.head(q_count) = dx1.head(q_count) * dx1.head(q_count);
                             mzz.head(q_count) = dx2.head(q_count) * dx2.head(q_count);
-                            mrr.head(q_count) = dx0.head(q_count) * dx0.head(q_count)
-                                              + dx1.head(q_count) * dx1.head(q_count);
+                            mxy.head(q_count) = dx0.head(q_count) * dx1.head(q_count);
                             mxz.head(q_count) = dx0.head(q_count) * dx2.head(q_count);
                             myz.head(q_count) = dx1.head(q_count) * dx2.head(q_count);
                         } else {
+                            mxx.head(q_count) = x0b * x0b;
+                            myy.head(q_count) = x1b * x1b;
                             mzz.head(q_count) = x2b * x2b;
-                            mrr.head(q_count) = x0b * x0b + x1b * x1b;
+                            mxy.head(q_count) = x0b * x1b;
                             mxz.head(q_count) = x0b * x2b;
                             myz.head(q_count) = x1b * x2b;
                         }
@@ -643,23 +676,28 @@ public:
                 // branches below the maxwell ones are textually unchanged for
                 // exactly that reason.
                 if (has_maxwell) {
-                    const T m0 = c0v(row), m1 = c1v(row), m2 = c2v(row), m3 = c3v(row);
+                    const T m0 = c0v(row), m1 = c1v(row), m2 = c2v(row),
+                            m3 = c3v(row), m4 = c4v(row), m5 = c5v(row);
                     if (has_traj) {
                         phase_block.head(q_count) = f_po.head(q_count)
                                                     - kx * dx0.head(q_count)
                                                     - ky * dx1.head(q_count)
                                                     - kz * dx2.head(q_count)
-                                                    + m0 * mzz.head(q_count)
-                                                    + m1 * mrr.head(q_count)
-                                                    + m2 * mxz.head(q_count)
-                                                    + m3 * myz.head(q_count);
+                                                    + m0 * mxx.head(q_count)
+                                                    + m1 * myy.head(q_count)
+                                                    + m2 * mzz.head(q_count)
+                                                    + m3 * mxy.head(q_count)
+                                                    + m4 * mxz.head(q_count)
+                                                    + m5 * myz.head(q_count);
                     } else {
                         phase_block.head(q_count) = f_po.head(q_count)
                                                     - kx * x0b - ky * x1b - kz * x2b
-                                                    + m0 * mzz.head(q_count)
-                                                    + m1 * mrr.head(q_count)
-                                                    + m2 * mxz.head(q_count)
-                                                    + m3 * myz.head(q_count);
+                                                    + m0 * mxx.head(q_count)
+                                                    + m1 * myy.head(q_count)
+                                                    + m2 * mzz.head(q_count)
+                                                    + m3 * mxy.head(q_count)
+                                                    + m4 * mxz.head(q_count)
+                                                    + m5 * myz.head(q_count);
                     }
                 } else if (has_traj) {
                     phase_block.head(q_count) = f_po.head(q_count)
@@ -737,28 +775,35 @@ public:
         Eigen::Matrix<C, Eigen::Dynamic, 1> fourier_block(BLOCK_SIZE);
         Eigen::Array<T, Eigen::Dynamic, 1> f_mag(BLOCK_SIZE), f_po(BLOCK_SIZE);
         Eigen::Array<T, Eigen::Dynamic, 1> dx0(BLOCK_SIZE), dx1(BLOCK_SIZE), dx2(BLOCK_SIZE);
-        // z^2, x^2+y^2, x*z and y*z at the CURRENT position. Rebuilt inside the
-        // update_time guard below so they follow a POD trajectory exactly as
-        // the linear term does; they are a function of position alone, so the
-        // per-unique-time caching that guard provides is the right one.
+        // x^2, y^2, z^2, xy, xz and yz at the CURRENT position. Rebuilt inside
+        // the update_time guard below so they follow a POD trajectory exactly
+        // as the linear term does; they are a function of position alone, so
+        // the per-unique-time caching that guard provides is the right one.
         const int maxwell_scratch = maxwell.empty() ? 0 : BLOCK_SIZE;
-        Eigen::Array<T, Eigen::Dynamic, 1> mzz(maxwell_scratch), mrr(maxwell_scratch),
+        Eigen::Array<T, Eigen::Dynamic, 1> mxx(maxwell_scratch), myy(maxwell_scratch),
+                                           mzz(maxwell_scratch), mxy(maxwell_scratch),
                                            mxz(maxwell_scratch), myz(maxwell_scratch);
 
         if (has_traj) ensure_quadrature_modes(modes_x, modes_y, modes_z);
 
-        // Concomitant (Maxwell) phase. Four coefficients per sample multiplying
-        // four fixed spatial monomials -- the quadratic counterpart of k, and
-        // the only channel here that is not linear in position. They arrive in
-        // rad/m^2 with every sign and the factor of 4 already folded in by
-        // maxwell_phase_coefficients, so nothing here knows about B0 or about
-        // the Maxwell expression itself: three copies of that expression exist
-        // already and must not become four. EMPTY means off.
+        // Concomitant (Maxwell) phase: a general symmetric quadratic form in
+        // position, six coefficients per sample over x^2, y^2, z^2, xy, xz and
+        // yz. This is the quadratic counterpart of k and the only channel here
+        // that is not linear in position.
+        //
+        // Six rather than four because the form is only B0-aligned in the
+        // scanner's physical frame; once the phantom has been oriented, the
+        // same field is a general quadratic form in the imaging coordinates
+        // this loop works in. The rotation, the signs and the 1/B0 are all
+        // folded in by maxwell_phase_coefficients, so nothing here knows about
+        // B0, about the Maxwell expression, or about the geometry -- three
+        // copies of that expression exist already and must not become four.
+        // EMPTY means off.
         const bool has_maxwell = !maxwell.empty();
-        if (has_maxwell && maxwell.size() != 4) {
+        if (has_maxwell && maxwell.size() != 6) {
             throw std::invalid_argument(
-                "signal: maxwell must be empty or hold exactly 4 coefficient "
-                "arrays (z^2, x^2+y^2, x*z, y*z); got " +
+                "signal: maxwell must be empty or hold exactly 6 coefficient "
+                "arrays (x^2, y^2, z^2, xy, xz, yz); got " +
                 std::to_string(maxwell.size()));
         }
         for (std::size_t c = 0; c < maxwell.size(); ++c) {
@@ -774,7 +819,9 @@ public:
         Eigen::Array<T, Eigen::Dynamic, 1> c0v(has_maxwell ? S : 0),
                                            c1v(has_maxwell ? S : 0),
                                            c2v(has_maxwell ? S : 0),
-                                           c3v(has_maxwell ? S : 0);
+                                           c3v(has_maxwell ? S : 0),
+                                           c4v(has_maxwell ? S : 0),
+                                           c5v(has_maxwell ? S : 0);
         for (uint i = 0, row = 0; i < nb_meas; ++i)
         for (uint j = 0; j < nb_lines; ++j)
         for (uint k = 0; k < nb_kz; ++k, ++row) {
@@ -787,6 +834,8 @@ public:
                 c1v(row) = maxwell[1](i, j, k);
                 c2v(row) = maxwell[2](i, j, k);
                 c3v(row) = maxwell[3](i, j, k);
+                c4v(row) = maxwell[4](i, j, k);
+                c5v(row) = maxwell[5](i, j, k);
             }
         }
 
@@ -822,14 +871,17 @@ public:
                     }
                     if (has_maxwell) {
                         if (has_traj) {
+                            mxx.head(q_count) = dx0.head(q_count) * dx0.head(q_count);
+                            myy.head(q_count) = dx1.head(q_count) * dx1.head(q_count);
                             mzz.head(q_count) = dx2.head(q_count) * dx2.head(q_count);
-                            mrr.head(q_count) = dx0.head(q_count) * dx0.head(q_count)
-                                              + dx1.head(q_count) * dx1.head(q_count);
+                            mxy.head(q_count) = dx0.head(q_count) * dx1.head(q_count);
                             mxz.head(q_count) = dx0.head(q_count) * dx2.head(q_count);
                             myz.head(q_count) = dx1.head(q_count) * dx2.head(q_count);
                         } else {
+                            mxx.head(q_count) = x0b * x0b;
+                            myy.head(q_count) = x1b * x1b;
                             mzz.head(q_count) = x2b * x2b;
-                            mrr.head(q_count) = x0b * x0b + x1b * x1b;
+                            mxy.head(q_count) = x0b * x1b;
                             mxz.head(q_count) = x0b * x2b;
                             myz.head(q_count) = x1b * x2b;
                         }
@@ -849,23 +901,28 @@ public:
                 // branches below the maxwell ones are textually unchanged for
                 // exactly that reason.
                 if (has_maxwell) {
-                    const T m0 = c0v(row), m1 = c1v(row), m2 = c2v(row), m3 = c3v(row);
+                    const T m0 = c0v(row), m1 = c1v(row), m2 = c2v(row),
+                            m3 = c3v(row), m4 = c4v(row), m5 = c5v(row);
                     if (has_traj) {
                         phase_block.head(q_count) = f_po.head(q_count)
                                                     - kx * dx0.head(q_count)
                                                     - ky * dx1.head(q_count)
                                                     - kz * dx2.head(q_count)
-                                                    + m0 * mzz.head(q_count)
-                                                    + m1 * mrr.head(q_count)
-                                                    + m2 * mxz.head(q_count)
-                                                    + m3 * myz.head(q_count);
+                                                    + m0 * mxx.head(q_count)
+                                                    + m1 * myy.head(q_count)
+                                                    + m2 * mzz.head(q_count)
+                                                    + m3 * mxy.head(q_count)
+                                                    + m4 * mxz.head(q_count)
+                                                    + m5 * myz.head(q_count);
                     } else {
                         phase_block.head(q_count) = f_po.head(q_count)
                                                     - kx * x0b - ky * x1b - kz * x2b
-                                                    + m0 * mzz.head(q_count)
-                                                    + m1 * mrr.head(q_count)
-                                                    + m2 * mxz.head(q_count)
-                                                    + m3 * myz.head(q_count);
+                                                    + m0 * mxx.head(q_count)
+                                                    + m1 * myy.head(q_count)
+                                                    + m2 * mzz.head(q_count)
+                                                    + m3 * mxy.head(q_count)
+                                                    + m4 * mxz.head(q_count)
+                                                    + m5 * myz.head(q_count);
                     }
                 } else if (has_traj) {
                     phase_block.head(q_count) = f_po.head(q_count)

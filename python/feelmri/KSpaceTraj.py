@@ -5,6 +5,7 @@ All trajectory classes inherit from :class:`Trajectory` and produce arrays of
 k-space sample coordinates (``points``) and acquisition times (``times``) that
 can be passed directly to the Bloch solver and image reconstruction routines.
 """
+import warnings
 from typing import Literal
 
 import matplotlib.pyplot as plt
@@ -105,6 +106,70 @@ class Trajectory:
         self.MPS_ori = MPS_ori.astype(dtype)   # orientation
         self.LOC = LOC.astype(dtype)           # location
         self.dtype = dtype
+
+    def maxwell_coefficients(self, scanner, t0=None):
+        """Concomitant phase coefficients for this readout, ready for
+        ``mri_signal(..., maxwell=...)``.
+
+        Returns ``(N, 6)`` in rad/m^2 laid out like :attr:`times` flattened.
+        Integrated forward from ``t0`` (default 0 ms, the instant this
+        trajectory's own timings are measured from), so everything between the
+        magnetization snapshot and each sample is counted -- the PREPHASERS
+        included, which is the point. Measured on the geometry
+        ``examples/phase_contrast.py`` uses (120 x 60 mm, 60 x 30, x2
+        oversampling, oblique): the readout prephaser and the phase encode
+        carry **52%** of the whole window's ``integral(Gx^2 + Gy^2) dt``, and
+        59% has accumulated by the first ADC sample. A moment estimated from
+        the sampled k-space cannot see any of it, because the sampling starts
+        after it is over.
+
+        Both rotations implied by :attr:`MPS_ori` are applied here. The
+        gradients are along logical (readout / phase / slice) axes while the
+        Maxwell products are B0-aligned, and the node coordinates the assembler
+        works in are the imaging ones that ``FEMPhantom.orient`` leaves behind.
+        Getting either wrong evaluates the expression as though the slice
+        normal were B0 -- and since ``Bc`` singles out z, there is no rotation
+        under which an oblique acquisition reduces to an axial one.
+
+        **``t0`` must be the snapshot instant, and a trajectory built without
+        ``t_start`` does not have one.** The prephasers run over
+        ``[t_start - dur, t_start]``, so at the default ``t_start = 0`` they
+        sit at NEGATIVE times and are outside any forward integration from 0.
+        That is warned about rather than guessed at: the trajectory does not
+        know where the excitation was.
+
+        **Caveat specific to CartesianStack.** It models phase encoding as a
+        k-space offset with a single prephaser waveform rather than one
+        waveform per line, so the y-axis products are that prephaser's for
+        every line rather than varying with ky. The readout axis, which
+        dominates, is exact.
+        """
+        from feelmri.PulseqAdapter import (maxwell_moments as _moments,
+                                           maxwell_phase_coefficients as _coef)
+
+        gradients = getattr(self, 'gradients', None)
+        if gradients is None:
+            raise NotImplementedError(
+                f"{type(self).__name__} does not retain its gradient waveforms, "
+                f"so the concomitant moments cannot be computed exactly. Only "
+                f"CartesianStack does today; feelmri.maxwell_moments_from_kspace "
+                f"is the approximate fallback, and it cannot see a prephaser.")
+        t0 = 0.0 if t0 is None else float(t0)
+        earliest = min(float(np.asarray(g.timings.m_as('ms')).min())
+                       for g in gradients)
+        if earliest < t0 - 1e-9:
+            warnings.warn(
+                f"{type(self).__name__}: gradient activity starts at "
+                f"{earliest:.4f} ms, before the integration origin "
+                f"{t0:.4f} ms, and everything before the origin is DROPPED. "
+                f"On a Cartesian readout that is the prephaser, which can "
+                f"carry more of the concomitant second moment than the "
+                f"readout itself. Build the trajectory with `t_start` at the "
+                f"magnetization snapshot, or pass `t0` explicitly.")
+        R = np.asarray(self.MPS_ori, dtype=float)
+        times = np.asarray(self.times.m_as('ms'), dtype=float).reshape(-1)
+        moments = _moments(gradients, t0, times, rotation=R)
+        return _coef(moments, scanner, rotation=R)
 
     def check_ph_enc_lines(self, ph_samples):
         """Verify that the number of phase-encoding lines is divisible by the multishot factor."""
@@ -324,6 +389,19 @@ class CartesianStack(Trajectory):
 
         # Calculate echo time
         self.echo_time = (enc_time + ro_grad0.dur + 0.5 * self.lines_per_shot * ro_grad.dur).to('ms')
+
+        # Retained for callers that need the WAVEFORM rather than the sampled
+        # k. The concomitant moments are the case in point: they depend on
+        # integral(G^2), which cannot be recovered from k once the prephaser
+        # has been played -- on a 300 mm / 128 geometry that prephaser carries
+        # 1.49x the readout's own second moment, so a k-derived estimate would
+        # miss the larger share. Setting `axis` here costs nothing: it is only
+        # read by consumers, never by the gradient's own arithmetic.
+        for g in ro_gradients:
+            g.axis = 0
+        for g in ph_gradients:
+            g.axis = 1
+        self.gradients = list(ro_gradients) + list(ph_gradients)
 
         return (kspace, Quantity(t, 'ms'))
 

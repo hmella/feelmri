@@ -199,7 +199,7 @@ class FEMPhantom:
     def _maxwell_inputs(maxwell, kspace_times):
         """Split concomitant phase coefficients into the assembler's container.
 
-        ``maxwell`` is ``(N, 4)`` in rad/m^2 -- the output of
+        ``maxwell`` is ``(N, 6)`` in rad/m^2 -- the output of
         :func:`feelmri.maxwell_phase_coefficients`, which owns the sign
         convention. It is handed over as four arrays shaped like the k-space
         trajectory, the same container ``kspace_points`` uses, so the assembler
@@ -209,18 +209,19 @@ class FEMPhantom:
         if maxwell is None:
             return []
         m = np.asarray(maxwell)
-        if m.ndim != 2 or m.shape[1] != 4:
+        if m.ndim != 2 or m.shape[1] != 6:
             raise ValueError(
-                f"mri_signal: maxwell must be (N, 4) phase coefficients in "
-                f"rad/m^2, got shape {m.shape}. Build it with "
-                f"maxwell_phase_coefficients, which carries the signs.")
+                f"mri_signal: maxwell must be (N, 6) phase coefficients in "
+                f"rad/m^2 over x^2, y^2, z^2, xy, xz and yz, got shape "
+                f"{m.shape}. Build it with maxwell_phase_coefficients, which "
+                f"carries the signs, the 1/B0 and any orientation.")
         shape = np.shape(kspace_times)
         if m.shape[0] != int(np.prod(shape)):
             raise ValueError(
                 f"mri_signal: {m.shape[0]} maxwell coefficients against "
                 f"{int(np.prod(shape))} k-space samples.")
         return [np.ascontiguousarray(m[:, c].reshape(shape), dtype=np.float32)
-                for c in range(4)]
+                for c in range(6)]
 
     def _prepare_pod_data(self, kspace_times, pod):
         """Helper to extract and format POD data for zero-copy C++ execution."""

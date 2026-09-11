@@ -697,9 +697,11 @@ def _constant_gradient_coefficients(amps, dur_ms, scanner, scale=1.0):
 
 
 def _nodal_phase(coef_row, points):
+  """The general quadratic form the assembler evaluates: six coefficients over
+  x^2, y^2, z^2, xy, xz and yz."""
   x, y, z = points[:, 0], points[:, 1], points[:, 2]
-  return (coef_row[0] * z ** 2 + coef_row[1] * (x ** 2 + y ** 2)
-          + coef_row[2] * x * z + coef_row[3] * y * z)
+  return (coef_row[0] * x ** 2 + coef_row[1] * y ** 2 + coef_row[2] * z ** 2
+          + coef_row[3] * x * y + coef_row[4] * x * z + coef_row[5] * y * z)
 
 
 @pytest.mark.parametrize('scale, tag', [(1.0, '1 rad'), (20.0, '20 rad')])
@@ -890,3 +892,68 @@ def test_the_concomitant_term_continues_across_the_solver_to_assembler_handoff(
   assert naked > 100 * gap, (
     f'omitting the concomitant readout term changes the answer by only '
     f'{naked:.2e} against {gap:.2e} with it; this case cannot see the term')
+
+
+def test_an_oblique_orientation_gives_the_same_physics(tmp_path):
+  """`Bc` is B0-aligned in the scanner's PHYSICAL frame, but `FEMPhantom.orient`
+  leaves node coordinates in the imaging frame, where the same field is a
+  general quadratic form. That is why the assembler takes six coefficients and
+  not the four the field naturally has.
+
+  The invariant: rotating the phantom and folding the same rotation into the
+  coefficients must leave every node's phase unchanged, because both describe
+  one physical spin in one physical field. phase_contrast.py's planning file is
+  about 20 degrees off axial, so this is not a corner case.
+
+  Without the rotation folded in, the Maxwell expression is evaluated in the
+  imaging frame and treats the slice normal as B0 -- which the second half
+  measures, so the test cannot pass by the rotation being irrelevant.
+  """
+  from feelmri.MRObjects import Scanner
+
+  scanner = Scanner()
+
+  # Rotation about two axes, comparable to a real oblique prescription.
+  ca, sa = np.cos(0.35), np.sin(0.35)
+  cb, sb = np.cos(-0.22), np.sin(-0.22)
+  Rz = np.array([[ca, -sa, 0.0], [sa, ca, 0.0], [0.0, 0.0, 1.0]])
+  Ry = np.array([[cb, 0.0, sb], [0.0, 1.0, 0.0], [-sb, 0.0, cb]])
+  R = Rz @ Ry
+
+  from feelmri import maxwell_moments, maxwell_phase_coefficients
+  from pint import Quantity as Q_
+  from feelmri.Bloch import Sequence, SequenceBlock
+  from feelmri.MRObjects import Gradient
+
+  amps, dur = (14.0, -9.0, 20.0), 3.0
+  gradients = [Gradient(timings=Q_(np.array([0.0, dur]), 'ms'),
+                        amplitudes=Q_(np.array([a, a]), 'mT/m'),
+                        scanner=scanner, ref=Q_(0.0, 'ms'), time=Q_(0.0, 'ms'),
+                        axis=axis)
+               for axis, a in enumerate(amps)]
+  seq = Sequence()
+  seq.add_block(SequenceBlock(gradients=gradients, dur=Q_(dur, 'ms'),
+                              dt=Q_(0.01, 'ms'), empty=False))
+  moments = maxwell_moments(seq, 0.0, np.array([0.0, dur]))
+
+  physical = np.array([[0.11, -0.03, 0.07], [-0.05, 0.12, 0.02],
+                       [0.04, 0.06, -0.10], [-0.09, -0.08, 0.05]])
+  # x_physical = R @ x_imaging, the sense FEMPhantom.orient leaves behind.
+  imaging = physical @ R
+
+  direct = _nodal_phase(maxwell_phase_coefficients(moments, scanner)[1],
+                        physical)
+  rotated = _nodal_phase(
+      maxwell_phase_coefficients(moments, scanner, rotation=R)[1], imaging)
+
+  worst = float(np.abs(rotated - direct).max())
+  assert worst < 1e-12, (
+    f'the same spin in the same field reads {rotated} in the imaging frame '
+    f'and {direct} in the physical one, differing by {worst:.2e}')
+  assert np.abs(direct).max() > 0.1, 'this case produces almost no phase'
+
+  # Ignoring the rotation is the mistake this exists to prevent, and it is a
+  # large one: the expression then treats the slice normal as B0.
+  naive = _nodal_phase(maxwell_phase_coefficients(moments, scanner)[1], imaging)
+  assert np.abs(naive - direct).max() > 0.1 * np.abs(direct).max(), (
+    'this orientation is too close to axial to show the frame matters')
