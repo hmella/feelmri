@@ -28,11 +28,7 @@ import pytest
 
 from feelmri import FEMPhantom
 
-from _phantom_fixtures import (
-  make_1d_rod_mesh,
-  make_2d_disk_mesh,
-  make_minimal_tet_mesh,
-)
+from _phantom_fixtures import make_1d_rod_mesh, make_2d_disk_mesh
 
 
 def _to_3d_inputs(kx, ky, kz, t):

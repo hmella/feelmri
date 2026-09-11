@@ -1,8 +1,7 @@
 import numpy as np
 import pytest
 
-from conftest import (SEQ_FILES, pypulseq_block_durations_ms, seq_ids,
-                      skip_if_pypulseq_too_old)
+from conftest import SEQ_FILES, pypulseq_block_durations_ms, seq_ids
 
 # The parser gate: what the in-house reader makes of a .seq file, against what
 # pypulseq makes of the SAME file. Four properties, one test each, every one
