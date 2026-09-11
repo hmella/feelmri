@@ -1245,6 +1245,10 @@ class BlochSolver:
         # the intra-voxel coherence between calls.
         self._bin_Mxy = None
         self._bin_Mz = None
+        # The collapse of (_bin_Mxy, _bin_Mz) as last published on the public
+        # initial_Mxy / initial_Mz. Used to tell "the caller left the state
+        # alone" from "the caller reset it".
+        self._bin_collapsed = None
         # Wall-clock cumulative time spent inside the C++ kernel across all
         # solve() calls; populated by solve(). Useful for benchmarking.
         self.bloch_elapsed = 0.0
@@ -1283,6 +1287,22 @@ class BlochSolver:
         )
         self._modes_cache = (self.pod_trajectory, nb_nodes, mat)
         return mat
+
+    def _bin_state_is_current(self, initial_Mxy, initial_Mz):
+        """Whether the carried sub-ensemble still matches the public state.
+
+        The ensemble is resumed only when the caller has left ``initial_Mxy`` /
+        ``initial_Mz`` at the values this solver published for them. If either
+        has been reassigned or written in place -- an inversion-recovery or
+        multi-TI loop resetting the magnetization between shots -- the caller's
+        value wins and the ensemble is re-seeded from it, rather than silently
+        continuing the previous shot's sub-voxel coherence.
+        """
+        if self._bin_collapsed is None:
+            return False
+        previous_Mxy, previous_Mz = self._bin_collapsed
+        return (np.array_equal(previous_Mxy, initial_Mxy)
+                and np.array_equal(previous_Mz, initial_Mz))
 
     def solve(self, start: int = 0, end: int = None):
         # Current machine time
@@ -1380,8 +1400,14 @@ class BlochSolver:
             # Resume the ensemble if a previous solve() left one of the right
             # shape; otherwise seed every bin of a node from its per-node value.
             want = (nb_nodes * n_bins, 1)
-            if (self._bin_Mxy is not None and self._bin_Mxy.shape == want
-                    and self._bin_Mz is not None):
+            # Resume only if the ensemble is still the one whose collapse the
+            # public attributes currently hold. If the caller has reassigned
+            # either, their value wins and the ensemble is re-seeded from it.
+            resumable = (self._bin_Mxy is not None and self._bin_Mz is not None
+                         and self._bin_Mxy.shape == want
+                         and self._bin_Mz.shape == want
+                         and self._bin_state_is_current(initial_Mxy, initial_Mz))
+            if resumable:
                 initial_Mxy = np.ascontiguousarray(self._bin_Mxy,
                                                    dtype=self._np_cplx)
                 initial_Mz = np.ascontiguousarray(self._bin_Mz,
@@ -1637,19 +1663,32 @@ class BlochSolver:
         # anything when a dtype conversion forced a copy above.
         if n_bins > 1:
             # Keep the sub-ensemble for the next solve(), and expose the
-            # collapsed per-node state on the public attributes.
+            # collapsed per-node state on the public attributes. Both are
+            # stamped with the per-node state they correspond to, so that a
+            # caller who RESETS initial_Mxy/initial_Mz between calls -- an
+            # inversion-recovery or multi-TI loop -- is honoured instead of
+            # silently resuming the previous shot's ensemble. Every other knob
+            # on this class is read live at solve time; these must be too.
             self._bin_Mxy = initial_Mxy
             self._bin_Mz = initial_Mz
             self.initial_Mxy = collapse_bins(
                 initial_Mxy[:, 0]).reshape(-1, 1).astype(self._np_cplx)
             self.initial_Mz = collapse_bins(
                 initial_Mz[:, 0]).reshape(-1, 1).astype(self._np_real)
+            self._bin_collapsed = (self.initial_Mxy.copy(),
+                                   self.initial_Mz.copy())
         else:
             self.initial_Mxy = initial_Mxy
             self.initial_Mz = initial_Mz
 
-        # Persist final Magnus state for the next solve() call.
-        self._Bz_old = Bz_old
+        # Persist final Magnus state for the next solve() call. Bz_old is stored
+        # per NODE: the next call re-expands it K-fold, so storing the expanded
+        # array made the second solve() build n_nodes * n_bins^2 rows and trip
+        # the length check. Collapsing is safe because the Magnus seed is
+        # re-derived from the block's own opening field for order > 0, and the
+        # kernel ignores it entirely for order 0 -- only the LENGTH is
+        # load-bearing here.
+        self._Bz_old = collapse_bins(Bz_old.reshape(-1)) if n_bins > 1 else Bz_old
         self._rf_old = rf_old
 
         # Print elapsed time
