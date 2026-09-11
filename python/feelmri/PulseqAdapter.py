@@ -764,6 +764,50 @@ def _rotate_on_union_grid(R: np.ndarray,
   return tuple(out)
 
 
+def _warn_discontinuous_gradients(filename, pulseq_seq, rtol: float = 1e-3):
+  """Warn about any gradient event that ends non-zero and is not continued.
+
+  Pulseq expects a gradient to return to zero at a block boundary unless the
+  next block carries it on. When one does not, the trajectory and the solver
+  are reading two different waveforms -- see the call site for the measured
+  cost. `check_timing` does not look at this.
+
+  ``rtol`` is relative to the event's own peak, so a boundary sample at
+  round-off is ignored and one at a percent of peak is not.
+  """
+  problems = []
+  n_blocks = len(pulseq_seq)
+  for i in range(n_blocks):
+    for axis, g in enumerate(pulseq_seq.GR[i]):
+      if g is None or not isinstance(g.A, np.ndarray) or g.A.size == 0:
+        continue
+      peak = float(np.abs(g.A).max())
+      if peak <= 0.0:
+        continue
+      tail = float(abs(g.last))
+      if tail <= rtol * peak:
+        continue
+      nxt = pulseq_seq.GR[i + 1][axis] if i + 1 < n_blocks else None
+      carried = nxt is not None and (
+          (isinstance(nxt.A, np.ndarray) and nxt.A.size
+           and abs(float(nxt.first) - float(g.last)) <= rtol * peak)
+          or (not isinstance(nxt.A, np.ndarray) and float(nxt.A) != 0.0))
+      if not carried:
+        problems.append((i, 'xyz'[axis], 100.0 * tail / peak))
+
+  if problems:
+    logger.warning(
+        "%s: %d gradient event(s) end away from zero with nothing continuing "
+        "them (%s). The k-space trajectory comes from pypulseq, which bridges "
+        "the gap linearly to the next event on that axis, while the solver "
+        "reads zero there -- so the readout carries phase the simulation never "
+        "played. Make the waveform return to zero, or continue it in the next "
+        "block.",
+        filename, len(problems),
+        ', '.join(f'block {b} G{a} ends at {pc:.2f}% of peak'
+                  for b, a, pc in problems[:5]))
+
+
 def _apply_rotation_to_grads(R: np.ndarray,
                              gx: Grad, gy: Grad, gz: Grad
                              ) -> Tuple[Grad, Grad, Grad]:
@@ -2422,6 +2466,22 @@ def import_pulseq(
         "later event, and the simulated timing will not reflect that.",
         filename, len(trigger_blocks), trigger_blocks[:10],
         '...' if len(trigger_blocks) > 10 else '')
+
+  # A gradient that ends away from zero with nothing continuing it leaves the
+  # file ill-posed, and the two halves of the dual path then disagree: the
+  # trajectory comes from pypulseq, whose calculate_kspace bridges the gap by
+  # interpolating linearly from `last` to the next event on that axis, while
+  # the solver integrates FEelMRI's own gradients, which are zero outside the
+  # event. Neither is what a scanner does -- one ramps absurdly slowly, the
+  # other jumps infinitely fast -- so refusing to guess and saying so is the
+  # only honest answer.
+  #
+  # Measured on the old tests/data/arb_v15.seq, whose shaped Gx stopped one
+  # sample short of a full sine period and so ended at 1.57% of peak: the kx
+  # handed to mri_signal ran to -8.43 1/m where the solver's own gradients
+  # played ~0, i.e. **1.686 cycles of phase across the 0.2 m FOV**, invisible
+  # to check_timing (which returns ok=True) and to every test.
+  _warn_discontinuous_gradients(filename, pulseq_seq)
 
   for i in range(len(pulseq_seq)):
     gx, gy, gz = pulseq_seq.GR[i]
