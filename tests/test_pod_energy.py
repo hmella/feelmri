@@ -64,6 +64,17 @@ def test_object_matches_standalone(n_modes):
     np.testing.assert_allclose(pod_frame_errors(data, n_modes),
                                pod.frame_errors(), rtol=1e-12)
 
+    # Shape of the cumulative curve. Deleted with test_cumulative_curve_shape
+    # and restored here: a cumsum of non-negative eigenvalues is monotone and
+    # ends at 1 only if the normalisation is right, which the sigma^2 identity
+    # alone does not pin.
+    curve = pod.cumulative_energy()
+    assert curve.shape == cumulative.shape
+    assert np.all(np.diff(curve) >= -1e-15)
+    assert curve[0] > 0.0
+    assert np.all(curve <= 1.0 + 1e-12)
+    assert curve[-1] == pytest.approx(1.0, abs=1e-12)
+
 
 def test_getters_neither_alias_nor_mutate():
     """The getter hands out a copy, and remove_mean leaves the caller's array
@@ -176,6 +187,15 @@ def test_frame_errors_match_explicit_svd(n=3):
     expected = np.linalg.norm(residual, axis=0) / np.linalg.norm(flat, axis=0)
 
     np.testing.assert_allclose(pod.frame_errors(), expected, rtol=1e-10)
+
+    # Deleted with test_frame_errors_shape_and_bounds and restored here:
+    # one error per snapshot, each a relative L2 norm in [0, 1].
+    errors = pod.frame_errors()
+    assert errors.shape == (data.shape[-1],)
+    assert np.all(errors >= 0.0)
+    assert np.all(errors <= 1.0 + 1e-12)
+
+
 def test_error_metrics_vanish_at_full_rank():
     """Keeping every usable mode reproduces the field.
 
