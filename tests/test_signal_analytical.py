@@ -612,6 +612,15 @@ def test_a_zero_or_non_finite_static_field_is_refused(tmp_path):
     with pytest.raises(Exception, match='T2'):
       assembler.set_static_fields(t2_with(0.0), good_phi)
 
+  # (n,) and (n, 1) describe the same nodes and callers mix them freely --
+  # examples/water_and_fat.py passes one of each in the same call, which a
+  # shape-equality check broke. Only a differing ENTRY COUNT is an error.
+  phantom.set_static_fields(T2=np.full((n, 1), 60.0, dtype=np.float32),
+                            phi_dB0=good_phi)
+  with pytest.raises(ValueError, match='entries'):
+    phantom.set_static_fields(T2=np.full(n - 1, 60.0, dtype=np.float32),
+                              phi_dB0=good_phi)
+
   # An infinite T2 is legitimate: no relaxation, so the signal does not decay.
   phantom.set_static_fields(T2=np.full(n, np.inf, dtype=np.float32),
                             phi_dB0=good_phi)

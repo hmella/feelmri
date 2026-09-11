@@ -1285,10 +1285,13 @@ class FEMPhantom:
         # T2 is legitimate and means no relaxation.
         T2_arr = np.asarray(T2)
         phi_arr = np.asarray(phi_dB0)
-        if T2_arr.shape != phi_arr.shape:
+        # Compare the ENTRY COUNT, not the shape: callers mix (n,) and (n, 1)
+        # freely -- examples/water_and_fat.py passes one of each in the same
+        # call -- and pybind flattens both into Eigen's Array<T, Dynamic, 1>.
+        if T2_arr.size != phi_arr.size:
             raise ValueError(
-                f"set_static_fields: T2 has shape {T2_arr.shape} and phi_dB0 "
-                f"{phi_arr.shape}; they describe the same nodes.")
+                f"set_static_fields: T2 has {T2_arr.size} entries and phi_dB0 "
+                f"{phi_arr.size}; they describe the same nodes.")
         bad = ~(T2_arr > 0.0) | np.isnan(T2_arr)
         if bad.any():
             first = int(np.flatnonzero(bad.reshape(-1))[0])
