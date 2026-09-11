@@ -298,3 +298,69 @@ def test_kspace_is_hermitian_for_a_real_object(tmp_path):
   assert abs(centre.real - volume) < 1e-3 * volume, (
       f'S(k=0) is {centre.real:.6e}, cube volume is {volume:.6e}')
   assert abs(centre.imag) < 1e-5 * volume
+
+
+def test_adc_frequency_offset_tunes_the_receiver(tmp_path):
+  """A receiver tuned `+df` must bring the spins precessing `+df` faster to DC.
+
+  This pins the SIGN of the receive chain, which nothing did before: the two
+  demodulation tests elsewhere apply `exp(+i*phase)` and assert they recover
+  the input, so they pass under either sign. The transmit sign is pinned the
+  same way, by a measured POSITION, in
+  `test_pulseq_analytical.py::test_rf_frequency_offset_shifts_the_slice`.
+
+  The Pulseq specification calls `adc.freq` the "frequency offset of ADC
+  receiver relative to the system frequency". So placing a narrow rod at `x0`
+  and tuning the receiver to `gammabar*Gx*x0` must put it at the centre of the
+  image -- that population IS what the receiver is listening to. Getting the
+  sign wrong does not merely reverse the shift, it DOUBLES it: measured
+  `+7.927 mm` for an `x0` of `+4 mm`, against `-0.008 mm` when correct.
+  """
+  pytest.importorskip('mpi4py')
+  pytest.importorskip('pymetis')
+  pytest.importorskip('meshio')
+  import meshio
+  from feelmri.Bloch import apply_demodulation, demodulation_phase
+  from feelmri.MRObjects import Scanner
+
+  gammabar = Scanner().gammabar.m_as('Hz/T')
+  x0_mm = 4.0
+  path, _length = make_1d_rod_mesh(tmp_path / 'rod.vtu', length=2e-3,
+                                   n_segments=8)
+  mesh = meshio.read(str(path))
+  mesh.points[:, 0] += x0_mm * 1e-3
+  meshio.write(str(tmp_path / 'shifted.vtu'), mesh)
+
+  phantom = FEMPhantom(path=str(tmp_path / 'shifted.vtu'))
+  phantom.set_assembler(voxel_size=0.0, lorder=1, horder=3,
+                        nodal_approximation=False, lumped=False)
+  n = phantom.local_nodes.shape[0]
+  phantom.set_static_fields(T2=np.full(n, 1e9, dtype=np.float32),
+                            phi_dB0=np.zeros(n, dtype=np.float32))
+  phantom.update_magnetization(np.ones(n, dtype=np.complex64))
+
+  g_x, n_samples, dwell_ms = 10e-3, 256, 0.004
+  t_ms = np.arange(n_samples) * dwell_ms
+  k = (gammabar * g_x * t_ms * 1e-3).astype(np.float32)
+  k = (k - k.mean()).astype(np.float32)
+  zeros = np.zeros_like(k)
+  signal = np.asarray(phantom.mri_signal(
+      [k.reshape(-1, 1, 1), zeros.reshape(-1, 1, 1), zeros.reshape(-1, 1, 1)],
+      np.zeros((n_samples, 1, 1), dtype=np.float32), None)).reshape(-1)
+
+  def centre_mm(sig):
+    img = np.fft.fftshift(np.fft.ifft(np.fft.ifftshift(sig)))
+    x = np.fft.fftshift(np.fft.fftfreq(n_samples, d=float(k[1] - k[0])))
+    w = np.abs(img) ** 2
+    return float((x * w).sum() / w.sum()) * 1e3
+
+  assert centre_mm(signal) == pytest.approx(x0_mm, abs=0.3), (
+      'the undemodulated rod is not where it was built')
+
+  freq = gammabar * g_x * x0_mm * 1e-3
+  tuned = centre_mm(apply_demodulation(
+      signal, demodulation_phase(t_ms, freq_offset_hz=freq)))
+  assert tuned == pytest.approx(0.0, abs=0.1), (
+      f'a receiver tuned to gammabar*Gx*{x0_mm} mm = {freq:.1f} Hz left the '
+      f'rod at {tuned:+.3f} mm instead of DC. About {2 * x0_mm:+.1f} mm means '
+      f'the frequency term lost its negation and doubled the offset')

@@ -55,9 +55,24 @@ def demodulation_phase(times_ms, freq_offset_hz=0.0, phase_offset_rad=0.0,
                        phase_modulation=None):
     """Receiver phase Pulseq specifies for a set of ADC sample times, in rad.
 
-    ``2*pi*freq_offset*t + phase_offset + phase_modulation``, with ``t`` measured
-    from the FIRST sample given -- the ADC event's own origin, which is what the
-    offsets are referenced to.
+    ``-2*pi*freq_offset*t + phase_offset + phase_modulation``, with ``t``
+    measured from the FIRST sample given -- the ADC event's own origin, which
+    is what the offsets are referenced to.
+
+    **The frequency term is NEGATED, the phase terms are not.** The Pulseq
+    specification calls ``adc.freq`` the "frequency offset of ADC receiver
+    relative to the system frequency", so a receiver tuned ``+df`` must bring
+    the spins precessing ``+df`` faster to DC. Applied as ``exp(-i*phase)``,
+    that needs ``exp(+i*2*pi*df*t)``. Measured on a narrow rod at ``+4 mm``
+    under ``Gx = 10 mT/m``, demodulating at ``gammabar*Gx*4mm``: the rod lands
+    at ``-0.008 mm`` with the negation and at ``+7.927 mm`` without it -- the
+    unnegated form pushes it FURTHER off centre, doubling the offset instead
+    of removing it.
+
+    ``phase_offset`` and ``phase_modulation`` keep their sign: ``MRObjects.RF``
+    transmits ``exp(+i*phase_offset)``, so receive must conjugate it or RF
+    spoiling stops cancelling. Same shape as the assembler fix -- only the one
+    term is negated.
 
     The single implementation behind both :meth:`ADC.demodulate` and
     :meth:`feelmri.PulseqAdapter.ReadoutWindow.demodulate`, so the two cannot
@@ -67,7 +82,7 @@ def demodulation_phase(times_ms, freq_offset_hz=0.0, phase_offset_rad=0.0,
     """
     t = np.asarray(times_ms, dtype=float).reshape(-1)
     t = (t - t.min()) * 1e-3 if t.size else t                    # ms -> s
-    phase = 2.0 * np.pi * float(freq_offset_hz) * t + float(phase_offset_rad)
+    phase = -2.0 * np.pi * float(freq_offset_hz) * t + float(phase_offset_rad)
     if phase_modulation is not None:
         pm = np.asarray(phase_modulation, dtype=float).reshape(-1)
         if pm.size == phase.size:

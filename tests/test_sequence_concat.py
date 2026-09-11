@@ -378,8 +378,13 @@ def test_adc_demodulation_is_reachable_without_simulate_pulseq():
   phase = adc.demodulation_phase()
   assert phase.size == 8
   assert abs(phase[0] - 0.3) < 1e-12, 'the phase offset must apply at t = 0'
-  # 500 Hz over 1 ms is half a cycle.
-  assert abs((phase[-1] - phase[0]) - np.pi) < 1e-9
+  # 500 Hz over 1 ms is half a cycle, and the ramp runs NEGATIVE: applied as
+  # exp(-i*phase) that is exp(+i 2 pi f t), which is what tunes the receiver
+  # to +f rather than away from it. This assertion used to read +pi and was
+  # part of why the sign went unnoticed -- the direction is the whole content.
+  # The position measurement is
+  # test_signal_analytical.py::test_adc_frequency_offset_tunes_the_receiver.
+  assert abs((phase[-1] - phase[0]) + np.pi) < 1e-9
 
   signal = np.ones((8, 1, 1, 1), dtype=np.complex64)
   out = adc.demodulate(signal)

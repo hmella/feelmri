@@ -706,6 +706,64 @@ def dur_adc(a: ADC) -> float:
     return float(a.delay + a.T)
 
 
+def _grad_corners_seconds(g: "Grad") -> Tuple[np.ndarray, np.ndarray]:
+  """(times_s, amplitudes_Tm) corner list for a Grad of either shape."""
+  if isinstance(g.A, np.ndarray):
+    return _shaped_waveform_seconds(g)
+  return _trap_waveform_seconds(g)
+
+
+def _rotate_on_union_grid(R: np.ndarray,
+                          gx: "Grad", gy: "Grad", gz: "Grad"
+                          ) -> Tuple["Grad", "Grad", "Grad"]:
+  """Rotate three gradients that do NOT share a time grid.
+
+  A rotation mixes the axes, so each output sample is a combination of all
+  three inputs and is only defined where all three are. Sampling them on the
+  union of their corners makes that true everywhere: a piecewise-linear
+  waveform is exactly reproduced by adding corners to it, so this is lossless
+  on each input and exact on the output.
+
+  The result is emitted as an extended trapezoid -- ``A`` the per-sample
+  amplitudes, ``T`` the per-step dwells -- which is the one Grad shape that
+  can carry a non-uniform grid. Outside its own support a gradient is zero,
+  which is what the ``left``/``right`` of the interpolation says.
+
+  Inheriting one donor axis's geometry instead, as this used to, is wrong
+  whenever the timings differ: on an ordinary block (in-plane prephasers
+  0.5 ms flat, slice-select 2.0 ms) an IDENTITY matrix inflated the x and y
+  moments by 250%.
+  """
+  corners = [_grad_corners_seconds(g) for g in (gx, gy, gz)]
+  grid = np.unique(np.concatenate([t for t, _a in corners]))
+  # Two axes naming one instant can differ in the last bits; a zero-length
+  # step would put an infinite slew into the output.
+  if grid.size > 1:
+    grid = grid[np.concatenate(([True], np.diff(grid) > 1e-12))]
+  if grid.size < 2:
+    return gx, gy, gz
+
+  stacked = np.vstack([np.interp(grid, t, a, left=0.0, right=0.0)
+                       for t, a in corners])
+  rotated = R @ stacked
+
+  local = grid - grid[0]
+  dwells = np.diff(local)
+  out = []
+  for axis in range(3):
+    amps = rotated[axis]
+    out.append(Grad(
+      A=amps,
+      T=dwells,
+      rise=0.0,
+      fall=0.0,
+      delay=float(grid[0]),
+      first=float(amps[0]),
+      last=float(amps[-1]),
+    ))
+  return tuple(out)
+
+
 def _apply_rotation_to_grads(R: np.ndarray,
                              gx: Grad, gy: Grad, gz: Grad
                              ) -> Tuple[Grad, Grad, Grad]:
@@ -738,11 +796,7 @@ def _apply_rotation_to_grads(R: np.ndarray,
         shapes = {('array', a.A.size) if isinstance(a.A, np.ndarray)
                   else ('trap', a.T, a.rise, a.fall, a.delay) for a in active}
         if len(shapes) > 1:
-            raise NotImplementedError(
-                'ROTATIONS across axes with different timings is not '
-                'supported: the rotated amplitudes would inherit one axis\'s '
-                'geometry and carry the wrong moment on the others. '
-                f'Timings seen: {sorted(map(str, shapes))}')
+            return _rotate_on_union_grid(R, gx, gy, gz)
 
     # Coerce all amplitudes to a common shape: scalars stay scalar; arrays
     # broadcast to the longest. Mixed scalar/array becomes array.
