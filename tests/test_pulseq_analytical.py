@@ -716,3 +716,57 @@ def test_the_readout_time_origin_is_the_anchor_block_end(cube):
     f'measured 1.3e-5, so something other than the origin has changed')
   assert corrected < 0.1 * as_shipped, (
     'the shift no longer explains the departure')
+
+
+def test_the_readout_window_carries_its_own_concomitant_trajectory(cube):
+  """`ReadoutWindow.maxwell` is the concomitant counterpart of `kspace`, and
+  it obeys the same anchor rule: measured from the snapshot, so whatever plays
+  between the anchor and the first ADC sample -- a prephaser -- is counted.
+
+  Checked against an independent integral rather than against itself, and the
+  squared columns are integrals of squares so they cannot decrease.
+  """
+  from feelmri import import_pulseq, maxwell_moments
+
+  for name in ('gre_v15.seq', 'cpmg_v15.seq'):
+    imp = import_pulseq(_require(name))
+    rw = imp.readouts[0]
+    assert rw.maxwell.shape == (rw.times.size, 4)
+    independent = maxwell_moments(imp.feelmri_seq, rw.t_anchor, rw.times)
+    np.testing.assert_allclose(rw.maxwell, independent, rtol=1e-12, atol=0.0)
+    assert np.all(np.diff(rw.maxwell[:, 0]) >= -1e-12)
+    assert np.all(np.diff(rw.maxwell[:, 1]) >= -1e-12)
+
+  # gre_v15 plays a prephaser and a slice rephaser between the anchor and the
+  # first sample, so its first moment is away from zero exactly as its k is;
+  # cpmg_v15's first sample sits at the anchor, so both are zero there.
+  gre = import_pulseq(_require('gre_v15.seq')).readouts[0]
+  cpmg = import_pulseq(_require('cpmg_v15.seq')).readouts[0]
+  assert np.abs(gre.maxwell[0]).max() > 0.0 and np.abs(gre.kspace[0]).max() > 0.0
+  assert np.abs(cpmg.maxwell[0]).max() == 0.0
+
+
+def test_simulate_pulseq_couples_the_readout_term_to_the_solver_flag(cube):
+  """One field, one switch. Modelling the concomitant term up to the snapshot
+  and then dropping it for the readout would be worse than not modelling it:
+  the two halves describe the same physics, so `simulate_pulseq` turns the
+  readout term on exactly when the solver has it on.
+  """
+  from feelmri.PulseqAdapter import simulate_pulseq
+
+  phantom, _volume = cube
+  path = _require('gre_an_v15.seq')
+  common = dict(M0=1.0, T1=Q_(1e9, 'ms'), T2=Q_(1e9, 'ms'), dtype='float64')
+
+  _static(phantom, 1e9)
+  plain = np.asarray(simulate_pulseq(path, phantom, **common).kspace[0])
+  _static(phantom, 1e9)
+  with_term = np.asarray(
+      simulate_pulseq(path, phantom, concomitant_fields=True, **common).kspace[0])
+
+  scale = float(np.abs(plain).max())
+  assert scale > 0
+  moved = float(np.abs(with_term - plain).max() / scale)
+  assert moved > 1e-6, (
+    f'turning concomitant_fields on changed the k-space by only {moved:.2e}; '
+    f'the readout term is not reaching the assembler')

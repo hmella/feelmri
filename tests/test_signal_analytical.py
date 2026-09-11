@@ -808,3 +808,85 @@ def test_the_readout_term_follows_a_moving_phantom(tmp_path):
     f'the shift changes the concomitant phase by only '
     f'{np.abs(moved_phase - rest_phase).max():.3e} rad, so this case cannot '
     f'tell a moving phantom from a still one')
+
+
+def test_the_concomitant_term_continues_across_the_solver_to_assembler_handoff(
+        tmp_path):
+  """The acceptance test for carrying concomitant fields into the readout.
+
+  Evolving `TA` in the solver and handing the remaining `TB` to the assembler
+  must equal evolving `TA + TB` in the solver and reading out at once. That is
+  a splitting invariant: it needs no sign convention of its own, so a flipped
+  sign, a missing factor of 4 on the `(x^2+y^2)` term or a wrong origin each
+  break it. It is the same shape as
+  `test_offresonance_continues_across_the_solver_to_assembler_handoff`.
+
+  **Both moments have to cross the handoff.** The `TA + TB` run also winds the
+  LINEAR gradient phase through `TB`, so the assembler must be given the k of
+  that leg as well; comparing against `k = 0` measures a leg that had a
+  gradient against one that did not, and reads 1.0 no matter what the
+  concomitant term does. That cost a wrong alarm here.
+
+  Measured: 8.5e-05 relative with the term, 4.9e-01 without it.
+  """
+  pytest.importorskip('meshio')
+  from pint import Quantity as Q_
+
+  from feelmri import BlochSolver, maxwell_moments, maxwell_phase_coefficients
+  from feelmri.Bloch import Sequence, SequenceBlock
+  from feelmri.MRObjects import Gradient, Scanner
+  from feelmri.PulseqAdapter import _gradient_moment_between
+
+  scanner = Scanner()
+  TA, TB, amps = 2.0, 3.0, (14.0, -9.0, 20.0)
+
+  def gradients(duration):
+    return [Gradient(timings=Q_(np.array([0.0, duration]), 'ms'),
+                     amplitudes=Q_(np.array([a, a]), 'mT/m'), scanner=scanner,
+                     ref=Q_(0.0, 'ms'), time=Q_(0.0, 'ms'), axis=axis)
+            for axis, a in enumerate(amps)]
+
+  def solve_to(duration, tag):
+    phantom, _points = _maxwell_fixture(tmp_path, f'handoff_{tag}.vtu')
+    block = SequenceBlock(gradients=gradients(duration),
+                          dur=Q_(duration, 'ms'), dt=Q_(0.002, 'ms'),
+                          empty=False)
+    block.store_magnetization = True
+    seq = Sequence()
+    seq.add_block(block)
+    Mxy, _Mz = BlochSolver(seq, phantom, T1=Q_(1e9, 'ms'), T2=Q_(1e9, 'ms'),
+                           initial_Mxy=1.0 + 0.0j, initial_Mz=0.0,
+                           perfect_spoiling=False, dtype='float64',
+                           concomitant_fields=True).solve()
+    return phantom, Mxy[:, -1]
+
+  def readout(phantom, mxy, moments, kvec):
+    phantom.update_magnetization(np.ascontiguousarray(mxy))
+    points = tuple(np.full((1, 1, 1), v, dtype=np.float32) for v in kvec)
+    coef = (None if moments is None
+            else maxwell_phase_coefficients(moments, scanner))
+    return complex(np.asarray(phantom.signal_sum(
+        points, np.zeros((1, 1, 1), dtype=np.float32), None,
+        maxwell=coef)).ravel()[0])
+
+  leg = Sequence()
+  leg.add_block(SequenceBlock(gradients=gradients(TB), dur=Q_(TB, 'ms'),
+                              dt=Q_(0.002, 'ms'), empty=False))
+  moments = maxwell_moments(leg, 0.0, np.array([TB]))
+  kvec = _gradient_moment_between(leg, 0.0, TB, scanner.gammabar.m_as('Hz/T'))
+
+  phantom_a, mxy_a = solve_to(TA, 'split')
+  split = readout(phantom_a, mxy_a, moments, kvec)
+  phantom_b, mxy_b = solve_to(TA + TB, 'whole')
+  whole = readout(phantom_b, mxy_b, None, (0.0, 0.0, 0.0))
+
+  gap = abs(split - whole) / abs(whole)
+  assert gap < 1e-3, (
+    f'the handoff is discontinuous by {gap:.2e}: {TA} ms in the solver plus '
+    f'{TB} ms in the assembler disagrees with {TA + TB} ms in the solver')
+  # Dropping the readout term must break it, or the test is about the linear
+  # term and says nothing about this feature.
+  naked = abs(readout(phantom_a, mxy_a, None, kvec) - whole) / abs(whole)
+  assert naked > 100 * gap, (
+    f'omitting the concomitant readout term changes the answer by only '
+    f'{naked:.2e} against {gap:.2e} with it; this case cannot see the term')

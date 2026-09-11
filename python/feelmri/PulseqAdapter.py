@@ -2021,6 +2021,23 @@ class ReadoutWindow:
       Gradient moment (1/m) already carried by the magnetization at
       ``m_storage_block``. It is subtracted from ``kspace`` because the
       assembler would otherwise wind it a second time.
+  maxwell : np.ndarray or None
+      Shape ``(N, 4)`` float64 of time-integrated gradient products in
+      ``(mT/m)^2 ms``, integrated FORWARD from ``t_anchor`` -- the concomitant
+      counterpart of ``kspace``. Unlike ``kspace`` there is no anchor value to
+      subtract -- the origin is ours to choose, and the only correct one is the
+      snapshot, since everything before it is already carried on the
+      magnetization by the solver.
+
+      ``maxwell[0]`` is therefore **not** generally zero: whatever plays
+      between the anchor and the first ADC sample, typically a prephaser,
+      belongs to the readout and is counted. Measured on the bundled fixtures,
+      the first sample is non-zero on ``gre_v15`` and ``epi_v142`` and zero on
+      ``cpmg_v15``, whose first sample sits at the anchor. That mirrors
+      ``kspace``, which also starts away from the origin for the same reason.
+
+      Pass it through :func:`maxwell_phase_coefficients` to get what
+      ``mri_signal`` takes.
   t_anchor : float
       Absolute time (ms) of the snapshot, i.e. the end of the anchor block.
       ``times - t_anchor`` is the elapsed time the assembler's
@@ -2038,6 +2055,7 @@ class ReadoutWindow:
   kspace_file: Optional[np.ndarray] = None
   k_at_anchor: Optional[np.ndarray] = None
   t_anchor: float = 0.0
+  maxwell: Optional[np.ndarray] = None
 
   def demodulation_phase(self) -> np.ndarray:
     """Receiver phase Pulseq specifies for this window's samples, in rad.
@@ -2813,6 +2831,14 @@ def import_pulseq(
       t_anchor_ms = float(t_start) * 1e3
       k_at_anchor = np.zeros(3, dtype=float)
     kspace = (kspace_file - k_at_anchor).astype(np.float32, copy=False)
+    # The concomitant trajectory. A plain forward integral is valid over the
+    # whole window: _identify_readout_groups anchors on ANY active RF, so no
+    # pulse falls between the snapshot and the samples and no refocusing
+    # reflection can occur inside the interval. That is also why this needs no
+    # counterpart to k_at_anchor -- everything before the snapshot is already
+    # carried on the magnetization by the solver.
+    maxwell = (maxwell_moments(feelmri_seq, t_anchor_ms, times_arr)
+               if times_arr.size else np.zeros((0, 4), dtype=float))
 
     head_adc = pulseq_seq.ADC[first]
     readouts.append(ReadoutWindow(
@@ -2824,6 +2850,7 @@ def import_pulseq(
       kspace_file=kspace_file,
       k_at_anchor=k_at_anchor,
       t_anchor=t_anchor_ms,
+      maxwell=maxwell,
       times=times_arr,
       adc_freq_offset=float(head_adc.df) + float(head_adc.freq_ppm) * ppm_to_hz,
       adc_phase_offset=float(head_adc.phase) + float(head_adc.phase_ppm) * ppm_to_hz,
@@ -3097,6 +3124,12 @@ def simulate_pulseq(seq_path,
     readout_bins = (_ens, move(offsets), weights, move(T2_read),
                     move(phi_read))
 
+  # The readout carries the concomitant term exactly when the SOLVER did. The
+  # two halves describe one field, and modelling it up to the snapshot and then
+  # dropping it for the readout would be worse than not modelling it at all --
+  # it is the same coupling rule the off-resonance handoff follows.
+  concomitant_readout = bool(solver_kwargs.get('concomitant_fields', False))
+
   kspace: List[np.ndarray] = []
   times: List[np.ndarray] = []
   for rw in imp.readouts:
@@ -3127,12 +3160,14 @@ def simulate_pulseq(seq_path,
     # deformation disagreed with the one the solver used at the same
     # instant. Restored afterwards so the caller's object comes back
     # unchanged.
+    maxwell = (maxwell_phase_coefficients(rw.maxwell, scanner)
+               if concomitant_readout and rw.maxwell is not None else None)
     shift = getattr(pod, 'timeshift', None) if pod is not None else None
     if shift is not None:
       pod.update_timeshift(float(rw.t_anchor))
     try:
       if bins is None:
-        signal = phantom.mri_signal(list(points), t, pod)
+        signal = phantom.mri_signal(list(points), t, pod, maxwell=maxwell)
       else:
         # Bin-by-bin readout. Collapsing the sub-ensemble at the snapshot and
         # letting the assembler replay a single exp(-t/T2) from there cannot
@@ -3155,7 +3190,8 @@ def simulate_pulseq(seq_path,
           for k, w in enumerate(weights):
             phantom.set_static_fields(T2_read, phi_read + offsets[:, k])
             phantom.update_magnetization(ensemble[:, k])
-            contribution = w * phantom.mri_signal(list(points), t, pod)
+            contribution = w * phantom.mri_signal(list(points), t, pod,
+                                                  maxwell=maxwell)
             signal = contribution if signal is None else signal + contribution
     finally:
       if shift is not None:
