@@ -38,6 +38,9 @@ from feelmri.PulseqAdapter import (
     import_pulseq,
     kspace_to_signal_inputs,
     kspace_trajectory,
+    maxwell_moments,
+    maxwell_moments_from_kspace,
+    maxwell_phase_coefficients,
     pypulseq_can_read,
     pypulseq_version,
     read_seq_feelmri,
@@ -106,6 +109,8 @@ __all__ = [
     "import_pulseq", "read_seq_feelmri", "kspace_trajectory",
     "as_signal_inputs", "kspace_to_signal_inputs",
     "simulate_pulseq", "pypulseq_version", "pypulseq_can_read",
+    "maxwell_moments", "maxwell_moments_from_kspace",
+    "maxwell_phase_coefficients",
     # Motion
     "RespiratoryMotion", "POD", "PODVelocity", "PODSum",
     "pod_energy_spectrum", "modes_for_energy", "pod_frame_errors",

@@ -2291,6 +2291,194 @@ def _gradient_moment_between(feelmri_seq, t0_ms: float, t1_ms: float,
   return total * 1e-6 * gammabar_hz_per_t
 
 
+def maxwell_moments(feelmri_seq, t0_ms: float, sample_times_ms) -> np.ndarray:
+  """Time-integrated gradient products that drive the concomitant field.
+
+  The Maxwell term is
+
+      Bc = [(Gx^2+Gy^2) z^2 + (Gz^2/4)(x^2+y^2) - Gx Gz x z - Gy Gz y z] / (2 B0)
+
+  a quadratic form in position whose coefficients depend only on time. Its time
+  integral therefore FACTORISES exactly into four scalars times four fixed
+  spatial monomials -- checked against :func:`feelmri.Bloch._concomitant_mT` on
+  an oblique, time-varying waveform to 1.0e-14 relative:
+
+      column 0: integral (Gx^2 + Gy^2) dt   multiplies z^2
+      column 1: integral (Gz^2) dt          multiplies (x^2 + y^2)/4
+      column 2: integral (Gx Gz) dt         multiplies -x z
+      column 3: integral (Gy Gz) dt         multiplies -y z
+
+  So this is four numbers per sample playing exactly the role the three
+  components of ``k`` play for the linear term: a second trajectory, not a
+  second field model. :func:`maxwell_phase_coefficients` turns them into the
+  rad/m^2 the assembler wants.
+
+  Returns ``(N, 4)`` float64 in ``(mT/m)^2 ms``, integrated FORWARD from
+  ``t0_ms``, so ``out[0]`` is zero whenever the first sample sits at ``t0_ms``.
+  There is no anchor correction to make: unlike ``k``, which pypulseq measures
+  from the excitation, this origin is ours to choose, and the only correct one
+  is the magnetization snapshot -- everything before it is already carried on
+  the magnetization by the solver.
+
+  Three traps, each of which silently returns a plausible wrong answer:
+
+  * **Sum each axis BEFORE squaring.** ``_gradient_moment_between`` may
+    accumulate per gradient object because the integral is linear; here
+    ``integral (Gx + Gx')^2 != integral Gx^2 + integral Gx'^2``. The cross
+    terms cannot be decomposed per axis at all, which is why the grid is
+    unioned across axes rather than built per gradient.
+  * **Do not reach for pypulseq's ``waveforms_and_times``.** It concatenates
+    each block's shape pieces with no padding, so interpolating across it
+    bridges the gaps where nothing is playing -- measured at 1.14 1/m on the
+    linear moment of ``arb_v15``, and one-signed here.
+  * **The sample times must be ON the grid.** Between corners the cumulative
+    moment is quadratic, so interpolating it afterwards is wrong at second
+    order. They are unioned in rather than looked up.
+
+  The segment rule is exact rather than sampled, which is what lets this avoid
+  the raster error the solver has to sub-sample around (see
+  ``Bloch.CONCOMITANT_DT_GR_MS``): over a ramp the trapezoid rule charges
+  ``A^2 h/2`` where the exact second moment is ``A^2 h/3``, a 50% over-count.
+  """
+  times = np.asarray(sample_times_ms, dtype=float).reshape(-1)
+  if times.size == 0:
+    return np.zeros((0, 4), dtype=float)
+  if times.min() < t0_ms:
+    raise ValueError(
+        f"maxwell_moments: sample time {times.min()} ms precedes the origin "
+        f"{t0_ms} ms. The moments are integrated forward from the snapshot, "
+        f"so a sample before it has no meaning.")
+  t_last = float(times.max())
+  if t_last <= t0_ms:
+    return np.zeros((times.size, 4), dtype=float)
+
+  # The union grid: the origin, every sample, and every gradient corner that
+  # falls inside. Adding corners to a piecewise-linear waveform is lossless,
+  # and it is what makes the closed forms below exact.
+  corners = [np.array([float(t0_ms), t_last]), times]
+  for block in feelmri_seq.blocks:
+    if (block.time_extent[1].m_as('ms') <= t0_ms
+        or block.time_extent[0].m_as('ms') >= t_last):
+      continue
+    for g in block.gradients:
+      corners.append(np.asarray(g.timings.m_as('ms'), dtype=float))
+  grid = np.unique(np.concatenate(corners))
+  grid = grid[(grid >= t0_ms) & (grid <= t_last)]
+
+  # The SUMMED amplitude per axis. Every gradient is zero outside its own
+  # support (interp1d is built with fill_value=0.0), so blocks that do not
+  # overlap contribute nothing and the sum is gap-free.
+  G = np.zeros((grid.size, 3), dtype=float)
+  for block in feelmri_seq.blocks:
+    if (block.time_extent[1].m_as('ms') <= t0_ms
+        or block.time_extent[0].m_as('ms') >= t_last):
+      continue
+    for g in block.gradients:
+      ts = np.asarray(g.timings.m_as('ms'), dtype=float)
+      amp = np.asarray(g.amplitudes.m_as('mT/m'), dtype=float)
+      G[:, g.axis] += np.interp(grid, ts, amp, left=0.0, right=0.0)
+
+  # Exact on each piecewise-linear segment:
+  #   integral A^2 dt  = h (A0^2 + A0 A1 + A1^2)/3
+  #   integral A B dt  = h (2 A0 B0 + A0 B1 + A1 B0 + 2 A1 B1)/6
+  h = np.diff(grid)
+  A0, A1 = G[:-1], G[1:]
+  square = h[:, None] * (A0 * A0 + A0 * A1 + A1 * A1) / 3.0
+
+  def _cross(i, j):
+    return h * (2.0 * A0[:, i] * A0[:, j] + A0[:, i] * A1[:, j]
+                + A1[:, i] * A0[:, j] + 2.0 * A1[:, i] * A1[:, j]) / 6.0
+
+  increment = np.empty((h.size, 4), dtype=float)
+  increment[:, 0] = square[:, 0] + square[:, 1]
+  increment[:, 1] = square[:, 2]
+  increment[:, 2] = _cross(0, 2)
+  increment[:, 3] = _cross(1, 2)
+
+  cumulative = np.vstack((np.zeros((1, 4)), np.cumsum(increment, axis=0)))
+  return cumulative[np.searchsorted(grid, times)]
+
+
+def maxwell_phase_coefficients(moments, scanner) -> np.ndarray:
+  """Turn :func:`maxwell_moments` output into the rad/m^2 the assembler adds.
+
+  **The sign convention lives here and nowhere else.** The assembler ADDS
+  ``p0 z^2 + p1 (x^2+y^2) + p2 x z + p3 y z`` to its phase, so every sign and
+  the factor of 4 on the ``(x^2+y^2)`` term are folded in on this side. That
+  keeps ``MRIAssemble.cpp`` free of any knowledge of B0 or of the Maxwell
+  expression -- which matters, because three copies of that expression already
+  exist (the kernel and the two Magnus seeds) and they must not drift apart.
+
+  The solver precesses as ``exp(-i gamma Bz t)``, so the phase is
+  ``-gamma * integral(Bc) dt``; expanding that against the column order of
+  :func:`maxwell_moments` gives the four coefficients below.
+  """
+  m = np.asarray(moments, dtype=float)
+  if m.ndim != 2 or m.shape[1] != 4:
+    raise ValueError(
+        f"maxwell_phase_coefficients: expected (N, 4) moments, got {m.shape}")
+  gamma = scanner.gamma.m_as('rad/ms/mT')
+  B0 = scanner.field_strength.m_as('mT')
+  if not B0 > 0:
+    raise ValueError(
+        f"maxwell_phase_coefficients: the concomitant term scales as 1/B0, so "
+        f"a zero or negative field strength ({scanner.field_strength}) is "
+        f"undefined, not merely weak.")
+  out = np.empty_like(m)
+  out[:, 0] = -gamma * m[:, 0] / (2.0 * B0)          # z^2
+  out[:, 1] = -gamma * m[:, 1] / (8.0 * B0)          # (x^2 + y^2), the /4 folded
+  out[:, 2] = +gamma * m[:, 2] / (2.0 * B0)          # x z
+  out[:, 3] = +gamma * m[:, 3] / (2.0 * B0)          # y z
+  return out
+
+
+def maxwell_moments_from_kspace(kx, ky, kz, times_ms, scanner) -> np.ndarray:
+  """:func:`maxwell_moments` for a trajectory given as sampled k(t).
+
+  The native trajectory classes in :mod:`feelmri.KSpaceTraj` specify k
+  directly and carry no gradient waveform, so the gradient is recovered as
+  ``G = (dk/dt) / gammabar`` and the same closed forms are applied between
+  samples.
+
+  Two limitations, both structural:
+
+  * It is **exact only where k is linear in t between samples** -- a Cartesian
+    readout -- and approximate on a curved trajectory, where the recovered G is
+    a finite-difference estimate. Refine by sampling k more densely.
+  * The trajectory **begins at the first ADC sample**, so anything played
+    before it (a prephaser, a slice rephaser) contributes no moment here. A
+    caller holding the real gradient should use :func:`maxwell_moments`
+    instead, which integrates from the snapshot.
+  """
+  t = np.asarray(times_ms, dtype=float).reshape(-1)
+  k = np.stack([np.asarray(a, dtype=float).reshape(-1) for a in (kx, ky, kz)],
+               axis=1)
+  if k.shape[0] != t.size:
+    raise ValueError(
+        f"maxwell_moments_from_kspace: {k.shape[0]} k-points against {t.size} "
+        f"times; they describe the same samples.")
+  if t.size < 2:
+    return np.zeros((t.size, 4), dtype=float)
+  gammabar = scanner.gammabar.m_as('1/ms/mT')
+  # (1/m)/ms divided by 1/(ms mT) is mT/m.
+  G = np.gradient(k, t, axis=0) / gammabar
+
+  h = np.diff(t)
+  A0, A1 = G[:-1], G[1:]
+  square = h[:, None] * (A0 * A0 + A0 * A1 + A1 * A1) / 3.0
+
+  def _cross(i, j):
+    return h * (2.0 * A0[:, i] * A0[:, j] + A0[:, i] * A1[:, j]
+                + A1[:, i] * A0[:, j] + 2.0 * A1[:, i] * A1[:, j]) / 6.0
+
+  increment = np.empty((h.size, 4), dtype=float)
+  increment[:, 0] = square[:, 0] + square[:, 1]
+  increment[:, 1] = square[:, 2]
+  increment[:, 2] = _cross(0, 2)
+  increment[:, 3] = _cross(1, 2)
+  return np.vstack((np.zeros((1, 4)), np.cumsum(increment, axis=0)))
+
+
 def _identify_readout_groups(pulseq_seq: PulseqSequence
                              ) -> List[Tuple[int, int, int]]:
   """Group ADC-bearing blocks by the last RF pulse that precedes them.
