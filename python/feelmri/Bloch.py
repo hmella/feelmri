@@ -1063,26 +1063,42 @@ class BlochSolver:
         phantom._partition_bound = True
         self.M0 = M0
 
-        def _node_column(value, name):
+        def _node_column(value, name, template=None):
             """Broadcast a scalar or per-node value onto the (n, 1) node column.
 
             `ones` is (n, 1), so the bare `value * ones` idiom turns a plain
             (n,) array into an (n, n) OUTER PRODUCT rather than raising -- at
             63 357 nodes that is a silent 32 GB allocation, which is how this
-            was found. A scalar or (n, 1) is the historical input and is
-            unchanged; (n,) is now accepted and reshaped."""
+            was found.
+
+            Accepts a scalar, a SIZE-1 array or list (`np.atleast_1d(x)`, a
+            one-element parameter file, a keepdims reduction -- all ordinary
+            ways to spell a scalar, and all of which the `* ones` idiom used to
+            broadcast), an (n,) array, or an (n, 1) array.
+            """
+            base = ones if template is None else template
             arr = np.asarray(value)
-            if arr.ndim > 1 and arr.shape != ones.shape:
-                raise ValueError(
-                    f"BlochSolver: {name} must be a scalar, (n,) or (n, 1) with "
-                    f"n = {ones.shape[0]} local nodes; got shape {arr.shape}")
+            if arr.ndim > 1 and arr.shape != base.shape:
+                if arr.size != 1:
+                    raise ValueError(
+                        f"BlochSolver: {name} must be a scalar, (n,) or (n, 1) "
+                        f"with n = {base.shape[0]} local nodes; got shape "
+                        f"{arr.shape}")
+                arr = arr.reshape(())
             if arr.ndim == 1:
-                if arr.size != ones.shape[0]:
+                if arr.size == 1:
+                    arr = arr.reshape(())
+                elif arr.size != base.shape[0]:
                     raise ValueError(
                         f"BlochSolver: {name} has {arr.size} entries but there "
-                        f"are {ones.shape[0]} local nodes")
-                arr = arr.reshape(-1, 1)
-            return arr * ones
+                        f"are {base.shape[0]} local nodes")
+                else:
+                    arr = arr.reshape(-1, 1)
+            # Preserve the template's dtype. Under NEP 50 `np.asarray(1000.0) *
+            # ones_f32` promotes to float64, where the bare `1000.0 * ones_f32`
+            # idiom stayed float32 -- which would silently double the memory of
+            # T1/T2/delta_B and force a copy in every solve().
+            return (arr * base).astype(base.dtype, copy=False)
 
         self.T1 = Quantity(_node_column(T1.m, 'T1'), T1.units)
         self.T2 = Quantity(_node_column(T2.m, 'T2'), T2.units)
@@ -1108,8 +1124,12 @@ class BlochSolver:
                     f"BlochSolver: b1_map must be a scalar or have one entry "
                     f"per local node ({n_local}); got {b1.size}")
             self.b1_map = np.ascontiguousarray(b1)
-        self.initial_Mxy = initial_Mxy * ones.astype(self._np_cplx)
-        self.initial_Mz = initial_Mz * ones if initial_Mz is not None else M0 * ones
+        # The same normalisation: these two were left on the bare idiom, so
+        # initial_Mz=np.ones(n) still produced the (n, n) outer product.
+        complex_ones = ones.astype(self._np_cplx)
+        self.initial_Mxy = _node_column(initial_Mxy, 'initial_Mxy', complex_ones)
+        self.initial_Mz = _node_column(
+            initial_Mz if initial_Mz is not None else M0, 'initial_Mz')
         self.pod_trajectory = pod_trajectory
         if perfect_spoiling is None:
             perfect_spoiling = not getattr(sequence, 'explicit_spoiling', False)
