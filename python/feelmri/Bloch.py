@@ -1562,9 +1562,17 @@ class BlochSolver:
                 f"columns are numbered from `start` and no longer line up with "
                 f"ReadoutWindow.m_storage_idx, which counts from block 0.")
 
-        # Allocate magnetizations
-        Mxy = np.zeros((nb_nodes, nb_blocks), dtype=self._np_cplx)
-        Mz  = np.zeros((nb_nodes, nb_blocks), dtype=self._np_real)
+        # Allocate magnetizations. Only the STORED columns are allocated: a
+        # column is written once and read only by the return below, so sizing
+        # these over every block carried nb_blocks / len(store_indices) times
+        # the memory for nothing. The bin array is the one that hurts, since it
+        # carries the n_bins factor as well -- on epi_v142 at 22 167 nodes and
+        # K = 32 it reserved 2.6 GB to keep 0.01 GB, and on flash_tr_v15, which
+        # stores nothing at all, 1.8 GB to keep none.
+        store_slot = {b: j for j, b in enumerate(store_indices)}
+        nb_stored = len(store_indices)
+        Mxy = np.zeros((nb_nodes, nb_stored), dtype=self._np_cplx)
+        Mz  = np.zeros((nb_nodes, nb_stored), dtype=self._np_real)
         # The UNCOLLAPSED ensemble at each stored column, (n_nodes, n_bins,
         # n_blocks). Kept because collapsing at the snapshot is what makes a
         # readout lose the sub-voxel rephasing: the assembler can only replay
@@ -1575,7 +1583,7 @@ class BlochSolver:
         # Costs n_bins x the stored magnetization, which the caller has already
         # accepted n_bins x of in the solver itself.
         bins_out = (None if self._n_bins <= 1 else
-                    np.zeros((nb_nodes, self._n_bins, nb_blocks),
+                    np.zeros((nb_nodes, self._n_bins, nb_stored),
                              dtype=self._np_cplx))
 
         # Strip units of Bloch parameters just once
@@ -1890,10 +1898,12 @@ class BlochSolver:
             # Update magnetizations. This is the ONLY place the ensemble is
             # reduced: the carried state below stays per sub-spin, so coherence
             # survives the block boundary and a 180 can rephase it.
-            Mxy[:, i] = collapse_bins(Mxy_[:, -1])
-            Mz[:, i]  = collapse_bins(Mz_[:, -1])
-            if bins_out is not None:
-                bins_out[:, :, i] = Mxy_[:, -1].reshape(nb_nodes, n_bins)
+            j = store_slot.get(i)
+            if j is not None:
+                Mxy[:, j] = collapse_bins(Mxy_[:, -1])
+                Mz[:, j]  = collapse_bins(Mz_[:, -1])
+                if bins_out is not None:
+                    bins_out[:, :, j] = Mxy_[:, -1].reshape(nb_nodes, n_bins)
 
             # Update the initial magnetization for the next block. Keep the
             # cached column-vector initial_Mxy/initial_Mz in step with the
@@ -1957,9 +1967,8 @@ class BlochSolver:
         # Synchronize all processes
         MPI_comm.Barrier()
 
-        self.bin_magnetization = (None if bins_out is None
-                                  else bins_out[:, :, store_indices])
-        return Mxy[:, store_indices], Mz[:, store_indices]
+        self.bin_magnetization = bins_out
+        return Mxy, Mz
 
 
 def _collective_raise(message):

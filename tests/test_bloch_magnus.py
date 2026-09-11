@@ -1369,3 +1369,97 @@ def test_concomitant_fields_follow_a_moving_phantom(wide_phantom):
   assert abs(gaps[True] - gaps[False]) < 1e-6, (
     f'the residual differs with the term on ({gaps[True]:.2e}) and off '
     f'({gaps[False]:.2e}), so it is NOT just the float32 POD representation')
+
+
+# ---------------------------------------------------------------------------
+# 7. Third-audit regressions
+# ---------------------------------------------------------------------------
+
+
+def test_only_the_stored_columns_are_allocated(tmp_path_factory):
+  """solve() used to allocate Mxy, Mz and the sub-ensemble over EVERY block
+  and slice them to the stored ones at the end.
+
+  A column is write-only until that slice, so the whole difference was waste,
+  and the bin array carries the n_bins factor on top of it. Measured at 22 167
+  nodes with K = 28 (a pruned gaussian K = 32) in complex128: epi_v142
+  reserved 2.29 GB to keep 0.01 GB, and flash_tr_v15, which stores nothing at
+  all, reserved 1.59 GB to keep none.
+
+  Here the same ratio is 200 blocks against 1 stored column, so the old code
+  peaks above 100 MB and the fixed one below 1 MB.
+  """
+  pytest.importorskip('mpi4py')
+  pytest.importorskip('pymetis')
+  pytest.importorskip('meshio')
+  import tracemalloc
+
+  mesh_path = tmp_path_factory.mktemp('audit3_rod') / 'rod.vtu'
+  make_1d_rod_mesh(mesh_path, length=0.04, n_segments=300,
+                   transverse_width=1e-4)
+  phantom = FEMPhantom(path=str(mesh_path))
+  n_nodes = phantom.local_nodes.shape[0]
+
+  seq = Sequence()
+  for index in range(200):
+    block = make_empty_block(1.0, dt_ms=1.0)
+    block.store_magnetization = (index == 199)
+    seq.add_block(block)
+
+  solver = BlochSolver(
+    seq, phantom, T1=Quantity(1e9, 'ms'), T2=Quantity(1e9, 'ms'),
+    initial_Mxy=1.0 + 0.0j, initial_Mz=0.0, perfect_spoiling=False,
+    t2_prime=Quantity(10.0, 'ms'), spectral_bins=32, dtype='float64')
+  n_bins = solver.n_spectral_bins
+
+  tracemalloc.start()
+  Mxy, _ = solver.solve()
+  peak = tracemalloc.get_traced_memory()[1]
+  tracemalloc.stop()
+
+  assert Mxy.shape == (n_nodes, 1)
+  assert solver.bin_magnetization.shape == (n_nodes, n_bins, 1)
+
+  over_all_blocks = n_nodes * n_bins * len(seq.blocks) * 16
+  assert peak < 0.2 * over_all_blocks, (
+    f'solve() peaked at {peak / 1e6:.1f} MB, against {over_all_blocks / 1e6:.1f} '
+    f'MB for the sub-ensemble over all {len(seq.blocks)} blocks -- it is still '
+    f'allocating columns it throws away')
+
+
+def test_stored_columns_keep_their_block_order(minimal_phantom):
+  """Writing through a block-to-slot map must put each stored block's state in
+  the column the caller expects. ReadoutWindow.m_storage_idx counts stored
+  blocks, so an off-by-one here silently pairs a readout with the wrong echo.
+  """
+  flags = (True, False, False, True, False, True)
+  T2_ms = 40.0
+
+  def build():
+    seq = Sequence()
+    for stored in flags:
+      block = make_empty_block(10.0, dt_ms=10.0)
+      block.store_magnetization = stored
+      seq.add_block(block)
+    return seq
+
+  def run(sequence):
+    solver = BlochSolver(
+      sequence, minimal_phantom, T1=Quantity(1e9, 'ms'),
+      T2=Quantity(T2_ms, 'ms'), initial_Mxy=1.0 + 0.0j, initial_Mz=0.0,
+      perfect_spoiling=False, dtype='float64')
+    return solver.solve()[0]
+
+  selective = run(build())
+  every = build()
+  for block in every.blocks:
+    block.store_magnetization = True
+  dense = run(every)
+
+  assert selective.shape[1] == sum(flags)
+  wanted = [i for i, stored in enumerate(flags) if stored]
+  np.testing.assert_allclose(selective, dense[:, wanted], rtol=0, atol=0)
+  # ... and the columns are the decay at 10 ms per elapsed block, so the map
+  # cannot be right by accident.
+  expected = np.exp(-10.0 * (np.array(wanted) + 1) / T2_ms)
+  np.testing.assert_allclose(np.abs(selective[0]), expected, rtol=1e-6)
