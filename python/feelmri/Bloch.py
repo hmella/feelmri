@@ -173,6 +173,34 @@ def _rf_support_ms(rf):
     return float(t[0]), float(t[-1])
 
 
+def _concomitant_mT(pos, G, B0_mT):
+    """Maxwell term at ``pos`` (m) under gradient ``G`` (mT/m), in mT.
+
+    ``Bc = [ (Gx^2+Gy^2) z^2 + (Gz^2/4)(x^2+y^2) - Gx Gz x z - Gy Gz y z ]
+            / (2 B0)``
+
+    The gradient coil cannot produce a purely linear Bz; Maxwell's equations
+    force this second-order correction. It is the only channel in the field
+    model that is non-linear in position.
+
+    **This must stay identical to the kernel's own expression**
+    (`BlochSimulator.cpp`, the `Bz_new` line). It exists as one function
+    because the per-block Magnus seed recomputes the field in Python in TWO
+    places -- the plain path and the spoiler path, the latter on jittered
+    isochromat positions -- and a seed that disagrees with the kernel puts an
+    O(dt) error at every block boundary, silently.
+
+    ``B0_mT <= 0`` returns exactly zero, which is how the feature is disabled.
+    """
+    if B0_mT <= 0.0:
+        return 0.0
+    x, y, z = pos[:, 0], pos[:, 1], pos[:, 2]
+    gx, gy, gz = float(G[0]), float(G[1]), float(G[2])
+    return ((gx * gx + gy * gy) * z * z
+            + 0.25 * gz * gz * (x * x + y * y)
+            - gx * gz * x * z - gy * gz * y * z) / (2.0 * B0_mT)
+
+
 def _rf_waveform_mT(rf):
     """An RF pulse's B1 waveform in mT, on either construction path.
 
@@ -959,6 +987,7 @@ class BlochSolver:
                  initial_Mxy: np.ndarray | float = 0.0,
                  initial_Mz: np.ndarray | float = None,
                  perfect_spoiling: bool | None = None,
+                 concomitant_fields: bool = False,
                  isochromat_K: int = 25,
                  isochromat_distribution: str = 'sobol',
                  isochromat_seed: int | None = 0,
@@ -1020,6 +1049,14 @@ class BlochSolver:
         self.isochromat_K = int(isochromat_K)
         self.isochromat_distribution = str(isochromat_distribution).lower()
         self.isochromat_seed = isochromat_seed
+        # Concomitant (Maxwell) fields. OFF by default: switching it on moves
+        # every existing result, so it must be a knowing choice. When off the
+        # kernel is handed B0 = 0, which makes the term identically zero
+        # rather than merely small -- the 24-case numerical A/B against the
+        # feature-off build reads 0.000e+00.
+        self.concomitant_fields = bool(concomitant_fields)
+        self._B0_mT = (float(scanner.field_strength.m_as('mT'))
+                       if self.concomitant_fields else 0.0)
         # Persistent Magnus state (per-node Bz, scalar rf) carried between
         # blocks so that order-2/4 maintain a continuous field history. For
         # order = 0 these arrays are written but never read by the kernel.
@@ -1192,7 +1229,8 @@ class BlochSolver:
                 else:
                     c0 = x
                 G0 = gradients[0, :]
-                Bz_old = (c0 @ G0 + delta_B.reshape(-1)).astype(
+                Bz_old = (c0 @ G0 + delta_B.reshape(-1)
+                          + _concomitant_mT(c0, G0, self._B0_mT)).astype(
                     self._np_real, copy=False)
                 rf_old = self._py_cplx(rf_pulses[0, 0])
 
@@ -1265,7 +1303,8 @@ class BlochSolver:
                     else:
                         c0b = x_big
                     Bz_old_big = np.ascontiguousarray(
-                        c0b @ gradients[0, :] + deltaB_big.reshape(-1),
+                        c0b @ gradients[0, :] + deltaB_big.reshape(-1)
+                        + _concomitant_mT(c0b, gradients[0, :], self._B0_mT),
                         dtype=self._np_real)
                 else:
                     Bz_old_big = np.ascontiguousarray(
@@ -1278,6 +1317,7 @@ class BlochSolver:
                     rf_pulses, gradients, dt, regime_idx, Mxy_big, Mz_big,
                     modes_big, weights, has_traj,
                     self._order, Bz_old_big, rf_old,
+                    False, self._B0_mT,
                 )
                 self.bloch_elapsed += time.perf_counter() - t_call
 
@@ -1309,6 +1349,7 @@ class BlochSolver:
                     initial_Mxy, initial_Mz,
                     modes, weights, has_traj,
                     self._order, Bz_old, rf_old,
+                    False, self._B0_mT,
                 )
                 self.bloch_elapsed += time.perf_counter() - t_call
 

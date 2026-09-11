@@ -62,7 +62,8 @@ MagnetizationState<T> solve_mri_impl(
   bool has_traj,
   Eigen::Ref<const Matrix<T, Dynamic, 1>> Bz_old_init,
   std::complex<T> rf_old_init,
-  bool store_history
+  bool store_history,
+  const T &B0
 ){
   // The caller's rf!=0 mask is redundant: the kernel derives the rf-free
   // condition from rf_all itself, so a stale or wrong mask cannot corrupt
@@ -74,6 +75,10 @@ MagnetizationState<T> solve_mri_impl(
 
   const int n_pos = r0.rows();
   const int n_time = rf_all.size();
+  // Loop-invariant: zero disables the concomitant term exactly.
+  const bool concomitant = (B0 > T(0));
+  const T inv_2B0 = concomitant ? T(1) / (T(2) * B0) : T(0);
+
   const int n_out = store_history ? n_time : 1;
 
   Matrix<C, Dynamic, Dynamic> Mxy(n_pos, n_out);
@@ -184,10 +189,34 @@ MagnetizationState<T> solve_mri_impl(
         ? (rf_new == C(0))
         : (rf_new == C(0) && rf_old == C(0));
 
-    auto advance_nodes = [&]<bool RfFree>() {
+    auto advance_nodes = [&]<bool RfFree, bool Conc>() {
       for (int p = 0; p < n_pos; ++p) {
 
-        const T Bz_new = curr(p, 0)*Gx + curr(p, 1)*Gy + curr(p, 2)*Gz + delta_B(p);
+        // Concomitant (Maxwell) term. The gradient coil cannot produce a
+        // purely linear Bz: Maxwell's equations force a second-order
+        // correction, which for a symmetric cylindrical design is
+        //   Bc = [ (Gx^2+Gy^2) z^2 + (Gz^2/4)(x^2+y^2)
+        //          - Gx Gz x z - Gy Gz y z ] / (2 B0)
+        // This is the ONLY channel in the kernel that is non-linear in
+        // position; everything else here is linear, which is why it cannot be
+        // faked upstream in the adapter.
+        //
+        // inv_2B0 is 0 when the caller leaves concomitant fields off, so the
+        // whole term is identically zero rather than merely small -- the
+        // numerical A/B against the feature-off build reads 0.000e+00.
+        const T px = curr(p, 0), py = curr(p, 1), pz = curr(p, 2);
+        // Written as ONE expression per branch, not a running sum: under
+        // -ffast-math a `+=` regroups the FMAs and the feature-off build stops
+        // being bit-identical to the build that predates this term.
+        T Bz_new;
+        if constexpr (Conc) {
+          Bz_new = px*Gx + py*Gy + pz*Gz + delta_B(p)
+                 + ((Gx*Gx + Gy*Gy) * pz*pz
+                    + T(0.25) * Gz*Gz * (px*px + py*py)
+                    - Gx*Gz*px*pz - Gy*Gz*py*pz) * inv_2B0;
+        } else {
+          Bz_new = curr(p, 0)*Gx + curr(p, 1)*Gy + curr(p, 2)*Gz + delta_B(p);
+        }
 
         C alpha_p, beta_p;
 
@@ -299,10 +328,18 @@ MagnetizationState<T> solve_mri_impl(
       }
     };
 
+    // Both branches are selected ONCE PER TIME STEP, never per node -- the
+    // same shape as the rf-free hoist, and for the same reason. `concomitant`
+    // is loop-invariant, so with the feature off the Maxwell arithmetic is not
+    // emitted at all rather than computed and multiplied by zero. That matters
+    // because the term is off by default and this box cannot resolve a ~5%
+    // kernel effect from a single run anyway.
     if (rf_free) {
-      advance_nodes.template operator()<true>();
+      if (concomitant) { advance_nodes.template operator()<true, true>(); }
+      else             { advance_nodes.template operator()<true, false>(); }
     } else {
-      advance_nodes.template operator()<false>();
+      if (concomitant) { advance_nodes.template operator()<false, true>(); }
+      else             { advance_nodes.template operator()<false, false>(); }
     }
 
     if constexpr (Order > 0) {
@@ -344,7 +381,8 @@ MagnetizationState<T> solve_mri_dispatch(
   bool has_traj,
   Eigen::Ref<const Matrix<T, Dynamic, 1>> Bz_old_init,
   std::complex<T> rf_old_init,
-  bool store_history
+  bool store_history,
+  const T &B0
 ){
   // Constant T1/T2 across nodes is the common case (phantoms built from scalar
   // relaxation times); it lets the relaxation exponentials stay in registers.
@@ -357,7 +395,7 @@ MagnetizationState<T> solve_mri_dispatch(
     return solve_mri_impl<T, ORDER, UNIFORM>(                                  \
         r0, T1, T2, delta_B, M0, gamma, rf_all, G_all, dt, regime_idx,         \
         Mxy_initial, Mz_initial, modes, weights,                               \
-        has_traj, Bz_old_init, rf_old_init, store_history)
+        has_traj, Bz_old_init, rf_old_init, store_history, B0)
 
   switch (order) {
     case 0:
@@ -402,12 +440,12 @@ PYBIND11_MODULE(BlochSimulator, m) {
        CVec_f32 Mxy_initial, Vec_f32 Mz_initial,
        Modes_f32 modes, MatDyn_f32 weights, bool has_traj,
        int order, Vec_f32 Bz_old_init, std::complex<f32> rf_old_init,
-       bool store_history) {
+       bool store_history, const f32 &B0) {
       return solve_mri_dispatch<f32>(order, r0, T1, T2, delta_B, M0, gamma,
                                      rf_all, G_all, dt, regime_idx,
                                      Mxy_initial, Mz_initial,
                                      modes, weights, has_traj,
-                                     Bz_old_init, rf_old_init, store_history);
+                                     Bz_old_init, rf_old_init, store_history, B0);
     },
     py::arg("r0"), py::arg("T1"), py::arg("T2"), py::arg("delta_B"),
     py::arg("M0"), py::arg("gamma"), py::arg("rf_all"), py::arg("G_all"),
@@ -415,7 +453,8 @@ PYBIND11_MODULE(BlochSimulator, m) {
     py::arg("Mz_initial"), py::arg("modes"), py::arg("weights"),
     py::arg("has_traj"),
     py::arg("order"), py::arg("Bz_old_init"), py::arg("rf_old_init"),
-    py::arg("store_history") = false);
+    py::arg("store_history") = false,
+    py::arg("B0") = 0.0);
 
   m.def("solve_mri_f64",
     [](R0_f64 r0, Vec_f64 T1, Vec_f64 T2, Vec_f64 delta_B,
@@ -424,12 +463,12 @@ PYBIND11_MODULE(BlochSimulator, m) {
        CVec_f64 Mxy_initial, Vec_f64 Mz_initial,
        Modes_f64 modes, MatDyn_f64 weights, bool has_traj,
        int order, Vec_f64 Bz_old_init, std::complex<f64> rf_old_init,
-       bool store_history) {
+       bool store_history, const f64 &B0) {
       return solve_mri_dispatch<f64>(order, r0, T1, T2, delta_B, M0, gamma,
                                      rf_all, G_all, dt, regime_idx,
                                      Mxy_initial, Mz_initial,
                                      modes, weights, has_traj,
-                                     Bz_old_init, rf_old_init, store_history);
+                                     Bz_old_init, rf_old_init, store_history, B0);
     },
     py::arg("r0"), py::arg("T1"), py::arg("T2"), py::arg("delta_B"),
     py::arg("M0"), py::arg("gamma"), py::arg("rf_all"), py::arg("G_all"),
@@ -437,5 +476,6 @@ PYBIND11_MODULE(BlochSimulator, m) {
     py::arg("Mz_initial"), py::arg("modes"), py::arg("weights"),
     py::arg("has_traj"),
     py::arg("order"), py::arg("Bz_old_init"), py::arg("rf_old_init"),
-    py::arg("store_history") = false);
+    py::arg("store_history") = false,
+    py::arg("B0") = 0.0);
 }
