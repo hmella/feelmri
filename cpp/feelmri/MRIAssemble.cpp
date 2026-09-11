@@ -174,6 +174,16 @@ public:
     // costs O(total_q * nne * nv) and the nodal paths never read f_Mxy_.
     void update_magnetization(const Eigen::Matrix<C, Eigen::Dynamic, Eigen::Dynamic>& Mxy)
     {
+        // One row per node, checked. Without this an over-long array is
+        // silently accepted: every read below is a middleRows(q_start,
+        // q_count) with q_start < nb_nodes_, so it stays in bounds and pairs
+        // the WRONG rows against the node positions -- plausible-looking and
+        // completely wrong k-space, with no exception anywhere.
+        if (Mxy.rows() != nb_nodes_) {
+            throw std::invalid_argument(
+                "update_magnetization: expected " + std::to_string(nb_nodes_) +
+                " rows (one per node), got " + std::to_string(Mxy.rows()));
+        }
         nv_ = (int)Mxy.cols(); // Number of receiving coils / isochromats
         f_Mxy_nodes_ = Mxy;
         f_Mxy_dirty_ = true;

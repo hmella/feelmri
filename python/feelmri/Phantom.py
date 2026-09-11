@@ -1201,6 +1201,15 @@ class FEMPhantom:
         ``BlochSolver.solve()`` returns) and is redistributed into the signal layout
         here -- the only per-handoff communication in the scheme.
         """
+        n_rows = np.shape(Mxy)[0]
+        n_local = self.local_nodes.shape[0]
+        if n_rows != n_local:
+            raise ValueError(
+                f"update_magnetization: expected one row per local node "
+                f"({n_local}), got {n_rows}. A sub-voxel ensemble must be "
+                f"collapsed before the assembler handoff -- redistribute_nodal "
+                f"and the assembler both index by node and would silently use "
+                f"the wrong rows.")
         if getattr(self, '_dual', False) and self._active_partition != 'signal':
             Mxy = self.redistribute_nodal(np.ascontiguousarray(Mxy), 'bloch', 'signal')
             with self._using('signal'):
