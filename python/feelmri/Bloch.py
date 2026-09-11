@@ -1565,10 +1565,25 @@ class BlochSolver:
                          and self._bin_Mz.shape == want
                          and self._bin_state_is_current(initial_Mxy, initial_Mz))
             if resumable:
-                initial_Mxy = np.ascontiguousarray(self._bin_Mxy,
-                                                   dtype=self._np_cplx)
-                initial_Mz = np.ascontiguousarray(self._bin_Mz,
-                                                  dtype=self._np_real)
+                # COPY. np.ascontiguousarray is a no-op when the dtype and
+                # layout already match, so this would otherwise alias
+                # self._bin_Mxy -- and the block loop writes into it in place.
+                # A solve() that raises midway would then leave the carried
+                # ensemble half-advanced while the stamp it is compared against
+                # still described the state before the call, so the next solve()
+                # resumed silently from a corrupted ensemble (measured 0.24
+                # absolute error, no exception, no warning).
+                initial_Mxy = np.array(self._bin_Mxy, dtype=self._np_cplx,
+                                       copy=True, order='C')
+                initial_Mz = np.array(self._bin_Mz, dtype=self._np_real,
+                                      copy=True, order='C')
+                # Do NOT also invalidate self._bin_collapsed here. With the copy
+                # above the carried ensemble and the public attributes both
+                # survive a failed call intact and still correspond, so the
+                # retry should RESUME. Forcing a re-seed instead would rebuild
+                # every bin from the collapsed per-node value, discarding the
+                # intra-voxel phase spread -- measured as a 0.17 error on the
+                # next block, i.e. a different wrong answer rather than a fix.
             else:
                 initial_Mxy = np.ascontiguousarray(
                     np.repeat(initial_Mxy, n_bins, axis=0), dtype=self._np_cplx)
