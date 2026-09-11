@@ -666,3 +666,53 @@ def test_the_bin_readout_leaves_the_phantom_on_the_collapsed_state(cube):
   assert abs(left_behind - collapsed) <= 1e-6 * abs(collapsed), (
     f'simulate_pulseq left the phantom at S(0) = {left_behind:.6e} where the '
     f'collapsed magnetization of the last window gives {collapsed:.6e}')
+
+
+def test_the_readout_time_origin_is_the_anchor_block_end(cube):
+  """`simulate_pulseq` measures readout time from `rw.t_anchor`, the END of the
+  anchor block, while the sub-ensemble's dephasing clock effectively starts at
+  the CENTRE of the excitation pulse. This pins the size of that gap.
+
+  On `fid_v15` -- a 0.2 ms hard pulse, anchor at 50.2 ms -- the readout
+  lineshape departs from its closed form by 5.7e-3 as shipped, and a +0.127 ms
+  origin shift collapses it to 1.3e-5. Half the pulse is 0.100 ms; the rest is
+  the raster's end-of-interval bias.
+
+  It is documented rather than corrected: moving the origin means giving
+  `ReadoutWindow` a pulse-centre anchor, which the k_at_anchor bookkeeping is
+  also measured from. The test exists so that a change of convention shows up
+  as a deliberate move rather than as drift.
+  """
+  from feelmri.PulseqAdapter import simulate_pulseq
+
+  phantom, _volume = cube
+  t2_prime_ms = 12.0
+  _static(phantom, 1e9)                                  # no T2, no B0 spread
+  sim = simulate_pulseq(_require('fid_v15.seq'), phantom, M0=1.0,
+                        T1=Q_(1e9, 'ms'), T2=Q_(1e9, 'ms'), dtype='float64',
+                        t2_prime=Q_(t2_prime_ms, 'ms'), spectral_bins=32)
+
+  rw = sim.imp.readouts[0]
+  t = rw.times - rw.t_anchor
+  got = np.abs(np.asarray(sim.kspace[0]).reshape(-1))
+
+  def deviation(shift_ms):
+    """Worst departure from exp(-(t/T2')^2/2), amplitude fitted.
+
+    Normalising on the first sample instead would be wrong for a gaussian:
+    F(t0 + tau)/F(t0) is not F(tau).
+    """
+    predicted = np.exp(-0.5 * ((t + shift_ms) / t2_prime_ms) ** 2)
+    amplitude = float((got * predicted).sum() / (predicted * predicted).sum())
+    return float(np.abs(got / amplitude - predicted).max())
+
+  as_shipped = deviation(0.0)
+  corrected = deviation(0.127)
+  assert 3e-3 < as_shipped < 9e-3, (
+    f'the readout lineshape departs from the closed form by {as_shipped:.2e}, '
+    f'where the anchor-end convention gives 5.7e-3. The time origin has moved')
+  assert corrected < 1e-4, (
+    f'shifting the origin by the pulse half-width leaves {corrected:.2e}; it '
+    f'measured 1.3e-5, so something other than the origin has changed')
+  assert corrected < 0.1 * as_shipped, (
+    'the shift no longer explains the departure')
