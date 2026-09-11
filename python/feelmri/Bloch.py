@@ -234,6 +234,7 @@ _METHOD_TO_ORDER = {
   'magnus4': 4,
 }
 from feelmri.Motion import POD
+from mpi4py import MPI
 from feelmri.MPIUtilities import MPI_comm, MPI_print, MPI_rank
 from feelmri.MRObjects import Scanner
 from feelmri.Phantom import FEMPhantom
@@ -1229,53 +1230,7 @@ class BlochSolver:
                     f"~{_LORENTZIAN_ERR(self._n_bins):.1e}, improving only as "
                     f"K^-0.55. Use 'gaussian' or 'uniform' unless you need "
                     f"continuity with the exp(-t/T2*) convention.")
-            # Guard 1: a K-fold node expansion also duplicates the POD mode
-            # matrix, which is rebuilt and Fortran-transposed on every block
-            # once the ensemble persists -- 3*N*K*M reals, against the 23 MB
-            # the layout was tuned to avoid re-transposing. That is a kernel
-            # redesign (a bin axis sharing positions and modes), not a tuning
-            # knob, so refuse rather than quietly crawl.
-            if pod_trajectory is not None:
-                raise NotImplementedError(
-                    "BlochSolver: t2_prime with a pod_trajectory is not "
-                    "supported. The spectral ensemble duplicates every node, "
-                    "which would duplicate the POD mode matrix and its "
-                    "per-block transpose. It needs a kernel bin axis that "
-                    "shares positions and modes across sub-spins.")
-            # Guard 2: UniformRelax survives np.repeat of a constant, but a
-            # per-node T1/T2 drops onto the kernel's per-node std::exp path,
-            # which recomputes on every dt change -- 2*N*K libm calls on
-            # roughly half of all steps, which would dominate the node loop.
-            for name, arr in (('T1', self.T1.m), ('T2', self.T2.m)):
-                a = np.asarray(arr).reshape(-1)
-                if a.size and not np.all(a == a[0]):
-                    raise NotImplementedError(
-                        f"BlochSolver: t2_prime with a per-node {name} is not "
-                        f"supported; the kernel would fall onto its per-node "
-                        f"exp() path at K times the cost.")
-            # Guard 3: perfect_spoiling zeroes Mxy at every non-empty block
-            # boundary, which destroys the ensemble's coherence -- making the
-            # whole feature a no-op that still costs K times.
-            if self.perfect_spoiling:
-                warnings.warn(
-                    "BlochSolver: perfect_spoiling is on together with "
-                    "t2_prime, so the sub-ensemble's coherence is zeroed at "
-                    "every non-empty block boundary and can never rephase at "
-                    "an echo. The spectral bins are then pure cost. Pass "
-                    "perfect_spoiling=False.")
-            # Guard 4: the spatial spoiler ensemble is a SECOND sub-voxel axis.
-            # A tensor product is K_spatial * K_spectral (x400 at the default
-            # isochromat_K=25), and merging them onto one index is wrong: the
-            # quadrature weights span ~10 orders of magnitude, so the spatial
-            # average would inherit them and its effective sample size would
-            # collapse.
-            if any(getattr(b, 'spoiler', False)
-                   for b in getattr(sequence, 'blocks', [])):
-                raise NotImplementedError(
-                    "BlochSolver: t2_prime with a spoiler=True block is not "
-                    "supported. They are two independent sub-voxel axes -- a "
-                    "spatial spread is rewound by a gradient, a frequency "
-                    "spread by a 180 -- so they would need a tensor product.")
+            self._check_bin_preconditions()
 
         # Persistent Magnus state (per-node Bz, scalar rf) carried between
         # blocks so that order-2/4 maintain a continuous field history. For
@@ -1331,6 +1286,78 @@ class BlochSolver:
         self._modes_cache = (self.pod_trajectory, nb_nodes, mat)
         return mat
 
+    def _check_bin_preconditions(self):
+        """Refuse or warn about combinations Stage 1 of the spectral ensemble
+        cannot serve. Called from ``__init__`` so the failure is early, and
+        again from ``solve()`` because every one of these reads a PUBLIC,
+        mutable attribute: setting ``solver.pod_trajectory`` after construction
+        used to bypass guard 1 entirely, and under ``cayley_klein`` that is not
+        an exception but a silent out-of-bounds read (the mode matrix is sized
+        from the un-expanded node count, and ``-DNDEBUG -DEIGEN_NO_DEBUG``
+        removes Eigen's own check).
+
+        The per-node tests are made COLLECTIVE. They inspect local-node data,
+        so a global field that is uniform overall can look non-uniform on one
+        rank only -- that rank would raise in ``__init__`` while the others
+        proceeded into ``solve()`` and blocked forever on its closing
+        ``Barrier``.
+        """
+        if self._n_bins <= 1:
+            return
+
+        def anywhere(local_flag):
+            """True if the condition holds on ANY rank."""
+            if MPI_comm is None or MPI_comm.Get_size() == 1:
+                return bool(local_flag)
+            return bool(MPI_comm.allreduce(bool(local_flag), op=MPI.LOR))
+
+        # Guard 1: a K-fold node expansion also duplicates the POD mode matrix,
+        # which is rebuilt and Fortran-transposed on every block once the
+        # ensemble persists -- 3*N*K*M reals, against the 23 MB the layout was
+        # tuned to avoid re-transposing. That is a kernel redesign (a bin axis
+        # sharing positions and modes), not a tuning knob, so refuse rather
+        # than quietly crawl.
+        if self.pod_trajectory is not None:
+            raise NotImplementedError(
+                "BlochSolver: t2_prime with a pod_trajectory is not supported. "
+                "The spectral ensemble duplicates every node, which would "
+                "duplicate the POD mode matrix and its per-block transpose. It "
+                "needs a kernel bin axis that shares positions and modes across "
+                "sub-spins.")
+        # Guard 2: UniformRelax survives np.repeat of a constant, but a per-node
+        # T1/T2 drops onto the kernel's per-node std::exp path, which recomputes
+        # on every dt change -- 2*N*K libm calls on roughly half of all steps,
+        # which would dominate the node loop.
+        for name, arr in (('T1', self.T1.m), ('T2', self.T2.m)):
+            a = np.asarray(arr).reshape(-1)
+            if anywhere(a.size and not np.all(a == a[0])):
+                raise NotImplementedError(
+                    f"BlochSolver: t2_prime with a per-node {name} is not "
+                    f"supported; the kernel would fall onto its per-node exp() "
+                    f"path at K times the cost.")
+        # Guard 3: perfect_spoiling zeroes Mxy at every non-empty block
+        # boundary, which destroys the ensemble's coherence -- making the whole
+        # feature a no-op that still costs K times.
+        if self.perfect_spoiling:
+            warnings.warn(
+                "BlochSolver: perfect_spoiling is on together with t2_prime, so "
+                "the sub-ensemble's coherence is zeroed at every non-empty "
+                "block boundary and can never rephase at an echo. The spectral "
+                "bins are then pure cost. Pass perfect_spoiling=False.")
+        # Guard 4: the spatial spoiler ensemble is a SECOND sub-voxel axis. A
+        # tensor product is K_spatial * K_spectral (x400 at the default
+        # isochromat_K=25), and merging them onto one index is wrong: the
+        # quadrature weights span ~10 orders of magnitude, so the spatial
+        # average would inherit them and its effective sample size would
+        # collapse.
+        if any(getattr(b, 'spoiler', False)
+               for b in getattr(self.sequence, 'blocks', [])):
+            raise NotImplementedError(
+                "BlochSolver: t2_prime with a spoiler=True block is not "
+                "supported. They are two independent sub-voxel axes -- a "
+                "spatial spread is rewound by a gradient, a frequency spread by "
+                "a 180 -- so they would need a tensor product.")
+
     def _bin_state_is_current(self, initial_Mxy, initial_Mz):
         """Whether the carried sub-ensemble still matches the public state.
 
@@ -1366,6 +1393,14 @@ class BlochSolver:
           f"[BlochSolver] Solving sequence blocks {start} to {end-1} "
           f"({len(blocks)} blocks) method={self._method} dtype={self._dtype}."
         )
+
+        # Re-check the sub-ensemble's preconditions against the LIVE
+        # attributes. They were validated in __init__, but every one of them is
+        # public and mutable, and `modes` -- the array guard 1 protects -- is
+        # sized from the un-expanded node count, so a post-construction
+        # `solver.pod_trajectory = pod` was a silent out-of-bounds read under
+        # cayley_klein rather than an exception.
+        self._check_bin_preconditions()
 
         # Pick the right C++ entry point for this dtype.
         solve_kernel = solve_mri_f32 if self._dtype == 'float32' else solve_mri_f64
