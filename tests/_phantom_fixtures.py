@@ -122,18 +122,19 @@ def make_2d_disk_mesh(path: Path, radius: float = 5e-3,
   return path, volume
 
 
-def make_cube_mesh(path: Path, cell_type: str, n: int = 2,
-                   scale: float = 2e-3) -> Tuple[Path, float]:
-  """Structured mesh of a cube, in any of the 3-D cell types the assembler
-  supports (``tetra``, ``tetra10``, ``hexahedron``, ``wedge``).
+def cube_cells(cell_type: str, n: int = 2, scale: float = 2e-3):
+  """Points, connectivity and exact volume for a structured cube mesh, in any
+  of the 3-D cell types the assembler supports (``tetra``, ``tetra10``,
+  ``hexahedron``, ``wedge``).
 
-  All four discretise the *same* domain with straight edges, so any
-  volume integral over them must agree. That makes them a direct check
-  on the meshio -> Basix DOF ordering, which differs per cell type.
+  All four discretise the *same* domain with straight edges, so any volume
+  integral over them must agree. That makes them a direct check on the
+  meshio -> Basix DOF ordering, which differs per cell type.
 
-  Returns the file path and the exact cube volume ``(n * scale) ** 3``.
+  Connectivity is in meshio/VTK order, which is what the library consumes and
+  permutes internally. Returns ``(points, cells, volume)``; the volume is
+  exactly ``(n * scale) ** 3``.
   """
-  import meshio
   c = np.arange(n + 1, dtype=np.float64) * scale
   pts = [[x, y, z] for z in c for y in c for x in c]
 
@@ -181,6 +182,15 @@ def make_cube_mesh(path: Path, cell_type: str, n: int = 2,
     else:
       raise ValueError(f'unsupported cell type: {cell_type}')
 
-  meshio.write_points_cells(str(path), np.asarray(pts, dtype=np.float64),
-                            [(cell_type, np.asarray(cells, dtype=np.int64))])
+  return (np.asarray(pts, dtype=np.float64),
+          np.asarray(cells, dtype=np.int64), volume)
+
+
+def make_cube_mesh(path: Path, cell_type: str, n: int = 2,
+                   scale: float = 2e-3) -> Tuple[Path, float]:
+  """``cube_cells`` written to ``path``. Returns the path and the volume."""
+  import meshio
+
+  pts, cells, volume = cube_cells(cell_type, n, scale)
+  meshio.write_points_cells(str(path), pts, [(cell_type, cells)])
   return path, volume
