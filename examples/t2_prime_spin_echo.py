@@ -160,6 +160,27 @@ if __name__ == '__main__':
   MPI_print('Weight normalisation: Mz after 5 T1 is {:.6f}, closed form '
             '{:.6f}'.format(float(Mz[centre, 0]), 1.0 - np.exp(-5.0)))
 
+  # Asserted, not just printed: an example that only reports its own error
+  # exits 0 however wrong the physics has become.
+  for s_name, f in SHAPES.items():
+    want = f(t_fid / t2_prime[centre]) * np.exp(-t_fid / T2_MS)
+    worst = float(np.abs(fids[s_name][centre] - want).max())
+    # The lorentzian rule cannot reach the exponential it targets -- that is
+    # the point of showing it -- so it gets the bound its own rule predicts.
+    limit = 0.25 if s_name == 'lorentzian' else 2e-3
+    assert worst < limit, f'{s_name} FID departs from its closed form by {worst:.3f}'
+  for label in ('gaussian', 'lorentzian'):
+    assert abs(echoes[label][rim, -1] - floor) < 5e-3, (
+      f'{label}: the echo should recover to exp(-2 tau/T2) = {floor:.4f}, got '
+      f'{echoes[label][rim, -1]:.4f}')
+  assert echoes['scalar'][rim, -1] < 0.1 * floor, (
+    'the scalar T2* control should NOT recover at the echo')
+  assert np.all(np.diff(echoes['scalar'][rim]) <= 1e-9), (
+    'the scalar T2* control must be monotone')
+  assert abs(float(Mz[centre, 0]) - (1.0 - np.exp(-5.0))) < 1e-6, (
+    'the quadrature weights no longer sum to 1; the phantom relaxes to the '
+    'wrong M0')
+
   # 4. What Stage 1 refuses, and why. Each guard names a measured cost rather
   # than being silently slow or wrong.
   MPI_print('Refused combinations:')

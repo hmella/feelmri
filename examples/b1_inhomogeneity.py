@@ -102,11 +102,19 @@ if __name__ == '__main__':
   worst_ref = MPI_comm.allreduce(float(np.abs(np.abs(Mxy_ref) - 1.0).max()), op=MPI.MAX)
   MPI_print('Control (b1_map=None): |Mxy| departs from 1 by {:.2e}'.format(worst_ref))
 
+  # Asserted, not just printed. The delivered flip is exact for a hard pulse,
+  # so these tolerances are the raster's, not the physics'.
+  assert worst < 1e-6, f'delivered flip departs from nominal x |b1| by {worst:.2e}'
+  assert worst_ref < 1e-6, f'the b1_map=None control is off by {worst_ref:.2e}'
+
   # The transmit phase lands on the transverse magnetization.
   phase_error = np.abs(np.exp(1j*np.angle(Mxy_90))
                        - np.exp(1j*(np.angle(Mxy_ref) + np.angle(b1_map))))
+  worst_phase = MPI_comm.allreduce(float(phase_error.max()), op=MPI.MAX)
   MPI_print('Transmit phase transferred to Mxy: worst deviation {:.2e}'.format(
-    MPI_comm.allreduce(float(phase_error.max()), op=MPI.MAX)))
+    worst_phase))
+  assert worst_phase < 1e-9, (
+    f'arg(b1) should land on Mxy exactly; off by {worst_phase:.2e}')
 
   # The signal peak is NOT where the transmit field peaks.
   peak_signal_r = radius[np.argmax(np.abs(Mxy_90))]
@@ -116,6 +124,11 @@ if __name__ == '__main__':
   MPI_print('Brightest signal sits at r = {:.3f} m of {:.3f} m, where |b1| = 1 '
             'and the flip is 90 deg -- not at the centre'.format(
               peak_signal_r, r_max))
+  # The point of the example: the signal peak is NOT the transmit peak.
+  ring = r_max * np.sqrt((b1_centre - 1.0) / (b1_centre - b1_rim))
+  assert abs(peak_signal_r - ring) < 0.15 * r_max, (
+    f'the brightest signal should sit on the |b1| = 1 ring at r = {ring:.3f} m, '
+    f'not at r = {peak_signal_r:.3f} m')
   MPI_print('Nominal 180 deg inversion: Mz runs {:+.3f} at the centre to '
             '{:+.3f} at the rim; only the |b1| = 1 ring inverts fully'.format(
               float(Mz_180[np.argmin(radius)]), float(Mz_180[np.argmax(radius)])))

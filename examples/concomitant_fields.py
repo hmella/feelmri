@@ -151,6 +151,12 @@ if __name__ == '__main__':
   MPI_print('Concomitant OFF: worst residual phase {:.2e} rad '
             '(the bipolar pair refocuses the linear term)'.format(worst_control))
 
+  # Asserted, not just printed: an example that only reports its own error
+  # exits 0 however wrong the physics has become.
+  assert worst_control < 1e-9, (
+    f'the bipolar pair should refocus the linear term to ~0; got '
+    f'{worst_control:.2e} rad')
+
   for B0 in field_strengths:
     reference = analytical_phase(B0)
     deviation = np.abs(np.exp(1j*measured[B0]) - np.exp(1j*reference))
@@ -158,6 +164,15 @@ if __name__ == '__main__':
     worst = MPI_comm.allreduce(float(deviation.max()), op=MPI.MAX)
     MPI_print('B0 = {:>4} T: peak concomitant phase {:5.3f} rad at the rim, '
               'worst deviation from the closed form {:.2e}'.format(B0, peak, worst))
+    # Proportional to the phase, because that is what the error is: the
+    # coarsened FEELMRI_FAST_TEST raster (dt 0.05 ms against 0.01) makes a
+    # RELATIVE error on the accumulated phase, measured at 1.95e-3 per radian
+    # at both field strengths. A fixed bound would pass at 1.5 T and fail at
+    # 0.55 T purely because the phase there is 2.7x larger.
+    assert worst < 3e-3 * peak, (
+      f'B0 = {B0} T: concomitant phase departs from the closed form by '
+      f'{worst:.2e}, i.e. {worst / peak:.2e} per radian of a {peak:.3f} rad '
+      f'phase')
 
   # 6. Show the phase across the slab. The nodes are an unstructured cloud, so
   # they are resampled onto a regular grid for display and drawn as a map with
