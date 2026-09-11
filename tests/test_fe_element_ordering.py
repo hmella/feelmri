@@ -127,61 +127,17 @@ def test_scrambled_ordering_is_detectable(cell_type):
 # 2. Structured multi-element meshes with an analytically known volume
 # --------------------------------------------------------------------------
 
-def _unit_cube_grid(n=2, scale=1e-2):
-  """(n+1)^3 lattice of points spanning a cube of side ``n * scale``."""
-  c = np.arange(n + 1, dtype=np.float64) * scale
-  pts = np.array([[x, y, z] for z in c for y in c for x in c])
-  idx = lambda i, j, k: i + (n + 1) * (j + (n + 1) * k)
-  # VTK hexahedron order: bottom face walked cyclically, then the top face.
-  hexes = [[idx(i, j, k), idx(i + 1, j, k), idx(i + 1, j + 1, k), idx(i, j + 1, k),
-            idx(i, j, k + 1), idx(i + 1, j, k + 1),
-            idx(i + 1, j + 1, k + 1), idx(i, j + 1, k + 1)]
-           for k in range(n) for j in range(n) for i in range(n)]
-  return pts, np.asarray(hexes, dtype=np.int64), float((n * scale) ** 3)
-
 
 def _build_mesh(cell_type, n=2, scale=1e-2):
-  """Structured mesh of ``cell_type`` filling a cube, plus its exact volume."""
-  pts, hexes, volume = _unit_cube_grid(n, scale)
+  """Structured mesh of ``cell_type`` filling a cube, plus its exact volume.
 
-  if cell_type == 'hexahedron':
-    return pts, hexes, volume
+  The geometry lives in ``_phantom_fixtures`` so this file and the ones that
+  build a phantom from the same cube cannot drift apart on the VTK hexahedron
+  order, the six-tetrahedron cut or the tetra10 midpoint order.
+  """
+  from _phantom_fixtures import cube_cells
+  return cube_cells(cell_type, n=n, scale=scale)
 
-  if cell_type == 'wedge':
-    # Cut each cube along the bottom-face diagonal into two prisms.
-    # VTK wedge: bottom triangle (0,1,2), top triangle (3,4,5) directly above.
-    cells = []
-    for h in hexes:
-      cells.append([h[0], h[1], h[2], h[4], h[5], h[6]])
-      cells.append([h[0], h[2], h[3], h[4], h[6], h[7]])
-    return pts, np.asarray(cells, dtype=np.int64), volume
-
-  # Six-tetrahedron decomposition of each cube.
-  tets = []
-  for h in hexes:
-    for a, b, c, d in ((0, 1, 2, 6), (0, 2, 3, 6), (0, 3, 7, 6),
-                       (0, 7, 4, 6), (0, 4, 5, 6), (0, 5, 1, 6)):
-      tets.append([h[a], h[b], h[c], h[d]])
-  tets = np.asarray(tets, dtype=np.int64)
-
-  if cell_type == 'tetra':
-    return pts, tets, volume
-
-  # tetra10: append edge midpoints in VTK edge order.
-  pts = list(map(list, pts))
-  midpoints = {}
-
-  def mid(u, v):
-    key = (min(u, v), max(u, v))
-    if key not in midpoints:
-      midpoints[key] = len(pts)
-      pts.append(list(0.5 * (np.asarray(pts[u]) + np.asarray(pts[v]))))
-    return midpoints[key]
-
-  cells = [list(t) + [mid(t[0], t[1]), mid(t[1], t[2]), mid(t[0], t[2]),
-                      mid(t[0], t[3]), mid(t[1], t[3]), mid(t[2], t[3])]
-           for t in tets]
-  return np.asarray(pts, dtype=np.float64), np.asarray(cells, dtype=np.int64), volume
 @pytest.mark.parametrize('cell_type', ORDER_SENSITIVE)
 def test_volume_is_independent_of_quadrature_degree(cell_type):
   """Refining the quadrature must not move the measured volume.
