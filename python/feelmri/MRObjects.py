@@ -1008,8 +1008,17 @@ class RF:
         self.waveform = waveform
 
         # Dimensionless arrays for interpolation
-        tt = timings.m_as('ms') if isinstance(timings, Quantity) else np.array(timings, dtype=np.float32)
-        ww = waveform.m_as('mT') if isinstance(waveform, Quantity) else np.array(waveform, dtype=np.complex64)
+        # float64/complex128, not float32/complex64. A Quantity keeps its own
+        # precision, so narrowing a bare ndarray made the SAME pulse depend on
+        # how it was spelled: scaling a waveform before construction differed
+        # from scaling it afterwards by 3e-8 relative, which is float32 epsilon
+        # and not a physical difference. Absolute time is the worse half --
+        # float32 ms quantises to 2.7e-5 ms at t = 1 s, above the raster
+        # tolerance it has to sit under. Same defect, and the same fix, as the
+        # analytic Gradient timings. PulseqAdapter passes Quantity for both, so
+        # imported pulses were never affected.
+        tt = timings.m_as('ms') if isinstance(timings, Quantity) else np.array(timings, dtype=np.float64)
+        ww = waveform.m_as('mT') if isinstance(waveform, Quantity) else np.array(waveform, dtype=np.complex128)
 
         # Apply phase + frequency offsets, as the analytic generators do.
         # Without this every IMPORTED pulse ignored them -- PulseqAdapter builds
