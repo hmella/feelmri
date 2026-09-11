@@ -1576,8 +1576,9 @@ class BlochSolver:
         # these over every block carried len(blocks) / len(store_indices) times
         # the memory for nothing. The bin array is the one that hurts, since it
         # carries the n_bins factor as well -- on epi_v142 at 22 167 nodes and
-        # K = 32 it reserved 2.6 GB to keep 0.01 GB, and on flash_tr_v15, which
-        # stores nothing at all, 1.8 GB to keep none.
+        # K = 28 (a pruned gaussian K = 32) it reserved 2.29 GB to keep
+        # 0.01 GB, and on flash_tr_v15, which stores nothing at all, 1.59 GB
+        # to keep none.
         store_slot = {b: j for j, b in enumerate(store_indices)}
         nb_stored = len(store_indices)
         Mxy = np.zeros((nb_nodes, nb_stored), dtype=self._np_cplx)

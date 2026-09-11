@@ -31,14 +31,13 @@ import cmath
 import logging
 import math
 import os
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple, Union
 from pint import Quantity
 
 import numpy as np
 import matplotlib.pyplot as plt
-
-from contextlib import contextmanager
 
 from feelmri.Bloch import _collective_raise
 from feelmri.Bloch import ADC as feelmriADC
