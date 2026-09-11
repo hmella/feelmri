@@ -1784,15 +1784,30 @@ def pypulseq_can_read(file_version: Version) -> bool:
                                                 file_version.minor)
 
 
-def _read_with_pypulseq(filename):  # pragma: no cover (optional dep)
+def _read_with_pypulseq(filename, scanner: Optional[Scanner] = None):  # pragma: no cover (optional dep)
   """Read ``filename`` into a ``pp.Sequence``.
 
   One read serves three purposes -- the k-space trajectory, ``check_timing``
   and the excitation / refocusing anchor times -- and costs milliseconds even
   on a 231-block file, so it is not worth doing more than once.
+
+  ``scanner`` supplies the transmit/receive dead times, which the file does not
+  record. They must be set at CONSTRUCTION: pypulseq copies
+  ``system.rf_dead_time`` / ``rf_ringdown_time`` onto every RF event as it is
+  built and appends ``adc_dead_time`` into the ADC library during ``read``, so
+  patching the ``Opts`` afterwards reaches nothing. With all three at their
+  default zero this is identical to a bare ``pp.Sequence()``, which is what the
+  adapter used before.
   """
   pp = _require_pypulseq('import_pulseq')
-  pp_seq = pp.Sequence()
+  if scanner is None:
+    pp_seq = pp.Sequence()
+  else:
+    pp_seq = pp.Sequence(system=pp.Opts(
+        rf_dead_time=float(scanner.rf_dead_time.m_as('s')),
+        rf_ringdown_time=float(scanner.rf_ringdown_time.m_as('s')),
+        adc_dead_time=float(scanner.adc_dead_time.m_as('s')),
+    ))
   pp_seq.read(str(filename), detect_rf_use=False)
   return pp_seq
 
@@ -2420,7 +2435,7 @@ def import_pulseq(
   pp_seq = None
   timing_errors: Tuple[str, ...] = ()
   try:
-    pp_seq = _read_with_pypulseq(filename)
+    pp_seq = _read_with_pypulseq(filename, scanner)
   except Exception as exc:
     logger.info("%s: pypulseq could not read the file (%s); timings are not "
                 "validated", filename, exc)
@@ -2540,7 +2555,7 @@ def import_pulseq(
     try:
       if pp_seq is None:
         # Re-raise whatever the read failed with, rather than a bare None.
-        pp_seq = _read_with_pypulseq(filename)
+        pp_seq = _read_with_pypulseq(filename, scanner)
       k_traj_adc, _k_full, _t_exc, _t_ref, t_adc = pp_seq.calculate_kspace()
       k_traj_adc = np.asarray(k_traj_adc, dtype=float)
       t_adc = np.asarray(t_adc, dtype=float)

@@ -45,11 +45,28 @@ class Scanner:
                 field_strength: Quantity = Quantity(1.5, 'T'), 
                 gradient_strength: Quantity = Quantity(33,'mT/m'),
                 gradient_slew_rate: Quantity = Quantity(180,'mT/m/ms'),
-                b1_max: Quantity = Quantity(0.060, 'mT')):
+                b1_max: Quantity = Quantity(0.060, 'mT'),
+                rf_dead_time: Quantity = Quantity(0.0, 'ms'),
+                rf_ringdown_time: Quantity = Quantity(0.0, 'ms'),
+                adc_dead_time: Quantity = Quantity(0.0, 'ms')):
         self.field_strength = field_strength
         self.gradient_strength = gradient_strength
         self.gradient_slew_rate = gradient_slew_rate
         self.b1_max = b1_max
+        # Transmit/receive dead times. A .seq file does not record them -- they
+        # are a property of the scanner, not of the sequence -- so they have to
+        # arrive here. They default to ZERO, which preserves the behaviour the
+        # adapter had before they existed; set them to a real spec and
+        # pypulseq's four dormant dead-time checks go live on import.
+        #
+        # Do not default them non-zero. The analytical fixtures are authored
+        # with all three at zero on purpose ("analytical expressions carry no
+        # hidden offsets", tests/data/generate_seq_fixtures.py), so a non-zero
+        # default reports 8 of the 15 bundled files as violating a spec they
+        # were never written against.
+        self.rf_dead_time = rf_dead_time
+        self.rf_ringdown_time = rf_ringdown_time
+        self.adc_dead_time = adc_dead_time
         self.gammabar = Quantity(42.58e6, 'Hz/T')
         self.gamma = Quantity(42.58e6*2*np.pi, 'rad*Hz/T')
 
