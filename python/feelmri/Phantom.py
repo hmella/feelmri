@@ -1239,6 +1239,24 @@ class FEMPhantom:
         them from ``phantom.local_nodes`` -- and are redistributed once into the
         signal layout, where the assemblers live. Same contract as
         :meth:`update_magnetization`, so call sites need no dual-specific variant.
+
+        **This T2 is independent of ``BlochSolver(T2=...)``.** They are separate
+        objects with no code path between them: this one governs ``exp(-t/T2)``
+        during a READOUT, measured from the magnetization snapshot, while the
+        solver's governs the Bloch evolution between blocks. Passing different
+        values is supported and costs nothing.
+
+        **When to split them, and when not to.** For a sequence with no
+        refocusing pulse -- every gradient-echo example shipped here -- the
+        reversible dephasing is never recovered, so the spins really do lose
+        coherence at T2* throughout and passing T2* to BOTH is correct. Split
+        them (T2 to the solver, T2* here) only when a refocusing pulse recovers
+        the reversible part between blocks.
+
+        Neither choice models a spin echo properly. The reversible component
+        should REPHASE towards the echo, and a single exponential on either
+        side decays monotonically from the snapshot whatever constant it is
+        given. That needs sub-voxel isochromats, not a scalar.
         """
         if getattr(self, '_dual', False) and self._active_partition != 'signal':
             T2 = self.redistribute_nodal(np.ascontiguousarray(T2), 'bloch', 'signal')

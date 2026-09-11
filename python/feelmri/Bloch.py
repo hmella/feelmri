@@ -913,6 +913,19 @@ class BlochSolver:
         Longitudinal relaxation time (ms). Default is 1000 ms.
     T2 : Quantity, optional
         Transverse relaxation time (ms). Default is 100 ms.
+
+        Governs the EVOLUTION between blocks, and is independent of the T2
+        handed to :meth:`Phantom.set_static_fields`, which governs the decay
+        during a readout. The two are separate objects with no code path
+        between them, so passing different values is supported and free.
+
+        For a sequence with no refocusing pulse -- every gradient-echo example
+        shipped here -- pass T2* to BOTH: the reversible dephasing is never
+        recovered, so that is the correct model and splitting them is not.
+        Split (T2 here, T2* on the signal side) only when a refocusing pulse
+        recovers the reversible part. Neither choice reproduces a spin echo,
+        whose reversible component rephases towards the echo; that needs
+        sub-voxel isochromats rather than a scalar.
     delta_B : np.ndarray or float, optional
         Static B0 inhomogeneity field (nodal or scalar, in mT).
         Default is 0.0.
