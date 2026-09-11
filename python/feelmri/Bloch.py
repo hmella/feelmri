@@ -1183,8 +1183,14 @@ class BlochSolver:
         # scalar T2* decays monotonically from the snapshot whatever constant
         # it is given, so it can never rephase at an echo; a real sub-ensemble
         # does, because each sub-spin simply runs backwards after a 180.
-        self.lineshape = str(lineshape).lower()
-        self.spectral_bins = int(spectral_bins)
+        # Validated even when t2_prime is None, so a typo is caught rather
+        # than silently accepted on a path that never builds the bins.
+        self._lineshape = str(lineshape).lower()
+        if self._lineshape not in LINESHAPES:
+            raise ValueError(
+                f"BlochSolver: lineshape must be one of {list(LINESHAPES)}; "
+                f"got {lineshape!r}")
+        self._spectral_bins = int(spectral_bins)
         if t2_prime is None:
             self._t2_prime_ms = None
             self._bin_z = None
@@ -1209,12 +1215,12 @@ class BlochSolver:
                     "BlochSolver: every t2_prime entry must be positive; got a "
                     f"minimum of {t2p.min()}")
             self._t2_prime_ms = t2p
-            if self.spectral_bins < 2:
+            if self._spectral_bins < 2:
                 raise ValueError(
                     "BlochSolver: spectral_bins must be >= 2 when t2_prime is "
-                    f"set; got {self.spectral_bins}. One bin is no ensemble.")
-            self._bin_z, self._bin_w = lineshape_bins(self.spectral_bins,
-                                                      self.lineshape)
+                    f"set; got {self._spectral_bins}. One bin is no ensemble.")
+            self._bin_z, self._bin_w = lineshape_bins(self._spectral_bins,
+                                                      self._lineshape)
             # Follow the rule, not the request: lineshape_bins prunes sub-spins
             # whose weight is below float64 epsilon.
             self._n_bins = int(self._bin_z.size)
@@ -1233,7 +1239,7 @@ class BlochSolver:
                     "relative at |Bz| = 1 mT and 2.4e-2 at 8 mT, and it does "
                     "not improve with dt. Use dtype='float64' for quantitative "
                     "T2' work.")
-            if self.lineshape == 'lorentzian':
+            if self._lineshape == 'lorentzian':
                 warnings.warn(
                     f"lineshape='lorentzian' targets exp(-t/T2*) but cannot be "
                     f"represented by a finite spin ensemble: at "
@@ -1296,6 +1302,32 @@ class BlochSolver:
         )
         self._modes_cache = (self.pod_trajectory, nb_nodes, mat)
         return mat
+
+    # The sub-ensemble is built once, in __init__. Exposing these read-only
+    # says so: every other knob on this class is re-read at solve time, so a
+    # plain attribute that silently did nothing would be the odd one out and
+    # would read back as though it had taken effect.
+    @property
+    def lineshape(self):
+        """Intra-voxel lineshape. Set at construction; read-only after."""
+        return self._lineshape
+
+    @property
+    def spectral_bins(self):
+        """Requested sub-spins per node. Read-only; see ``n_spectral_bins``
+        for how many the rule actually kept after pruning."""
+        return self._spectral_bins
+
+    @property
+    def n_spectral_bins(self):
+        """Sub-spins per node actually in use -- at most ``spectral_bins``."""
+        return self._n_bins
+
+    @property
+    def t2_prime(self):
+        """Per-node T2' in ms, or None. Set at construction; read-only."""
+        return (None if self._t2_prime_ms is None
+                else Quantity(self._t2_prime_ms.copy(), 'ms'))
 
     def _check_bin_preconditions(self):
         """Refuse or warn about combinations Stage 1 of the spectral ensemble
@@ -1791,10 +1823,13 @@ class BlochSolver:
 
 LINESHAPES = ('gaussian', 'uniform', 'lorentzian')
 
-# Measured worst error of the lorentzian rule against exp(-t/T2'),
-# over tau in [0, 3*T2']: 3.3e-1 at K=8 falling as roughly K^-0.55.
+# Worst error of the lorentzian rule against exp(-t/T2') over tau in
+# [0, 3*T2'], as a least-squares fit to eleven measured K from 8 to 256. Within
+# 8% of the measurement everywhere; the earlier K^-0.55 form was 29% optimistic
+# by K=256, i.e. wrong in the reassuring direction at exactly the K someone
+# picks after reading the warning.
 def _LORENTZIAN_ERR(K):
-  return 3.3e-1 * (K / 8.0)**-0.55
+  return 1.34 * float(K)**-0.638
 
 
 
