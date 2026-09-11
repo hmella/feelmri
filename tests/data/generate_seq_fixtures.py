@@ -146,3 +146,138 @@ print('ppm_v15  check_timing:', 'OK' if ok else err)
 seq.set_definition('FOV', [fov, fov, slice_thickness])
 seq.set_definition('Name', 'ppm')
 seq.write(str(script_path / 'ppm_v15.seq'))
+
+
+# 6. Fixtures with closed-form answers. Dead times and ringdown are zero so the
+# analytical expressions carry no hidden offsets, and every RF is a hard pulse
+# so the transverse magnetization it creates is spatially uniform.
+an = pp.Opts(max_grad=40, grad_unit='mT/m', max_slew=200, slew_unit='T/m/s',
+             rf_ringdown_time=0, rf_dead_time=0, adc_dead_time=0)
+
+T1_MS = 800.0      # matches the T1 the analytical test solves with
+TAU_MS = 5.0       # spin-echo half-echo time
+
+
+def hard_pulse(flip_deg, use, dur=2e-4):
+    return pp.make_block_pulse(flip_angle=np.deg2rad(flip_deg), duration=dur,
+                               system=an, use=use)
+
+
+# 6a. Free induction decay: one hard 90, then a long gradient-free readout.
+# With no gradient the trajectory sits at k=0, so the signal is the whole
+# object and decays purely as exp(-t/T2).
+# The 50 ms of dead time BEFORE the excitation is deliberate. It is what
+# separates times measured from the snapshot from times measured from the start
+# of the file: the snapshot lands at 50.2 ms, so the two readings of the same
+# readout differ by exp(-50.2/T2). A delay placed after the excitation would
+# not do this -- it falls inside the interval either way.
+seq = pp.Sequence(system=an)
+seq.add_block(pp.make_delay(50e-3))
+seq.add_block(hard_pulse(90, 'excitation'))
+seq.add_block(pp.make_adc(64, duration=40e-3, system=an))
+ok, err = seq.check_timing()
+print('fid_v15  check_timing:', 'OK' if ok else err)
+seq.set_definition('Name', 'fid')
+seq.write(str(script_path / 'fid_v15.seq'))
+
+# 6b. T1 recovery: a hard 90 leaves Mz = 0, then a delay of exactly T1.
+# No ADC, so the import needs no trajectory.
+seq = pp.Sequence(system=an)
+seq.add_block(hard_pulse(90, 'excitation'))
+seq.add_block(pp.make_delay(T1_MS * 1e-3))
+ok, err = seq.check_timing()
+print('t1_v15   check_timing:', 'OK' if ok else err)
+seq.set_definition('Name', 't1')
+seq.write(str(script_path / 't1_v15.seq'))
+
+# 6c. Gradient echo with a rewound readout. The prephaser is exactly half the
+# readout area, so k passes through zero mid-plateau and the signal there is
+# the full object integral.
+seq = pp.Sequence(system=an)
+# 51 samples of 40 us: an odd count on the ADC raster, so one sample sits
+# exactly at the plateau centre -- which for a symmetric trapezoid rewound by
+# half its area is exactly k = 0.
+gx_an = pp.make_trapezoid('x', flat_area=204.0, flat_time=2.04e-3, system=an)
+adc_an = pp.make_adc(51, duration=gx_an.flat_time, delay=gx_an.rise_time, system=an)
+seq.add_block(hard_pulse(90, 'excitation'))
+seq.add_block(pp.make_trapezoid('x', area=-gx_an.area / 2, duration=1e-3, system=an))
+seq.add_block(gx_an, adc_an)
+ok, err = seq.check_timing()
+print('gre_an_v15 check_timing:', 'OK' if ok else err)
+seq.set_definition('Name', 'gre_analytical')
+seq.write(str(script_path / 'gre_an_v15.seq'))
+
+# 6d. Spin echo: 90 - tau - 180 - tau - readout. At the echo the off-resonance
+# phase is refocused whatever its value, and only T2 remains.
+seq = pp.Sequence(system=an)
+seq.add_block(hard_pulse(90, 'excitation'))
+seq.add_block(pp.make_delay(TAU_MS * 1e-3))
+seq.add_block(hard_pulse(180, 'refocusing'))
+seq.add_block(pp.make_delay(TAU_MS * 1e-3))
+seq.add_block(pp.make_adc(16, duration=1e-3, system=an))
+ok, err = seq.check_timing()
+print('se_an_v15 check_timing:', 'OK' if ok else err)
+seq.set_definition('Name', 'se_analytical')
+seq.write(str(script_path / 'se_an_v15.seq'))
+
+# ---------------------------------------------------------------------------
+# 7. Regimes the suite had no fixture for at all (added 2026-09-10)
+# ---------------------------------------------------------------------------
+
+# 7a. CPMG: one excitation, several refocusing pulses. Pins exp(-n*TE/T2)
+# across an echo train, and is the only fixture with more than one 180 per
+# excitation -- the case where a forward gradient-moment integral from the
+# excitation is invalid, since calculate_kspace negates k at every refocusing.
+N_ECHO = 4
+seq = pp.Sequence(system=an)
+seq.add_block(hard_pulse(90, 'excitation'))
+for _ in range(N_ECHO):
+    seq.add_block(pp.make_delay(TAU_MS * 1e-3))
+    seq.add_block(hard_pulse(180, 'refocusing'))
+    seq.add_block(pp.make_delay(TAU_MS * 1e-3))
+    seq.add_block(pp.make_adc(8, duration=0.5e-3, system=an))
+ok, err = seq.check_timing()
+print('cpmg_v15 check_timing:', 'OK' if ok else err)
+seq.set_definition('Name', 'cpmg')
+seq.set_definition('EchoSpacing_ms', 2.0 * TAU_MS)
+seq.write(str(script_path / 'cpmg_v15.seq'))
+
+# 7b. A TR train long enough to reach the spoiled steady state, so
+# M0 (1 - E1) / (1 - E1 cos a) can be checked against the closed form. The
+# previous longest fixture was 4 TR, nowhere near steady state.
+FLASH_TR_MS, FLASH_ALPHA, FLASH_NTR = 20.0, 20.0, 80
+seq = pp.Sequence(system=an)
+for _ in range(FLASH_NTR):
+    seq.add_block(hard_pulse(FLASH_ALPHA, 'excitation'))
+    seq.add_block(pp.make_delay(round((FLASH_TR_MS * 1e-3 - 200e-6) / 1e-5) * 1e-5))
+ok, err = seq.check_timing()
+print('flash_tr_v15 check_timing:', 'OK' if ok else err)
+seq.set_definition('Name', 'flash_tr')
+seq.set_definition('TR_ms', FLASH_TR_MS)
+seq.set_definition('FlipAngle_deg', FLASH_ALPHA)
+seq.write(str(script_path / 'flash_tr_v15.seq'))
+
+# 7c. A trapezoid whose ramps differ: rise 130 us against fall 50 us. Every
+# other fixture is symmetric, so the A*(rise - fall)/2 error of an
+# end-of-interval quadrature cancels and stays invisible.
+#
+# Note a .seq file CANNOT carry the harder case -- ramps that are not integer
+# multiples of the gradient raster -- because Pulseq requires every time on that
+# raster. That case is reachable only for a natively built Gradient, and is
+# covered by tests/test_sequence_concat.py.
+seq = pp.Sequence(system=an)
+asym_amp = 5.0e-3 * 42.576e6          # 5 mT/m in Hz/m; 100 T/m/s on the 50 us fall
+asym = pp.make_extended_trapezoid(
+    'x',
+    amplitudes=np.array([0.0, asym_amp, asym_amp, 0.0]),
+    times=np.array([0.0, 130e-6, 1.13e-3, 1.18e-3]),               # rise 130 us, fall 50 us
+    system=an)
+seq.add_block(hard_pulse(90, 'excitation'))
+seq.add_block(asym)
+# 20 samples over 0.5 ms is a 25 us dwell, a clean multiple of the 100 ns ADC
+# raster; 16 samples would give 31.25 us and fail check_timing.
+seq.add_block(pp.make_adc(20, duration=0.5e-3, system=an))
+ok, err = seq.check_timing()
+print('asym_ramp_v15 check_timing:', 'OK' if ok else err)
+seq.set_definition('Name', 'asym_ramp')
+seq.write(str(script_path / 'asym_ramp_v15.seq'))

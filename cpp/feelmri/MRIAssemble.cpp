@@ -342,7 +342,10 @@ public:
                     // Ownership mask: interface nodes carry weight 0 on every rank
                     // but their canonical owner.
                     f_mag.head(q_count) = ownb * (-tij * invT2b).exp();
-                    f_po.head(q_count)  = phib * tij;
+                    // exp(-i*phi*t), which continues the solver's own
+                    // exp(-i*gamma*delta_B*t); only this term is negated,
+                    // the -k.x below keeps its sign.
+                    f_po.head(q_count)  = -phib * tij;
                     t_old = tij;
                 }
 
@@ -441,7 +444,10 @@ public:
                         dx2.head(q_count) = x2b + (modes_z.middleRows(q_start, q_count) * w).array();
                     }
                     f_mag.head(q_count) = (-tij * invT2b).exp();
-                    f_po.head(q_count)  = phib * tij;
+                    // exp(-i*phi*t), which continues the solver's own
+                    // exp(-i*gamma*delta_B*t); only this term is negated,
+                    // the -k.x below keeps its sign.
+                    f_po.head(q_count)  = -phib * tij;
                     t_old = tij;
                 }
 
@@ -563,7 +569,10 @@ public:
                     }
                     // T2 decay pre-multiplied by the quadrature weight
                     f_mag.head(q_count) = wqb * (-tij * invT2b).exp();
-                    f_po.head(q_count)  = phib * tij;
+                    // exp(-i*phi*t), which continues the solver's own
+                    // exp(-i*gamma*delta_B*t); only this term is negated,
+                    // the -k.x below keeps its sign.
+                    f_po.head(q_count)  = -phib * tij;
                     t_old = tij;
                 }
 

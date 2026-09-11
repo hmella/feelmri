@@ -155,3 +155,138 @@ def test_rf_change_time_preserves_non_uniform_raster():
   np.testing.assert_allclose(rf.timings.m_as('ms'), t0 + 5.0, atol=1e-9)
   np.testing.assert_allclose(rf.waveform.m_as('mT'), wf, atol=1e-9)
   assert rf.time.m_as('ms') == pytest.approx(5.0)
+
+
+def _accumulated_phase(gradient, dur_ms, method, dt_gr, tmp_path):
+  """Phase a spin at a known x accumulates under one gradient, per node.
+
+  This goes through the SOLVER rather than re-implementing a quadrature, so it
+  measures what the kernel does and not what a test thinks it does.
+  """
+  import meshio
+  from feelmri.Bloch import BlochSolver
+  from feelmri.MRObjects import Scanner
+  from feelmri.Phantom import FEMPhantom
+
+  x0 = 3e-3
+  mesh = tmp_path / f'spin_{method}_{dt_gr}.vtu'
+  meshio.write(str(mesh), meshio.Mesh(
+      np.array([[x0, 0, 0], [x0 + 1e-5, 0, 0], [x0, 1e-5, 0], [x0, 0, 1e-5]]),
+      [("tetra", np.array([[0, 1, 2, 3]]))]))
+
+  phantom = FEMPhantom(path=str(mesh))
+  phantom.set_assembler(voxel_size=0.0, lorder=1, horder=1,
+                        nodal_approximation=False, lumped=False)
+  block = SequenceBlock(gradients=[gradient], dur=Quantity(dur_ms, 'ms'),
+                        dt_gr=Quantity(dt_gr, 'ms'))
+  block.store_magnetization = True
+  seq = Sequence()
+  seq.add_block(block)
+  Mxy, _Mz = BlochSolver(sequence=seq, phantom=phantom, M0=1.0,
+                         T1=Quantity(1e9, 'ms'), T2=Quantity(1e9, 'ms'),
+                         initial_Mxy=1.0 + 0j, dtype='float64', method=method,
+                         perfect_spoiling=False).solve()
+  gamma = Scanner().gamma.m_as('rad/ms/mT')
+  return np.angle(Mxy[:, -1]), phantom.local_nodes[:, 0], gamma
+
+
+@pytest.mark.parametrize('rise,fall', [
+    (0.20, 0.05),      # both integer multiples of a 0.01 ms sub-raster
+    (0.10, 0.10),      # symmetric: every quadrature gets this one right
+    (0.0123, 0.0456),  # neither a multiple
+    (0.002, 0.05),     # rise shorter than a gradient raster step
+])
+def test_trapezoid_phase_is_exact_under_the_default_solver(rise, fall, tmp_path):
+  """A trapezoid must deliver its analytic moment whatever its ramps.
+
+  The default `magnus2` integrates a piecewise-linear gradient EXACTLY -- the
+  trapezoidal rule is exact on a straight segment, from the four corners alone,
+  with no sub-sampling.
+
+  `cayley_klein` charges each interval the field at its END, which over-charges
+  the ramp up by `A*h_rise/2` and under-charges the ramp down by `A*h_fall/2`,
+  leaving `A*(h_rise - h_fall)/2`. That is zero for a symmetric trapezoid, and
+  it is also zero when both ramps are integer multiples of the sub-raster --
+  which is why an earlier version of this test, parametrised only on
+  `(0.20,0.05)`, `(0.05,0.20)` and `(0.10,0.10)`, passed for the wrong reason.
+  The last two cases above are the ones that discriminate: measured 4.4e-4 and
+  3.9e-3 relative under `cayley_klein`, against 4.3e-7 under `magnus2`.
+  """
+  A, flat = 10.0, 1.0
+  timings = Quantity(np.array([0.0, rise, rise + flat, rise + flat + fall]), 'ms')
+  amplitudes = Quantity(np.array([0.0, A, A, 0.0]), 'mT/m')
+  grad = Gradient(timings=timings, amplitudes=amplitudes, axis=0)
+
+  got, xn, gamma = _accumulated_phase(grad, rise + flat + fall, 'magnus2', -1, tmp_path)
+  analytic = -gamma * xn * A * (flat + 0.5 * (rise + fall))
+  err = float(np.abs(np.angle(np.exp(1j * (got - analytic)))).max())
+  assert err < 1e-5, (
+      f'rise={rise} fall={fall}: magnus2 is off by {err:.3e} rad; the '
+      f'trapezoidal rule must be exact on a straight ramp')
+
+
+def test_add_block_warns_instead_of_silently_dropping():
+    """A dropped block shifts every later index by one, silently.
+
+    `first_block`, `m_storage_block` and `block_labels` are all positional, so a
+    zero-duration delay that vanishes without a word puts the readout
+    bookkeeping one block out for the rest of the sequence.
+    """
+    seq = Sequence()
+    seq.add_block(SequenceBlock(dur=Quantity(1.0, 'ms')))
+    before = seq.Nb_blocks
+
+    with pytest.warns(UserWarning, match='non-positive duration'):
+        seq.add_block(Quantity(0.0, 'ms'))
+    assert seq.Nb_blocks == before
+
+    with pytest.warns(UserWarning, match='Nothing was appended'):
+        seq.add_block(None)
+    assert seq.Nb_blocks == before
+
+
+def test_add_block_dt_is_rejected_for_an_existing_block():
+    """`dt` builds a delay's raster; a SequenceBlock's is fixed at construction.
+
+    Passing it there looked like it worked and did nothing at all.
+    """
+    seq = Sequence()
+    with pytest.warns(UserWarning, match='applies only when'):
+        seq.add_block(SequenceBlock(dur=Quantity(1.0, 'ms')), dt=Quantity(0.01, 'ms'))
+    # The delay branch still honours it, and must not warn.
+    seq2 = Sequence()
+    seq2.add_block(Quantity(1.0, 'ms'), dt=Quantity(0.05, 'ms'))
+    assert seq2.Nb_blocks == 1
+
+
+def test_nested_sequence_carries_explicit_spoiling():
+    """`explicit_spoiling` lives on the Sequence, so appending one to another
+    used to drop it -- and `BlochSolver(perfect_spoiling=None)` then resolves
+    back to True and zeroes Mxy at every block boundary, destroying exactly the
+    coherence pathways a .seq spells its own spoilers out to preserve."""
+    child = Sequence()
+    child.add_block(SequenceBlock(dur=Quantity(1.0, 'ms')))
+    child.explicit_spoiling = True
+
+    parent = Sequence()
+    parent.add_block(SequenceBlock(dur=Quantity(1.0, 'ms')))
+    assert parent.explicit_spoiling is False
+    parent.add_block(child)
+    assert parent.explicit_spoiling is True
+
+
+def test_adc_only_block_reports_a_real_duration():
+    """_get_extent consults the ADC, so an ADC-only block is not zero-length.
+
+    It used to report dur = 0 while `discrete_times` spanned the whole
+    acquisition, so the next block chained 0 ms later and the two disagreed.
+    """
+    from feelmri.Bloch import ADC
+
+    adc = ADC(times=Quantity(np.array([0.1, 0.2, 0.3]), 'ms'))
+    block = SequenceBlock(adc=adc)
+    lo, hi = (x.m_as('ms') for x in block.time_extent)
+    assert hi > lo, f'ADC-only block still reports an empty extent [{lo}, {hi}]'
+    assert hi == pytest.approx(0.3, abs=1e-9)
+    t = block.discrete_times.m_as('ms')
+    assert t[-1] <= hi + 1e-9, 'the raster runs past the block it belongs to'

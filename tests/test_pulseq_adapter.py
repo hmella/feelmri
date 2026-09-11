@@ -196,9 +196,12 @@ def test_readout_windows_match_flat_trajectory(adapter, parsed_imports, seq_path
     assert flat['times'].size == 0
     return
 
-  kx = np.concatenate([rw.kspace[:, 0] for rw in imp.readouts])
-  ky = np.concatenate([rw.kspace[:, 1] for rw in imp.readouts])
-  kz = np.concatenate([rw.kspace[:, 2] for rw in imp.readouts])
+  # kspace_file, not kspace: the flat trajectory is the FILE's, measured from
+  # the excitation, while rw.kspace has the anchor's gradient moment removed so
+  # it is relative to the magnetization snapshot handed alongside it.
+  kx = np.concatenate([rw.kspace_file[:, 0] for rw in imp.readouts])
+  ky = np.concatenate([rw.kspace_file[:, 1] for rw in imp.readouts])
+  kz = np.concatenate([rw.kspace_file[:, 2] for rw in imp.readouts])
   times = np.concatenate([rw.times for rw in imp.readouts])
 
   assert kx.shape == flat['kx'].shape
@@ -503,13 +506,19 @@ def _write_minimal_tet_mesh(path: Path):
 
 
 @pytest.mark.slow
-def test_dual_path_phase_contrast_radial2d(parsed_imports, tmp_path):
-  """End-to-end dual-path smoke test mirroring examples/phase_contrast.py.
+def test_dual_path_multi_window(parsed_imports, tmp_path):
+  """End-to-end dual-path smoke test over SEVERAL readout windows.
+
+  Was written against `gre_radial_pypulseq.seq`, which is not in the repo, so
+  it skipped on every run since it was added -- dead coverage. Repointed at
+  `cpmg_v15.seq`, whose four echoes give four windows and therefore exercise
+  the same thing the radial file was chosen for: the per-window
+  update_magnetization + mri_signal loop, with one m_storage_idx per window.
 
   Steps (single Sequence, single solver.solve(), per-readout signal
   assembly):
-    1. Parse gre_radial_pypulseq.seq via import_pulseq -> partitioned
-       view with one ReadoutWindow per radial spoke.
+    1. Parse the .seq via import_pulseq -> partitioned view with one
+       ReadoutWindow per echo.
     2. Build a 2-tet phantom on the fly (no external assets).
     3. BlochSolver.solve() once over imp.feelmri_seq; readouts'
        m_storage_block flags are already set by import_pulseq.
@@ -530,25 +539,22 @@ def test_dual_path_phase_contrast_radial2d(parsed_imports, tmp_path):
   except ImportError as exc:
     pytest.skip(f'feelmri C++ extensions not available: {exc}')
 
-  if 'gre_radial_pypulseq.seq' not in parsed_imports:
-    pytest.skip('gre_radial_pypulseq.seq not parsed')
+  if 'cpmg_v15.seq' not in parsed_imports:
+    pytest.skip('cpmg_v15.seq not parsed')
 
   mesh_path = tmp_path / 'minimal_tet.vtu'
   _write_minimal_tet_mesh(mesh_path)
   phantom = FEMPhantom(path=str(mesh_path))
 
-  imp = parsed_imports['gre_radial_pypulseq.seq']
-  assert len(imp.readouts) > 0, 'expected at least one readout window'
-  # 2D radial means no Gz gradient is played during the readout window:
-  # kz is constant within each readout. (The absolute kz offset across
-  # readouts is set by the slice-select prephaser; that is fine for the
-  # signal assembler — it manifests as a phase ramp across the slice.)
+  imp = parsed_imports['cpmg_v15.seq']
+  assert len(imp.readouts) > 1, 'expected several readout windows'
+  # The CPMG fixture plays no gradients at all, so k is constant within each
+  # window and the windows differ only in time -- which is what makes the
+  # per-window m_storage_idx bookkeeping the thing under test here.
   for rw in imp.readouts:
-    kz = rw.kspace[:, 2]
-    span = float(kz.max() - kz.min())
-    assert span < 1e-3, (
-      f'expected kz constant within readout (2D radial); got span {span:g}'
-    )
+    span = float(rw.kspace.max() - rw.kspace.min())
+    assert span < 1e-3, f'expected k constant within readout; got span {span:g}'
+    assert rw.m_storage_idx >= 0, 'every window needs a coherence anchor'
 
   solver = BlochSolver(
     sequence=imp.feelmri_seq,
@@ -886,3 +892,105 @@ def test_simulate_pulseq_end_to_end(adapter, tmp_path):
   ref_times = np.sort(ref.adc_times()[0] * 1e3)
   assert sim.kspace_flat.shape[0] == ref_times.size
   assert np.abs(np.sort(sim.times_flat) - ref_times).max() < 1e-6
+
+
+def test_read_seq_feelmri_round_trip_and_pass_through(adapter):
+  """The back-compat wrapper returns the same objects import_pulseq builds, and
+  forwards scanner= / validate=.
+
+  It is in __all__ and had no coverage at all; it also could not reach either
+  keyword, so a caller stuck on it had no way to say what field the file was
+  written for -- and the gamma the file is read with must be the gamma the
+  solver integrates.
+  """
+  from feelmri.MRObjects import Scanner
+
+  seq_path = DATA_DIR / 'gre_v15.seq'
+  skip_if_pypulseq_too_old(seq_path)
+
+  feelmri_seq, pulseq_seq = adapter.read_seq_feelmri(seq_path)
+  imp = adapter.import_pulseq(seq_path)
+  assert len(feelmri_seq.blocks) == len(imp.feelmri_seq.blocks)
+  assert feelmri_seq.dur.m_as('ms') == pytest.approx(imp.feelmri_seq.dur.m_as('ms'))
+  assert len(pulseq_seq) == len(imp.pulseq_seq)
+
+  # scanner= reaches the reader. ppm offsets are a fraction of the Larmor
+  # frequency and the file records no B0, so they scale with field_strength --
+  # which is exactly why the argument has to be reachable from here.
+  ppm_path = DATA_DIR / 'ppm_v15.seq'
+  skip_if_pypulseq_too_old(ppm_path)
+
+  def first_rf_offset_hz(scanner):
+    seq, _ = adapter.read_seq_feelmri(ppm_path, scanner=scanner)
+    for block in seq.blocks:
+      if block.rf_pulses:
+        return float(block.rf_pulses[0].frequency_offset.m_as('Hz'))
+    pytest.skip('no RF in the ppm fixture')
+
+  at_1p5 = first_rf_offset_hz(Scanner(field_strength=Quantity(1.5, 'T')))
+  at_3p0 = first_rf_offset_hz(Scanner(field_strength=Quantity(3.0, 'T')))
+  assert abs(at_1p5) > 0.0, 'the ppm fixture carries no frequency offset'
+  assert at_3p0 == pytest.approx(2.0 * at_1p5, rel=1e-9), (
+      f'doubling B0 must double the ppm-derived offset: {at_1p5} -> {at_3p0} Hz')
+
+  # validate= reaches check_timing.
+  quiet, _ = adapter.read_seq_feelmri(seq_path, validate=False)
+  assert len(quiet.blocks) == len(feelmri_seq.blocks)
+
+
+def test_adc_demodulation_is_applied_by_simulate_pulseq(adapter, tmp_path):
+  """The receiver's frequency/phase offsets must reach the signal.
+
+  The solver never samples the ADC -- the readout is synthesized from the
+  trajectory -- so if `simulate_pulseq` does not apply them, nothing does. They
+  were parsed onto `ReadoutWindow` and read by no one until 2026-09-10; on
+  `ppm_v15` that left 228 deg of phase unapplied, a worst-case per-sample error
+  of |1 - e^(i phi)| = 1.99 against a maximum of 2.0.
+  """
+  pytest.importorskip('mpi4py')
+  pytest.importorskip('pymetis')
+  try:
+    from feelmri.Phantom import FEMPhantom
+  except ImportError as exc:
+    pytest.skip(f'feelmri C++ extensions not available: {exc}')
+  from _phantom_fixtures import make_cube_mesh
+
+  seq_path = DATA_DIR / 'ppm_v15.seq'
+  skip_if_pypulseq_too_old(seq_path)
+
+  path, _vol = make_cube_mesh(tmp_path / 'cube.vtu', 'tetra', n=2, scale=2e-3)
+  phantom = FEMPhantom(path=str(path))
+  phantom.set_assembler(voxel_size=0.0, lorder=2, horder=2,
+                        nodal_approximation=False, lumped=False)
+  n = phantom.local_nodes.shape[0]
+  phantom.set_static_fields(T2=np.full(n, 60.0, dtype=np.float32),
+                            phi_dB0=np.zeros(n, dtype=np.float32))
+
+  sim = adapter.simulate_pulseq(seq_path, phantom, M0=1.0,
+                                T1=Quantity(1e9, 'ms'), T2=Quantity(60.0, 'ms'),
+                                dtype='float64')
+  rw = sim.imp.readouts[0]
+
+  # The fixture must actually carry a non-trivial demodulation, or this test
+  # would pass against a no-op implementation.
+  phase = rw.demodulation_phase()
+  assert phase.size == rw.times.size
+  assert phase.max() - phase.min() > 1.0, (
+      'ppm_v15 is expected to carry a per-sample ADC phase shape; '
+      f'span is only {phase.max() - phase.min():.4f} rad')
+
+  # Undoing the demodulation must recover the raw integral, so the signal the
+  # caller gets is exactly the raw one times exp(-i phase).
+  raw = np.asarray(sim.kspace[0]).reshape(-1) * np.exp(1j * phase)
+  points, t = adapter._reshape_signal_inputs(
+      rw.kspace[:, 0], rw.kspace[:, 1], rw.kspace[:, 2],
+      rw.times - rw.t_anchor, None)
+  phantom.update_magnetization(sim.Mxy[:, rw.m_storage_idx])
+  expect = np.asarray(phantom.mri_signal(list(points), t, None)).reshape(-1)
+  assert np.abs(raw - expect).max() <= 1e-6 * np.abs(expect).max()
+
+  # A window with no offsets must be left untouched, bit for bit.
+  plain = adapter.import_pulseq(DATA_DIR / 'gre_an_v15.seq').readouts[0]
+  assert not np.any(plain.demodulation_phase())
+  probe = np.arange(plain.times.size, dtype=np.complex128).reshape(-1, 1, 1, 1)
+  assert plain.demodulate(probe) is probe

@@ -91,7 +91,7 @@ class Gradient:
         slope=None,
         lenc=Quantity(1.0, "ms"),
         strength=None,
-        scanner=Scanner(),
+        scanner=None,
         ref=Quantity(0.0, "ms"),
         time=Quantity(0.0, "ms"),
         axis=0,
@@ -99,7 +99,12 @@ class Gradient:
         amplitudes=None,
     ):
 
-        self.scanner = scanner
+        # A default-constructed Scanner() in the signature would be ONE shared
+        # instance for every gradient built without an explicit scanner, so
+        # mutating one gradient's scanner would change the hardware limits seen
+        # by all of them.
+        self.scanner = Scanner() if scanner is None else scanner
+        scanner = self.scanner
         self.Gr_max = scanner.gradient_strength      # [mT/m]
         self.Gr_sr = scanner.gradient_slew_rate      # [mT/m/ms]
 
@@ -203,7 +208,20 @@ class Gradient:
         -----
         Only numerical scalars are permitted. This returns a *new* object.
         """
+        if isinstance(other, bool):
+            raise TypeError("Gradient cannot be multiplied by a bool.")
         if isinstance(other, (int, float, np.number)):
+            if self.user_defined:
+                # A user-supplied gradient has no slope/lenc/strength to
+                # rebuild from -- scale the samples it actually carries.
+                return Gradient(
+                    timings=self.timings,
+                    amplitudes=self.amplitudes * other,
+                    scanner=self.scanner,
+                    ref=self.ref,
+                    time=self.time,
+                    axis=self.axis,
+                )
             return Gradient(
                 slope=self.slope,
                 lenc=self.lenc,
@@ -248,12 +266,12 @@ class Gradient:
             timings = Quantity(
                 np.array(
                     [0.0, self.slope.m, self.slope.m + self.slope.m],
-                    dtype=np.float32,
+                    dtype=np.float64,
                 ),
                 self.slope.u,
             )
             amplitudes = Quantity(
-                np.array([0.0, self.strength.m, 0.0], dtype=np.float32),
+                np.array([0.0, self.strength.m, 0.0], dtype=np.float64),
                 self.strength.u,
             )
         else:
@@ -266,20 +284,25 @@ class Gradient:
                         self.slope.m + self.lenc.m,
                         self.slope.m + self.lenc.m + self.slope.m,
                     ],
-                    dtype=np.float32,
+                    dtype=np.float64,
                 ),
                 self.slope.u,
             )
             amplitudes = Quantity(
                 np.array(
                     [0.0, self.strength.m, self.strength.m, 0.0],
-                    dtype=np.float32,
+                    dtype=np.float64,
                 ),
                 self.strength.u,
             )
 
-        # Shift timing by sequence offsets
-        timings += self.time - self.ref
+        # Shift timing by sequence offsets. NOT in place: `timings` was float32
+        # until 2026-09-10 and `+=` kept that dtype under numpy's same-kind
+        # casting, quantising the absolute sequence time -- 2.7e-5 ms of corner
+        # error at t = 1000 ms, enough to put a raster point past the corner it
+        # was meant to name. The arrays are four entries long, so float64 costs
+        # nothing worth counting.
+        timings = timings + (self.time - self.ref)
 
         interpolator = interp1d(
             timings.m,
@@ -304,6 +327,12 @@ class Gradient:
         """
         self.ref = ref.to("ms")
         self.dur2 = (self.dur - self.ref).to("ms")
+        # group_timings places the waveform at (time - ref), so a changed
+        # reference must rebuild it -- otherwise only dur2 moves and the
+        # interpolator keeps sampling the old timeline. RF.change_ref has
+        # always rebuilt; this is the same contract.
+        if not self.user_defined:
+            self.timings, self.amplitudes, self.interpolator = self.group_timings()
 
     def change_time(self, time):
         """Update the absolute time of the gradient and rebuild timing arrays.
@@ -787,7 +816,7 @@ class RF:
     """
     def __init__(self,
                  scanner=None,
-                 NbLobes=[2, 2],
+                 NbLobes=None,
                  alpha=0.46,
                  shape='apodized_sinc',
                  flip_angle=Quantity(np.pi/2, 'rad'),
@@ -804,7 +833,7 @@ class RF:
         # Safe default for scanner (prevents mutable default hazards)
         self.scanner = scanner if scanner is not None else Scanner()
 
-        self.NbLobes = NbLobes
+        self.NbLobes = [2, 2] if NbLobes is None else list(NbLobes)
         self.alpha = alpha
         self.shape = shape
 
@@ -823,6 +852,12 @@ class RF:
             self._pulse = self._unit_sinc
         elif self.shape == 'hard':
             self._pulse = self._unit_hard
+        else:
+            # 'custom' (and anything else) carries its waveform explicitly, so
+            # there is no analytic generator. Leaving the attribute unset made
+            # plot() raise AttributeError on every imported pulse, since
+            # PulseqAdapter._convert_rf builds them all with shape='custom'.
+            self._pulse = None
 
         # Physical parameters with units
         self.flip_angle = flip_angle.to('rad')
@@ -1028,17 +1063,28 @@ class RF:
 
     def plot(self, linestyle='-'):
         """
-        Plot the analytical (unscaled) RF pulse shape used internally.
+        Plot the RF pulse waveform.
 
-        This is primarily for visual inspection of the pulse design itself.
+        For an analytic shape this draws the internal (unscaled) generator, for
+        visual inspection of the pulse design. A custom waveform -- which is
+        what every imported Pulseq pulse is -- has no analytic generator, so its
+        stored samples are drawn instead. Calling the generator unconditionally
+        used to raise on every imported pulse.
         """
-        start = (self.time - self.ref).m_as('ms')
-        end   = (self.time - self.ref + self.dur).m_as('ms')
-        t = np.linspace(start, end, self.nb_samples)
+        if self._pulse is None:
+            t = (self.timings.m_as('ms') if isinstance(self.timings, Quantity)
+                 else np.asarray(self.timings, dtype=float))
+            wf = (self.waveform.m_as('mT') if isinstance(self.waveform, Quantity)
+                  else np.asarray(self.waveform))
+        else:
+            start = (self.time - self.ref).m_as('ms')
+            end   = (self.time - self.ref + self.dur).m_as('ms')
+            t = np.linspace(start, end, self.nb_samples)
+            wf = np.asarray(self._pulse(t))
 
         plt.figure()
-        plt.plot(t, self._pulse(t).real, linestyle)
-        plt.plot(t, self._pulse(t).imag, linestyle)
+        plt.plot(t, np.real(wf), linestyle)
+        plt.plot(t, np.imag(wf), linestyle)
         plt.xlabel("Time (ms)")
         plt.ylabel("Amplitude (mT)")
         plt.legend(["Real", "Imag"])
