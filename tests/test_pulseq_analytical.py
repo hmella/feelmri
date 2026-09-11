@@ -293,7 +293,6 @@ def _column_along_z(path, half=8e-3, n=240, width=2e-4):
     return path
 
 
-@pytest.mark.slow
 def test_slice_profile_matches_the_small_tip_transform(tmp_path):
     """A sinc plus a slice-select lobe must excite the profile the pulse's
     Fourier transform predicts.
@@ -468,7 +467,6 @@ def test_pod_translation_obeys_the_shift_theorem(cube):
         f'k-space departs from the shift theorem by {worst:.3e} of peak')
 
 
-@pytest.mark.slow
 def test_rf_frequency_offset_shifts_the_slice(tmp_path):
     """An RF frequency offset must move the excited slice to df / (gammabar*Gz).
 

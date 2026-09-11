@@ -272,7 +272,6 @@ def _run_sinc(phantom, dt_ms: float, method: str, dtype: str,
   return Mxy[:, 0].astype(np.complex128), Mz[:, 0].astype(np.float64)
 
 
-@pytest.mark.slow
 def test_sinc_convergence_slopes(minimal_phantom):
   """Convergence slopes on a smoothly varying sinc pulse.
 
@@ -395,7 +394,6 @@ def _run_slice_select(phantom, dt_ms: float, method: str, dtype: str,
   return Mxy[:, 0].astype(np.complex128), Mz[:, 0].astype(np.float64)
 
 
-@pytest.mark.slow
 def test_slice_select_magnus4_beats_cayley_klein(rod_phantom):
   """At moderate dt where cayley_klein leaves a visible per-step error,
   magnus4 (double) must reduce the position-dependent slice-profile
