@@ -84,7 +84,12 @@ def main(argv=None):
   # Smooth spatial functions, so each node's value follows the node and not
   # its position in some rank-local array.
   nodes = phantom.local_nodes.astype(np.float64)
-  reach = float(np.abs(nodes[:, 0]).max()) or 1.0
+  # GLOBAL, not per-rank. A rank-local maximum makes the maps a function of
+  # how the mesh was cut, so the two runs would be comparing different physical
+  # fields -- which on this symmetric rod happens to agree at exactly 2 ranks
+  # and stops agreeing at 3.
+  reach = float(MPI_comm.allreduce(float(np.abs(nodes[:, 0]).max()),
+                                   op=MPI.MAX)) or 1.0
   u = nodes[:, 0] / reach
   b1_map = (0.7 + 0.3 * np.cos(np.pi * u)) * np.exp(0.4j * u)
   t2_prime = 6.0 + 4.0 * u**2

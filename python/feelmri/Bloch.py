@@ -1089,7 +1089,20 @@ class BlochSolver:
             broadcast), an (n,) array, or an (n, 1) array.
             """
             base = ones if template is None else template
+            if isinstance(value, Quantity):
+                # np.asarray on a Quantity SILENTLY strips the unit, so a
+                # delta_B given in T would arrive as if it were mT -- a 1000x
+                # error. T1/T2 reach here already converted; anything else must
+                # name its unit.
+                raise TypeError(
+                    f"BlochSolver: {name} must be a plain array or scalar in "
+                    f"the documented unit, not a Quantity ({value.units}); "
+                    f"converting it here would guess the unit.")
             arr = np.asarray(value)
+            if (np.iscomplexobj(arr) and not np.iscomplexobj(base)):
+                # .astype below would drop the imaginary part in silence.
+                raise TypeError(
+                    f"BlochSolver: {name} is complex but must be real")
             if arr.ndim > 1 and arr.shape != base.shape:
                 if arr.size != 1:
                     raise ValueError(
@@ -1369,8 +1382,13 @@ class BlochSolver:
     @property
     def t2_prime(self):
         """Per-node T2' in ms, or None. Set at construction; read-only."""
-        return (None if self._t2_prime_ms is None
-                else Quantity(self._t2_prime_ms.copy(), 'ms'))
+        if self._t2_prime_ms is None:
+            return None
+        # Read-only: editing the returned array would do nothing, and the point
+        # of these accessors is not to look settable when they are not.
+        view = self._t2_prime_ms.copy()
+        view.flags.writeable = False
+        return Quantity(view, 'ms')
 
     def _check_bin_preconditions(self):
         """Refuse or warn about combinations Stage 1 of the spectral ensemble
@@ -1926,7 +1944,11 @@ class BlochSolver:
         # re-derived from the block's own opening field for order > 0, and the
         # kernel ignores it entirely for order 0 -- only the LENGTH is
         # load-bearing here.
-        self._Bz_old = collapse_bins(Bz_old.reshape(-1)) if n_bins > 1 else Bz_old
+        # collapse_bins multiplies by float64 weights, so cast back or the
+        # stored state silently widens to float64 on a float32 solver and
+        # forces a copy on every later call.
+        self._Bz_old = (collapse_bins(Bz_old.reshape(-1)).astype(
+            self._np_real, copy=False) if n_bins > 1 else Bz_old)
         self._rf_old = rf_old
 
         # Print elapsed time
@@ -2068,8 +2090,13 @@ def lineshape_bins(K, lineshape='gaussian'):
   # through every time step and then multiplied by nothing. Pruning at float64
   # epsilon changes no result that float64 can represent, and it keeps large K
   # from being mostly waste.
+  # >= 2, not >= 1: a single surviving bin is not an ensemble, and it would
+  # make _n_bins == 1, which silently routes the solver down the no-ensemble
+  # path while t2_prime still reads back as configured. Unreachable for the
+  # three shipped rules -- after normalisation at least one weight is ~1/K --
+  # but the threshold should not be the one that fails open.
   keep = w >= 1e-16
-  if keep.sum() >= 1:
+  if keep.sum() >= 2:
     z, w = z[keep], w[keep]
     w = w / w.sum()
   return z, w
