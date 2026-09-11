@@ -1568,3 +1568,99 @@ def test_the_spoiler_seed_carries_the_concomitant_field(wide_phantom):
       f'{method} differs from cayley_klein by {gap:.3e} on a CONSTANT field, '
       f'where the trapezoidal average is exact -- the jittered Magnus seed '
       f'is not the field the kernel then integrates')
+
+
+# ---------------------------------------------------------------------------
+# 8. Fourth-audit regressions
+# ---------------------------------------------------------------------------
+
+
+def _trapezoid_block(amp_mT_per_m, rise_ms, flat_ms, fall_ms, axis=2,
+                     dt_ms=2.6):
+  """One trapezoid on a single axis, rastered COARSELY on purpose.
+
+  `dt_ms` is deliberately longer than the whole event, so the block's raster is
+  the trapezoid's four corners and nothing else -- which is what an imported
+  Pulseq block gets, since the adapter builds every block with the default
+  dt = 10 ms.
+  """
+  scanner = Scanner()
+  timings = np.array([0.0, rise_ms, rise_ms + flat_ms,
+                      rise_ms + flat_ms + fall_ms])
+  amps = np.array([0.0, amp_mT_per_m, amp_mT_per_m, 0.0])
+  gradient = Gradient(timings=Quantity(timings, 'ms'),
+                      amplitudes=Quantity(amps, 'mT/m'), scanner=scanner,
+                      ref=Quantity(0.0, 'ms'), time=Quantity(0.0, 'ms'),
+                      axis=axis)
+  return SequenceBlock(gradients=[gradient], dur=Quantity(timings[-1], 'ms'),
+                       dt=Quantity(dt_ms, 'ms'), empty=False,
+                       store_magnetization=True)
+
+
+def test_the_concomitant_term_gets_the_exact_second_moment_of_a_ramp(
+        wide_phantom):
+  """`magnus2` integrates a straight ramp exactly from its endpoints, which is
+  why `dt_gr` defaults to disabled -- but that covers the LINEAR field only.
+
+  `Bc` goes as `G^2`, so along a ramp it is QUADRATIC in time and the
+  trapezoidal quadrature is not exact: over a ramp it charges `A^2*h/2` where
+  the exact second moment is `A^2*h/3`. The error is one-signed, so every ramp
+  over-counts. On this trapezoid the corner rule gives 920 against an exact
+  880, and before the solver sub-sampled its ramps it reproduced the CORNER
+  value to 8.8e-14 rad -- 1.5e-2 rad of phase here, and 0.15 to 0.20 rad on
+  gre_v15 / se_v15 / epi_v142, about 20% of the effect being modelled.
+
+  The gradient is pure Gz and the phantom sits off-axis, so the linear term
+  `Gz*z` is not what is being measured: the comparison is on-minus-off.
+  """
+  A, RISE, FLAT, FALL = 20.0, 0.30, 2.0, 0.30
+  scanner = Scanner()
+  gamma = scanner.gamma.m_as('rad/ms/mT')
+  B0_mT = scanner.field_strength.m_as('mT')
+
+  block = _trapezoid_block(A, RISE, FLAT, FALL)
+  on = _precess(wide_phantom, block, concomitant_fields=True)
+  off = _precess(wide_phantom, block, concomitant_fields=False)
+  measured = np.angle(on / off)
+
+  nodes = wide_phantom.local_nodes.astype(np.float64)
+  # Pure Gz: Bc collapses to (Gz^2/4)(x^2 + y^2) / (2 B0).
+  geometry = (nodes[:, 0] ** 2 + nodes[:, 1] ** 2) / (8.0 * B0_mT)
+  exact_moment = A * A * (RISE / 3.0 + FLAT + FALL / 3.0)
+  # The trapezoid rule over the stored corners, written out rather than
+  # integrated numerically: a ramp contributes A^2*h/2 under it.
+  corner_moment = A * A * (RISE / 2.0 + FLAT + FALL / 2.0)
+  assert corner_moment > 1.04 * exact_moment, (
+    'this trapezoid no longer separates the two quadratures')
+
+  to_exact = float(np.abs(measured + gamma * geometry * exact_moment).max())
+  to_corner = float(np.abs(measured + gamma * geometry * corner_moment).max())
+  assert to_exact < 1e-3, (
+    f'the concomitant phase is off the exact second moment by {to_exact:.3e} '
+    f'rad; against the corner rule it is {to_corner:.3e}, so the ramps are '
+    f'being charged A^2*h/2 instead of A^2*h/3')
+  assert to_corner > 100 * to_exact, (
+    'the two quadratures are no longer distinguishable on this case')
+
+
+def test_sub_sampling_the_ramps_is_paid_only_when_concomitant_is_on(
+        wide_phantom):
+  """The densification must not touch the default path.
+
+  With the term off, `magnus2` really does integrate the ramp exactly from the
+  corners, so refining the raster by hand changes nothing -- measured 5.9e-13
+  rad on gre_v15. That is what makes the fix a correction to the concomitant
+  quadrature rather than a general raster effect, and it is also the guarantee
+  that no existing result moves.
+  """
+  A, RISE, FLAT, FALL = 20.0, 0.30, 2.0, 0.30
+
+  coarse = _precess(wide_phantom, _trapezoid_block(A, RISE, FLAT, FALL),
+                    concomitant_fields=False)
+  fine = _precess(wide_phantom,
+                  _trapezoid_block(A, RISE, FLAT, FALL, dt_ms=0.002),
+                  concomitant_fields=False)
+  gap = float(np.abs(coarse - fine).max())
+  assert gap < 1e-12, (
+    f'refining the raster moved the feature-OFF answer by {gap:.3e}; the '
+    f'linear term is supposed to be exact from the trapezoid corners')

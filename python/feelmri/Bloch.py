@@ -50,6 +50,18 @@ RASTER_TOL_MS = 1e-6
 # tolerance or the guard is removed again.
 RF_EDGE_GUARD_MS = 1e-5
 
+# Ramp sub-raster used when the concomitant term is on. `magnus2` integrates a
+# straight ramp exactly from its endpoints, which is why dt_gr defaults to
+# disabled -- but that argument covers the LINEAR field only. Bc goes as G^2, so
+# along a ramp it is QUADRATIC in time and the trapezoidal rule is not exact:
+# over a ramp it charges A^2*h/2 where the exact second moment is A^2*h/3, a
+# one-signed 50% over-count of every ramp's contribution. Measured against a
+# converged raster, the error is 0.152 rad on gre_v15, 0.200 on se_v15 and
+# 0.187 on epi_v142 -- about 20% of the effect the feature exists to model.
+# At this step it falls to 3.6e-4 rad for +95% raster points on gre_v15 and
+# +24% on epi_v142, and it converges as O(dt^2).
+CONCOMITANT_DT_GR_MS = 0.01
+
 
 def demodulation_phase(times_ms, freq_offset_hz=0.0, phase_offset_rad=0.0,
                        phase_modulation=None):
@@ -125,9 +137,12 @@ def _raster_tolerance(*steps):
 def _sloped_segment_times(g, dt):
     """Uniform sub-raster over the segments of a gradient whose amplitude moves.
 
-    Only needed under ``method='cayley_klein'``, whose end-of-interval rule
-    mis-charges a ramp; the default ``magnus2`` integrates a straight segment
-    exactly from its endpoints, which is why ``dt_gr`` defaults to disabled.
+    Needed in two places. Under ``method='cayley_klein'``, whose
+    end-of-interval rule mis-charges a ramp; the default ``magnus2`` integrates
+    a straight segment exactly from its endpoints, which is why ``dt_gr``
+    defaults to disabled. And whenever ``concomitant_fields`` is on, for EVERY
+    method: ``Bc`` goes as ``G^2``, so along a ramp it is quadratic in time and
+    no trapezoidal rule is exact on it -- see ``CONCOMITANT_DT_GR_MS``.
     """
     ts = g.timings.m_as('ms') if isinstance(g.timings, Quantity) else np.asarray(g.timings, dtype=np.float64)
     amp = g.amplitudes.m_as('mT/m') if isinstance(g.amplitudes, Quantity) else np.asarray(g.amplitudes, dtype=np.float64)
@@ -320,12 +335,17 @@ class SequenceBlock:
     dt_gr : Quantity, optional
         Sub-sample the SLOPED segments of each gradient at this step (ms).
         Negative disables; default -1 (disabled), which is correct under the
-        default ``magnus2`` solver: its trapezoidal quadrature integrates a
-        piecewise-linear ramp exactly from the corners alone, measured 4.3e-7
+        default ``magnus2`` solver **for the linear field**: its trapezoidal
+        quadrature integrates a piecewise-linear ramp exactly from the corners
+        alone, measured 4.3e-7
         rad against 3.6e-3 for ``cayley_klein`` on a 0.0123/0.0456 ms ramp
-        pair. Set it only when solving with ``method='cayley_klein'``, whose
+        pair. Set it when solving with ``method='cayley_klein'``, whose
         end-of-interval rule leaves ``A*(rise - fall)/2`` per trapezoid; even
         then sub-sampling only shrinks that bias, it does not remove it.
+        With ``concomitant_fields=True`` the solver sub-samples the ramps
+        itself whatever this says, because ``Bc`` is quadratic along one and no
+        method integrates it exactly from the corners; an explicit value here
+        still wins.
     dt : Quantity, optional
         Coarse time step for the remaining sequence timeline (ms).
         Default is 10 ms.
@@ -1516,6 +1536,40 @@ class BlochSolver:
         return (np.array_equal(previous_Mxy, initial_Mxy)
                 and np.array_equal(previous_Mz, initial_Mz))
 
+    def _ramp_raster(self, block, times_ms):
+        """The block's raster with its gradient RAMPS sub-sampled.
+
+        Only called when ``concomitant_fields`` is on; see
+        ``CONCOMITANT_DT_GR_MS`` for why the corners are not enough there.
+
+        Built LOCALLY and never written back to the block. ``tests/conftest.py``
+        caches ``import_pulseq`` results session-scoped and hands the same
+        ``SequenceBlock`` objects to every test, so mutating one here would
+        change a shared object under other callers.
+
+        A block that already carries an explicit ``dt_gr`` keeps it: the caller
+        has chosen a sub-raster and it is not this function's to override.
+        """
+        if not block.gradients:
+            return times_ms
+        try:
+            if float(block.dt_gr.m_as('ms')) > 0.0:
+                return times_ms
+        except AttributeError:
+            pass
+        extra = [t for t in (_sloped_segment_times(g, CONCOMITANT_DT_GR_MS)
+                             for g in block.gradients) if t.size]
+        if not extra:
+            return times_ms
+        tol = _raster_tolerance(block.dt.m_as('ms'), block.dt_rf.m_as('ms'),
+                                CONCOMITANT_DT_GR_MS)
+        merged = _collapse_near_duplicates(
+            np.sort(np.concatenate([times_ms] + extra)), tol)
+        # Same clamp _discretization applies: a block's raster must not leave
+        # the block, or the solver integrates time belonging to its neighbour.
+        lo, hi = float(times_ms[0]), float(times_ms[-1])
+        return merged[(merged >= lo - tol) & (merged <= hi + tol)]
+
     def solve(self, start: int = 0, end: int = None):
         # Current machine time
         t0 = time.perf_counter()
@@ -1717,6 +1771,8 @@ class BlochSolver:
 
             # Discrete time points and time intervals
             discrete_times = block.discrete_times.m_as('ms')
+            if self.concomitant_fields:
+                discrete_times = self._ramp_raster(block, discrete_times)
             dt = np.diff(discrete_times, prepend=0).astype(self._np_real, copy=False)
 
             # Precompute RF and gradients

@@ -164,12 +164,18 @@ if __name__ == '__main__':
     worst = MPI_comm.allreduce(float(deviation.max()), op=MPI.MAX)
     MPI_print('B0 = {:>4} T: peak concomitant phase {:5.3f} rad at the rim, '
               'worst deviation from the closed form {:.2e}'.format(B0, peak, worst))
-    # Proportional to the phase, because that is what the error is: the
-    # coarsened FEELMRI_FAST_TEST raster (dt 0.05 ms against 0.01) makes a
-    # RELATIVE error on the accumulated phase, measured at 1.95e-3 per radian
-    # at both field strengths. A fixed bound would pass at 1.5 T and fail at
-    # 0.55 T purely because the phase there is 2.7x larger.
-    assert worst < 3e-3 * peak, (
+    # Proportional to the phase, because that is what the error is: a
+    # coarser raster makes a RELATIVE error on the accumulated phase, so a
+    # fixed bound would pass at 1.5 T and fail at 0.55 T purely because the
+    # phase there is 2.7x larger.
+    #
+    # Measured at 7.8e-5 per radian at both field strengths, and the same on
+    # the coarsened FEELMRI_FAST_TEST raster: the solver sub-samples gradient
+    # ramps itself when the concomitant term is on, because Bc goes as G^2 and
+    # is therefore quadratic along a ramp, where no trapezoidal rule is exact.
+    # Before it did, this read 1.95e-3 per radian at dt = 0.05 ms -- 25x worse,
+    # and within 1.5x of the bound below.
+    assert worst < 3e-4 * peak, (
       f'B0 = {B0} T: concomitant phase departs from the closed form by '
       f'{worst:.2e}, i.e. {worst / peak:.2e} per radian of a {peak:.3f} rad '
       f'phase')
