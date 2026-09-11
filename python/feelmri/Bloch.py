@@ -51,6 +51,49 @@ RASTER_TOL_MS = 1e-6
 RF_EDGE_GUARD_MS = 1e-5
 
 
+def demodulation_phase(times_ms, freq_offset_hz=0.0, phase_offset_rad=0.0,
+                       phase_modulation=None):
+    """Receiver phase Pulseq specifies for a set of ADC sample times, in rad.
+
+    ``2*pi*freq_offset*t + phase_offset + phase_modulation``, with ``t`` measured
+    from the FIRST sample given -- the ADC event's own origin, which is what the
+    offsets are referenced to.
+
+    The single implementation behind both :meth:`ADC.demodulate` and
+    :meth:`feelmri.PulseqAdapter.ReadoutWindow.demodulate`, so the two cannot
+    drift. The solver never samples the ADC -- readout is synthesized from the
+    trajectory -- so applying this is the caller's job, and a caller driving
+    ``mri_signal`` by hand must do it explicitly.
+    """
+    t = np.asarray(times_ms, dtype=float).reshape(-1)
+    t = (t - t.min()) * 1e-3 if t.size else t                    # ms -> s
+    phase = 2.0 * np.pi * float(freq_offset_hz) * t + float(phase_offset_rad)
+    if phase_modulation is not None:
+        pm = np.asarray(phase_modulation, dtype=float).reshape(-1)
+        if pm.size == phase.size:
+            phase = phase + pm
+        else:
+            warnings.warn(
+                f"adc phase_modulation has {pm.size} entries for {phase.size} "
+                f"samples; the per-sample phase is not applied.")
+    return phase
+
+
+def apply_demodulation(signal, phase):
+    """Multiply ``signal`` by ``exp(-i*phase)`` along its first axis."""
+    if not np.any(phase):
+        return signal
+    out = np.asarray(signal)
+    factor = np.exp(-1j * np.asarray(phase).reshape(
+        (np.size(phase),) + (1,) * (out.ndim - 1)))
+    if np.iscomplexobj(out):
+        # Keep the caller's dtype: a float64 phase would promote complex64 to
+        # complex128, so the returned array silently doubles in size depending
+        # on whether the sequence happened to set an offset.
+        factor = factor.astype(out.dtype, copy=False)
+    return out * factor
+
+
 def _raster_tolerance(*steps):
     """Collapse tolerance for a block, below every step it means to take.
 
@@ -182,6 +225,24 @@ class ADC:
             None if phase_modulation is None
             else Quantity(np.asarray(phase_modulation, dtype=float), 'rad'))
 
+    def demodulation_phase(self):
+        """Receiver phase for this ADC's samples, in rad. See
+        :func:`demodulation_phase`."""
+        return demodulation_phase(self.times.m_as('ms'),
+                                  self.freq_offset.m_as('Hz'),
+                                  self.phase_offset.m_as('rad'),
+                                  self.phase_modulation)
+
+    def demodulate(self, signal):
+        """Apply this ADC's frequency/phase offsets to a signal sampled on it.
+
+        Needed by any caller assembling signal by hand -- `simulate_pulseq`
+        does this for its own readout windows, but a manual
+        `update_magnetization` + `mri_signal` pipeline gets nothing unless it
+        calls this.
+        """
+        return apply_demodulation(signal, self.demodulation_phase())
+
 
 class SequenceBlock:
     """Atomic building block of an MRI pulse sequence.
@@ -229,8 +290,8 @@ class SequenceBlock:
         spread a spoiler produces. Default is False.
     """
 
-    def __init__(self, gradients: list = [],
-                 rf_pulses: list = [],
+    def __init__(self, gradients: list = None,
+                 rf_pulses: list = None,
                  adc: ADC | None = None,
                  dt_rf: Quantity = Quantity(0.01, 'ms'),
                  dt_gr: Quantity = Quantity(-1, 'ms'),
@@ -239,6 +300,11 @@ class SequenceBlock:
                  empty: bool = False,
                  store_magnetization: bool = False,
                  spoiler: bool = False):
+        # A list default in the signature is ONE shared list for every block
+        # built without arguments, and change_time mutates the Gradient and
+        # RF objects inside it.
+        gradients = [] if gradients is None else list(gradients)
+        rf_pulses = [] if rf_pulses is None else list(rf_pulses)
         self.gradients = gradients
         self.M_gradients = [g for g in self.gradients if g.axis == 0]
         self.P_gradients = [g for g in self.gradients if g.axis == 1]
@@ -276,23 +342,29 @@ class SequenceBlock:
         # Informational: which of the requested times are ADC samples. The
         # solver does not consume it -- readout is synthesized from the
         # k-space trajectory, not from the magnetization time course.
-        if self.adc is not None:
-            # adc.times are block-local (see the ADC docstring) while `t` is
-            # absolute, so the two must be brought onto the same origin before
-            # comparing -- np.isin against raw absolute times never matched and
-            # the mask came back all-False on every block.
-            adc_local = np.sort(np.asarray(self.adc.times.m_as('ms'),
-                                           dtype=np.float64))
-            rel = np.asarray(t, dtype=np.float64) - self.time_extent[0].m
+        rel = np.asarray(t, dtype=np.float64)
+        adc_local = (np.sort(np.asarray(self.adc.times.m_as('ms'),
+                                        dtype=np.float64))
+                     if self.adc is not None else np.empty(0))
+        if adc_local.size == 0:
+            # No ADC, or one with no samples. np.clip(idx, 0, size-1) would give
+            # -1 for an empty array and adc_local[-1] would raise instead of
+            # returning an empty mask.
+            adc_mask = np.zeros(rel.shape, dtype=bool)
+        else:
+            # adc.times are BLOCK-LOCAL (see the ADC docstring) while `t` is
+            # absolute, so bring them onto one origin before comparing --
+            # np.isin against raw absolute times never matched, and the mask
+            # came back all-False on every block.
+            #
             # searchsorted, not an (n, m) isclose broadcast: a single-shot
             # spiral ADC can carry tens of thousands of samples in one block,
             # and n x m float64 plus np.isclose's temporaries runs to GB.
+            rel = rel - self.time_extent[0].m
             idx = np.clip(np.searchsorted(adc_local, rel), 0, adc_local.size - 1)
             prev = np.clip(idx - 1, 0, adc_local.size - 1)
             adc_mask = (np.abs(adc_local[idx] - rel) <= RASTER_TOL_MS) | \
                        (np.abs(adc_local[prev] - rel) <= RASTER_TOL_MS)
-        else:
-            adc_mask = np.zeros_like(t, dtype=bool)
 
         return rf, (m_gr, p_gr, s_gr), adc_mask
 
@@ -409,14 +481,14 @@ class SequenceBlock:
                 # a ramp. At RF_EDGE_GUARD_MS it is 1e-4 of the pulse.
                 guards = []
                 lo_blk, hi_blk = self.time_extent[0].m, self.time_extent[1].m
-                eps = min(RF_EDGE_GUARD_MS, float(self.dt_rf.m))
+                eps = min(RF_EDGE_GUARD_MS, float(self.dt_rf.m_as('ms')))
                 for rf in self.rf_pulses:
                     lo, hi = _rf_support_ms(rf)
                     guards.append(np.array(
                         [max(lo - eps, lo_blk), min(hi + eps, hi_blk)],
                         dtype=np.float64))
                 rf_timings = np.concatenate(
-                    [np.arange(*_rf_support_ms(rf), self.dt_rf.m) for rf in self.rf_pulses]
+                    [np.arange(*_rf_support_ms(rf), self.dt_rf.m_as('ms')) for rf in self.rf_pulses]
                     + guards + [rf_timings]
                 )
         else:
@@ -427,7 +499,14 @@ class SequenceBlock:
 
         # ADC timings
         if self.adc is not None:
-            adc_times = self.adc.times.m_as('ms')
+            # adc.times are BLOCK-LOCAL (see the ADC docstring, and
+            # test_pulseq_timing.py, which adds time_extent[0] to recover
+            # absolute times), so they must be placed in the block's frame
+            # before joining an otherwise absolute raster. They were
+            # concatenated raw, which agrees only while time_extent[0] == 0 --
+            # true for every imported block, since _convert_* puts every event
+            # at t = 0, and false for a natively built one.
+            adc_times = self.adc.times.m_as('ms') + self.time_extent[0].m
         else:
             adc_times = np.array([])
 
@@ -448,6 +527,17 @@ class SequenceBlock:
         tol = _raster_tolerance(self.dt.m_as('ms'), self.dt_rf.m_as('ms'),
                                 self.dt_gr.m_as('ms'))
         all_timings = _collapse_near_duplicates(np.sort(all_timings), tol)
+
+        # A block's raster must not leave the block. Several sources feed it and
+        # they do not all share an origin -- a user-defined Gradient keeps its
+        # own `timings` without applying `time`, so a block whose extent starts
+        # late could otherwise be handed points before its own start. The solver
+        # would then integrate time that belongs to the previous block, and
+        # add_block would chain the next one from a duration that disagrees.
+        lo, hi = self.time_extent[0].m, self.time_extent[1].m
+        inside = (all_timings >= lo - tol) & (all_timings <= hi + tol)
+        if not inside.all():
+            all_timings = all_timings[inside]
 
         return Quantity(all_timings, units='ms')
 
@@ -506,7 +596,8 @@ class Sequence:
         Initial sequence blocks. Default is empty.
     """
 
-    def __init__(self, blocks: list = []):
+    def __init__(self, blocks: list = None):
+        blocks = [] if blocks is None else list(blocks)
         self.blocks = blocks
         self.Nb_blocks = len(self.blocks)
         # True when the blocks already carry the spoiler gradients and RF
@@ -605,6 +696,59 @@ class Sequence:
                 f"add_block accepts a SequenceBlock, a Quantity (delay) or a "
                 f"Sequence; got {type(block).__name__}. Nothing was appended, "
                 f"so any duration already deducted for it is unaccounted for.")
+
+    def check_hardware(self, scanner=None, rtol=1e-6):
+        """Report where this sequence exceeds the scanner's limits.
+
+        Returns a tuple of strings, empty when clean, so a caller can warn,
+        raise or ignore. Nothing checks this implicitly.
+
+        It matters most for an IMPORTED sequence. `Gradient` copies the
+        scanner's limits onto every instance as `Gr_max`/`Gr_sr`, but the
+        user-defined branch of its constructor returns before comparing them --
+        the only comparisons live in `calculate()` and `match_area()`, which the
+        Pulseq adapter never calls. A `.seq` written for a stronger scanner
+        therefore imports and simulates silently. Peak B1 was not checkable at
+        all until `Scanner.b1_max` existed.
+
+        pypulseq's `check_timing` is not a substitute: it checks raster
+        alignment and dead times, not amplitude or slew, and the adapter runs it
+        with a default `Opts` where every dead time is zero.
+        """
+        from feelmri.MRObjects import Scanner as _Scanner
+        sc = _Scanner() if scanner is None else scanner
+        g_max = sc.gradient_strength.m_as('mT/m')
+        s_max = sc.gradient_slew_rate.m_as('mT/m/ms')
+        b1_max = getattr(sc, 'b1_max', None)
+        b1_max = None if b1_max is None else b1_max.m_as('mT')
+
+        problems = []
+        for i, block in enumerate(self.blocks):
+            for g in block.gradients:
+                amp = np.abs(np.asarray(g.amplitudes.m_as('mT/m'), dtype=float))
+                if amp.size and amp.max() > g_max * (1.0 + rtol):
+                    problems.append(
+                        f"block {i} axis {g.axis}: gradient peaks at "
+                        f"{amp.max():.3f} mT/m, limit {g_max:.3f}")
+                ts = np.asarray(g.timings.m_as('ms'), dtype=float)
+                if ts.size > 1:
+                    dt = np.diff(ts)
+                    slew = np.abs(np.diff(np.asarray(
+                        g.amplitudes.m_as('mT/m'), dtype=float)))
+                    slew = np.divide(slew, dt, out=np.zeros_like(slew),
+                                     where=dt > 0)
+                    if slew.size and slew.max() > s_max * (1.0 + rtol):
+                        problems.append(
+                            f"block {i} axis {g.axis}: slew reaches "
+                            f"{slew.max():.1f} mT/m/ms, limit {s_max:.1f}")
+            if b1_max is not None:
+                for rf in block.rf_pulses:
+                    b1 = np.abs(np.asarray(rf.waveform.m_as('mT')))
+                    if b1.size and b1.max() > b1_max * (1.0 + rtol):
+                        problems.append(
+                            f"block {i}: RF peaks at {b1.max() * 1e3:.3f} uT, "
+                            f"limit {b1_max * 1e3:.3f}")
+        return tuple(problems)
 
     def flatten(self):
         # Flatten the sequence by creating a single block
@@ -884,6 +1028,7 @@ class BlochSolver:
         x = np.ascontiguousarray(self.phantom.local_nodes, dtype=self._np_real)
 
         # Blocks to be solved
+        self._solve_calls = getattr(self, '_solve_calls', 0) + 1
         start_arg = start
         if start < 0:
             start += self.sequence.Nb_blocks
@@ -907,10 +1052,17 @@ class BlochSolver:
         # bookkeeping in PulseqAdapter counts store_magnetization blocks over
         # the WHOLE sequence. The two agree only for a whole-sequence solve.
         store_indices = [i for i, block in enumerate(blocks) if block.store_magnetization]
-        if start_arg > 0 and any(b.store_magnetization
-                                 for b in self.sequence.blocks[:start]):
+        # Once per solver, not once per call: the incremental steady-state
+        # idiom (`solve(start=-2)` inside a per-shot loop) is legitimate and
+        # would otherwise emit this on every shot. Testing the NORMALISED start
+        # matters -- a negative start is the only non-zero start anywhere in
+        # examples/, so guarding on the raw argument meant it never fired.
+        if (start > 0 and not getattr(self, '_warned_start_storage', False)
+                and any(b.store_magnetization
+                        for b in self.sequence.blocks[:start])):
+            self._warned_start_storage = True
             warnings.warn(
-                f"solve(start={start_arg}) skips "
+                f"solve(start={start_arg}) skips "  # report what was passed
                 f"{sum(b.store_magnetization for b in self.sequence.blocks[:start])} "
                 f"block(s) already flagged store_magnetization, so the returned "
                 f"columns are numbered from `start` and no longer line up with "
@@ -995,11 +1147,17 @@ class BlochSolver:
             # Solve
             if block.spoiler is True:
                 K = self.isochromat_K
-                # pos_jitter is the sphere RADIUS, while global_elem_size is
-                # cbrt(element volume) -- a full characteristic LENGTH. Passing
-                # it unhalved scattered isochromats over a sphere of that
-                # DIAMETER, spilling an element-width outside their own element.
-                # A sphere inscribed in a cell of side L has radius L/2.
+                # pos_jitter is the sphere RADIUS and global_elem_size is
+                # cbrt(element volume), a LENGTH -- which looks like it wants a
+                # factor of 1/2. It does not, and halving it was measured worse:
+                # the region a node must dephase over is its CONTROL VOLUME, not
+                # one element. For P1 tets a node owns ~n_adj/4 elements, so the
+                # equivalent sphere is R = (3*n_adj/(16*pi))**(1/3) * elem_size
+                # = 0.89..1.13 * elem_size for 12..24 adjacent tets. The two
+                # errors -- radius-vs-length and element-vs-control-volume --
+                # very nearly cancel, so elem_size is right to ~6%.
+                # Measured rho at K=200 for a spoiler winding one cycle per
+                # element: 0.0775 at R = elem_size against 0.3044 at half that.
                 #
                 # The .min() over the whole mesh is still crude: on a graded
                 # mesh the single smallest element sets the jitter everywhere,
@@ -1012,8 +1170,14 @@ class BlochSolver:
                 # and accumulates coherently instead of averaging down as
                 # 1/sqrt(n_blocks). Offsetting by the block index decorrelates
                 # them while keeping the whole solve reproducible.
+                # `i` indexes the SLICE, so solve(start=-4) called once per
+                # shot would hand every shot the same seed and the residual
+                # would again accumulate coherently. Offset by the absolute
+                # block index AND by a per-call counter, so repeated solves of
+                # the same blocks decorrelate too.
                 block_seed = (None if self.isochromat_seed is None
-                              else int(self.isochromat_seed) + i)
+                              else int(self.isochromat_seed)
+                              + (start + i) + 7919 * self._solve_calls)
                 (x_big, T1_big, T2_big,
                  deltaB_big, Mxy_big, Mz_big) = create_multi_isochromats(
                     x, T1, T2,
@@ -1021,7 +1185,7 @@ class BlochSolver:
                     initial_Mxy,
                     initial_Mz,
                     K=K,
-                    pos_jitter=0.5 * elem_size,
+                    pos_jitter=elem_size,
                     distribution=self.isochromat_distribution,
                     seed=block_seed,
                 )

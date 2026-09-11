@@ -54,21 +54,29 @@ class Trajectory:
 
     def __init__(
         self,
-        FOV: Quantity = Quantity(np.array([0.3, 0.3, 0.08]), 'm'),
-        res: np.ndarray = np.array([100, 100, 1]),
+        FOV: Quantity = None,
+        res: np.ndarray = None,
         oversampling: int = 2,
         lines_per_shot: int = 1,
-        scanner: Scanner = Scanner(),
+        scanner: Scanner = None,
         t_start: Quantity = Quantity(0, 'ms'),
         receiver_bw: Quantity = Quantity(128.0e+3, 'Hz'),
         plot_seq: bool = False,
-        MPS_ori: np.ndarray = np.eye(3),
-        LOC: np.ndarray = np.zeros([3,]),
+        MPS_ori: np.ndarray = None,
+        LOC: np.ndarray = None,
         dtype: np.dtype = np.float32,
     ):
-        self.scanner = scanner
-        self.FOV = FOV
-        self.res = res
+        # Evaluated-once defaults in the signature would be ONE shared array
+        # and ONE shared Scanner for every trajectory built without explicit
+        # arguments -- and this class passes that scanner straight into every
+        # Gradient it constructs, so mutating one trajectory's hardware limits
+        # would change them for all of them.
+        self.scanner = Scanner() if scanner is None else scanner
+        self.FOV = Quantity(np.array([0.3, 0.3, 0.08]), 'm') if FOV is None \
+            else FOV
+        self.res = np.array([100, 100, 1]) if res is None else np.asarray(res)
+        # Later lines read the local names, not the attributes.
+        scanner, FOV, res = self.scanner, self.FOV, self.res
         self.oversampling = oversampling
         self.oversampling_arr = np.array([oversampling, 1.0, 1.0])
         self.Gr_max = scanner.gradient_strength   # [mT/m]
@@ -92,6 +100,8 @@ class Trajectory:
         self.t_start = t_start.astype(dtype)
         self.plot_seq = plot_seq
         self.receiver_bw = receiver_bw          # [Hz]
+        MPS_ori = np.eye(3) if MPS_ori is None else np.asarray(MPS_ori)
+        LOC = np.zeros([3, ]) if LOC is None else np.asarray(LOC)
         self.MPS_ori = MPS_ori.astype(dtype)   # orientation
         self.LOC = LOC.astype(dtype)           # location
         self.dtype = dtype

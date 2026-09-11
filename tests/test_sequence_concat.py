@@ -290,3 +290,104 @@ def test_adc_only_block_reports_a_real_duration():
     assert hi == pytest.approx(0.3, abs=1e-9)
     t = block.discrete_times.m_as('ms')
     assert t[-1] <= hi + 1e-9, 'the raster runs past the block it belongs to'
+
+
+def test_block_raster_never_leaves_its_block():
+  """`discrete_times` must lie inside `time_extent`, always.
+
+  Several sources feed the raster and they do not all share an origin:
+  `adc.times` are block-local (per the ADC docstring and the timing gate), a
+  user-defined `Gradient` keeps its own `timings` without applying `time`, and
+  the `dt` arange runs over the extent. Concatenating the first of those raw
+  agrees with the rest only while `time_extent[0] == 0` -- true for every
+  IMPORTED block, because `_convert_*` puts every event at t = 0, and false for
+  a natively built one.
+
+  When it disagreed, the raster began before the block did, so the solver
+  integrated time belonging to the previous block and `add_block` chained the
+  next one from a duration that no longer matched.
+  """
+  from feelmri.Bloch import ADC
+
+  grad = Gradient(timings=Quantity(np.array([0.0, 0.1, 1.1, 1.2]), 'ms'),
+                  amplitudes=Quantity(np.array([0.0, 10.0, 10.0, 0.0]), 'mT/m'),
+                  axis=0, time=Quantity(1.0, 'ms'))
+  block = SequenceBlock(gradients=[grad],
+                        adc=ADC(times=Quantity(np.linspace(0.5, 1.5, 5), 'ms')))
+
+  lo = block.time_extent[0].m_as('ms')
+  hi = block.time_extent[1].m_as('ms')
+  t = block.discrete_times.m_as('ms')
+  assert t.min() >= lo - 1e-9, (
+      f'the raster starts at {t.min():.4f} ms, before the block at {lo:.4f}')
+  assert t.max() <= hi + 1e-9, (
+      f'the raster ends at {t.max():.4f} ms, after the block at {hi:.4f}')
+
+  # And the ADC samples must land inside it, not at their bare block-local values.
+  _rf, _g, mask = block(t)
+  assert mask.sum() > 0, 'no ADC sample was placed on the raster'
+
+
+def test_check_hardware_catches_an_over_spec_sequence():
+  """An imported sequence is never checked against the scanner; this makes it
+  checkable.
+
+  `Gradient` copies the scanner's limits onto every instance as `Gr_max` /
+  `Gr_sr`, but the user-defined branch of its constructor returns before
+  comparing them -- and the Pulseq adapter only ever builds user-defined
+  gradients. The only comparisons live in `calculate()` / `match_area()`, which
+  the adapter never calls, so a `.seq` written for a stronger scanner imported
+  and simulated silently. Peak B1 was not checkable at all.
+  """
+  from feelmri.MRObjects import Scanner
+
+  grad = Gradient(timings=Quantity(np.array([0.0, 0.1, 1.1, 1.2]), 'ms'),
+                  amplitudes=Quantity(np.array([0.0, 20.0, 20.0, 0.0]), 'mT/m'),
+                  axis=0)
+  seq = Sequence()
+  seq.add_block(SequenceBlock(gradients=[grad], dur=Quantity(1.2, 'ms')))
+
+  generous = Scanner(gradient_strength=Quantity(40, 'mT/m'),
+                     gradient_slew_rate=Quantity(500, 'mT/m/ms'))
+  assert seq.check_hardware(generous) == (), 'a legal sequence must report nothing'
+
+  weak = Scanner(gradient_strength=Quantity(10, 'mT/m'),
+                 gradient_slew_rate=Quantity(500, 'mT/m/ms'))
+  amp_problems = seq.check_hardware(weak)
+  assert any('gradient peaks' in p for p in amp_problems), amp_problems
+
+  slow = Scanner(gradient_strength=Quantity(40, 'mT/m'),
+                 gradient_slew_rate=Quantity(10, 'mT/m/ms'))
+  slew_problems = seq.check_hardware(slow)
+  assert any('slew reaches' in p for p in slew_problems), slew_problems
+
+
+def test_adc_demodulation_is_reachable_without_simulate_pulseq():
+  """A caller assembling signal by hand must be able to demodulate.
+
+  `simulate_pulseq` applies the ADC frequency/phase offsets for its own readout
+  windows, but the manual `update_magnetization` + `mri_signal` path -- which
+  `examples/pulseq_run_epi_tagging.py` uses -- reached nothing, and the offsets
+  carried on `feelmri.Bloch.ADC` were dead duplicates of the ReadoutWindow
+  fields.
+  """
+  from feelmri.Bloch import ADC
+
+  adc = ADC(times=Quantity(np.linspace(0.0, 1.0, 8), 'ms'),
+            freq_offset=Quantity(500.0, 'Hz'),
+            phase_offset=Quantity(0.3, 'rad'))
+  phase = adc.demodulation_phase()
+  assert phase.size == 8
+  assert abs(phase[0] - 0.3) < 1e-12, 'the phase offset must apply at t = 0'
+  # 500 Hz over 1 ms is half a cycle.
+  assert abs((phase[-1] - phase[0]) - np.pi) < 1e-9
+
+  signal = np.ones((8, 1, 1, 1), dtype=np.complex64)
+  out = adc.demodulate(signal)
+  assert out.dtype == np.complex64, 'demodulation must not promote the dtype'
+  assert np.allclose(out.reshape(-1), np.exp(-1j * phase), atol=1e-6)
+
+  quiet = ADC(times=Quantity(np.linspace(0.0, 1.0, 4), 'ms'))
+  assert not np.any(quiet.demodulation_phase())
+  probe = np.ones((4, 1, 1, 1), dtype=np.complex64)
+  assert quiet.demodulate(probe) is probe

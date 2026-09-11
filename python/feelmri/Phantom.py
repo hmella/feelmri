@@ -418,6 +418,12 @@ class FEMPhantom:
         # `local_to_global_nodes` or `local_nodes` must set this, so a later
         # repartition can refuse rather than silently invalidate it.
         self._partition_bound = False
+        # The ownership mask and the redistribution schedule are both derived
+        # from the layout that just changed. Leaving them cached let
+        # set_assembler pass a stale, wrong-length mask to set_node_ownership
+        # after a create_submesh -- silently wrong signal at MPI_size > 1.
+        self.__dict__.pop('_own_mask_cache', None)
+        self.__dict__.pop('_redist_cache', None)
 
     # ------------------------------------------------------------------
     # Multiple simultaneous partitions
@@ -1195,7 +1201,7 @@ class FEMPhantom:
         ``BlochSolver.solve()`` returns) and is redistributed into the signal layout
         here -- the only per-handoff communication in the scheme.
         """
-        if getattr(self, '_dual', False):
+        if getattr(self, '_dual', False) and self._active_partition != 'signal':
             Mxy = self.redistribute_nodal(np.ascontiguousarray(Mxy), 'bloch', 'signal')
             with self._using('signal'):
                 return self._update_magnetization_local(Mxy)

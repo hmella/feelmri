@@ -1907,46 +1907,32 @@ class ReadoutWindow:
   def demodulation_phase(self) -> np.ndarray:
     """Receiver phase Pulseq specifies for this window's samples, in rad.
 
-    ``2*pi*freq_offset*t + phase_offset + phase_modulation``, with ``t``
-    measured from the window's FIRST SAMPLE -- the ADC event's own origin,
-    which is what the offsets are referenced to.
+    Delegates to :func:`feelmri.Bloch.demodulation_phase`, which is also what
+    :meth:`feelmri.Bloch.ADC.demodulate` uses, so the window-level and
+    block-level paths cannot drift apart.
 
     An EPI train collapses many ADC events into one window and the window
-    carries the offsets of its HEAD event only, so for such a window this is
-    exact just when every event shares them (the usual case, since the offsets
-    come from one `make_adc` call).
+    carries the offsets of its HEAD event only, so this is exact just when
+    every event shares them -- the usual case, since they come from one
+    `make_adc` call. The origin is this window's first sample, while Pulseq
+    references each ADC event's own start; for a train with a non-zero
+    frequency offset that difference grows along the echo train.
     """
-    t = np.asarray(self.times, dtype=float)
-    t = (t - t.min()) * 1e-3 if t.size else t                    # ms -> s
-    phase = 2.0 * np.pi * float(self.adc_freq_offset) * t
-    phase = phase + float(self.adc_phase_offset)
-    if self.adc_phase_modulation is not None:
-      pm = np.asarray(self.adc_phase_modulation, dtype=float).reshape(-1)
-      if pm.size == phase.size:
-        phase = phase + pm
-      else:
-        logger.warning(
-            "readout blocks %d-%d: adc_phase_modulation has %d entries for %d "
-            "samples; the per-sample phase is not applied",
-            self.first_block, self.last_block, pm.size, phase.size)
-    return phase
+    from feelmri.Bloch import demodulation_phase as _phase
+    return _phase(self.times, self.adc_freq_offset, self.adc_phase_offset,
+                  self.adc_phase_modulation)
 
   def demodulate(self, signal: np.ndarray) -> np.ndarray:
     """Apply :meth:`demodulation_phase` to a signal sampled on this window.
 
     The solver never samples the ADC -- the readout is synthesized from the
-    trajectory -- so the receiver's frequency and phase offsets have to be
-    applied here or not at all. They were parsed and carried but never
-    applied until 2026-09-10; on ``ppm_v15`` that left 228 degrees of phase
-    on the table.
+    trajectory -- so the receiver's offsets are applied here or not at all.
+    `simulate_pulseq` calls this for you; a caller driving
+    `update_magnetization` + `mri_signal` by hand must call it explicitly, or
+    use :meth:`feelmri.Bloch.ADC.demodulate` on the block's own ADC.
     """
-    phase = self.demodulation_phase()
-    if not np.any(phase):
-      return signal
-    out = np.asarray(signal)
-    # signal is (n_samples, ...) -- broadcast the phase along the sample axis.
-    shape = (phase.size,) + (1,) * (out.ndim - 1)
-    return out * np.exp(-1j * phase.reshape(shape))
+    from feelmri.Bloch import apply_demodulation
+    return apply_demodulation(signal, self.demodulation_phase())
 
 
 @dataclass(frozen=True)
@@ -2192,26 +2178,41 @@ def _identify_readout_groups(pulseq_seq: PulseqSequence
   anchor_order: List[Any] = []
 
   for i in range(n):
+    has_adc = int(pulseq_seq.ADC[i].num) > 0
     # Any active RF anchors: what matters is that no pulse falls between the
     # snapshot and the ADC, not which coherence period the pulse opens.
-    if _block_use_label(pulseq_seq, i) is not None:
+    #
+    # A block carrying BOTH an RF and an ADC must NOT become its own anchor:
+    # the snapshot is taken at the block's END, which is after its own ADC
+    # samples, so `times - t_anchor` goes negative and the assembler's
+    # exp(-t/T2) becomes exponential GROWTH. Such a block (FID or
+    # spectroscopy style) keeps the previous anchor and only updates it for
+    # the blocks that follow.
+    opens_anchor = _block_use_label(pulseq_seq, i) is not None
+    if opens_anchor and not has_adc:
       anchor = i
 
-    has_adc = int(pulseq_seq.ADC[i].num) > 0
     if not has_adc:
       continue
 
     if anchor < 0:
-      # No use-labeled anchor yet — fall back to legacy per-ADC rule.
+      # No use-labeled anchor yet -- fall back to legacy per-ADC rule.
       key = ('fallback', i)
       groups[key] = [i]
       anchor_order.append(key)
+      if opens_anchor:
+        anchor = i
       continue
 
     if anchor not in groups:
       groups[anchor] = []
       anchor_order.append(anchor)
     groups[anchor].append(i)
+
+    if opens_anchor:
+      # Its own readout belonged to the PREVIOUS anchor, but its pulse does
+      # open a coherence period for everything after it.
+      anchor = i
 
   out: List[Tuple[int, int, int]] = []
   for key in anchor_order:

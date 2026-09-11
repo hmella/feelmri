@@ -466,3 +466,110 @@ def test_pod_translation_obeys_the_shift_theorem(cube):
     # Ignoring the trajectory entirely reads 1.7e-1 here, so this discriminates.
     assert worst < 1e-4, (
         f'k-space departs from the shift theorem by {worst:.3e} of peak')
+
+
+@pytest.mark.slow
+def test_rf_frequency_offset_shifts_the_slice(tmp_path):
+    """An RF frequency offset must move the excited slice to df / (gammabar*Gz).
+
+    This is how every multi-slice acquisition addresses a slice, how fat
+    saturation selects a species, and how multiband works. It was a no-op for
+    every IMPORTED pulse until 2026-09-10: `MRObjects.RF` applied
+    `frequency_offset` only inside the analytic `_unit_sinc` / `_unit_hard`
+    generators, while `_convert_rf` builds every Pulseq pulse with
+    `shape='custom'`, whose constructor never read it. A -4000 Hz offset moved
+    the slice 0.000 mm instead of -9.394.
+
+    It survived three audits because no bundled fixture had a non-zero RF
+    `freq` column, and the one test that looked at offsets asserted only that
+    they were present on the dataclass.
+    """
+    pytest.importorskip('mpi4py')
+    pytest.importorskip('pymetis')
+    pytest.importorskip('meshio')
+    from feelmri.Bloch import BlochSolver, Sequence
+    from feelmri.MRObjects import Scanner
+    from feelmri.Phantom import FEMPhantom
+    from feelmri.PulseqAdapter import import_pulseq
+
+    imp = import_pulseq(_require('slice_offset_v15.seq'))
+    rf_blocks = [i for i, b in enumerate(imp.feelmri_seq.blocks) if b.rf_pulses]
+    assert len(rf_blocks) == 2, 'the fixture should carry two excitations'
+
+    gammabar = Scanner().gammabar.m_as('Hz/T')
+
+    def slice_centre(rf_block):
+        path = _column_along_z(tmp_path / f'col{rf_block}.vtu', half=14e-3, n=280)
+        phantom = FEMPhantom(path=str(path))
+        phantom.set_assembler(voxel_size=0.0, lorder=2, horder=2,
+                              nodal_approximation=False, lumped=False)
+        seq = Sequence()
+        seq.add_block(imp.feelmri_seq.blocks[rf_block].copy())      # RF + Gz
+        seq.add_block(imp.feelmri_seq.blocks[rf_block + 1].copy())  # rephaser
+        seq.blocks[-1].store_magnetization = True
+        Mxy, _Mz = BlochSolver(sequence=seq, phantom=phantom, M0=1.0,
+                               T1=Q_(1e9, 'ms'), T2=Q_(1e9, 'ms'),
+                               dtype='float64', perfect_spoiling=False).solve()
+        zc = phantom.local_nodes[:, 2]
+        zu, inv = np.unique(np.round(zc, 9), return_inverse=True)
+        prof = np.abs(Mxy[:, -1])
+        p = np.array([prof[inv == i].mean() for i in range(zu.size)])
+        return float(np.sum(zu * p) / np.sum(p)), p.max()
+
+    z_on, peak_on = slice_centre(rf_blocks[0])
+    z_off, peak_off = slice_centre(rf_blocks[1])
+
+    rf_off = imp.feelmri_seq.blocks[rf_blocks[1]].rf_pulses[0]
+    gz = float(np.abs(imp.feelmri_seq.blocks[rf_blocks[1]].gradients[0]
+                      .amplitudes.m_as('mT/m')).max())
+    df = rf_off.frequency_offset.m_as('Hz')
+    assert abs(df) > 0.0, 'the fixture lost its frequency offset on import'
+    predicted = df / (gammabar * gz * 1e-3)                    # Hz / (Hz/m) -> m
+
+    assert abs(z_on) < 3e-4, f'the on-resonance slice is not centred: {z_on * 1e3:.3f} mm'
+    assert abs(z_off - predicted) < 5e-4, (
+        f'the offset slice sits at {z_off * 1e3:.3f} mm, expected '
+        f'{predicted * 1e3:.3f} mm for {df:.0f} Hz at {gz:.3f} mT/m')
+    # A shifted slice must still be a slice, not a weaker one. The tolerance is
+    # 3%, not round-off: an off-centre slice is selected partly during the
+    # trapezoid's RAMPS, where the instantaneous gradient differs, and the
+    # rephaser area is matched to the on-resonance slice. Measured 0.1711
+    # against 0.1736 at 6 mm off centre, with the FWHM widening 4.80 -> 4.90 mm.
+    assert abs(peak_off - peak_on) < 3e-2 * peak_on
+
+
+def test_rf_phase_offset_reaches_the_magnetization(cube):
+    """Two pulses differing only in `phase_offset` must tip about axes that
+    differ by exactly that angle.
+
+    This is what RF spoiling and phase cycling are built on, and it went the
+    same way as the frequency offset: applied for analytic shapes, dropped for
+    custom ones.
+    """
+    from feelmri.Bloch import BlochSolver, Sequence, SequenceBlock
+    from feelmri.MRObjects import RF, Scanner
+
+    phantom, _volume = cube
+    gamma = Scanner().gamma.m_as('rad/ms/mT')
+    dur, n = 0.2, 64
+    delta = np.pi / 3.0
+
+    def tip(phase_rad):
+        t = np.linspace(0.0, dur, n)
+        amp = (np.pi / 2) / (gamma * dur)
+        rf = RF(waveform=Q_(np.full(n, amp, dtype=complex), 'mT'),
+                timings=Q_(t, 'ms'), phase_offset=Q_(phase_rad, 'rad'))
+        block = SequenceBlock(rf_pulses=[rf], dur=Q_(dur, 'ms'))
+        block.store_magnetization = True
+        seq = Sequence()
+        seq.add_block(block)
+        Mxy, _Mz = BlochSolver(sequence=seq, phantom=phantom, M0=1.0,
+                               T1=Q_(1e9, 'ms'), T2=Q_(1e9, 'ms'),
+                               dtype='float64', perfect_spoiling=False).solve()
+        return complex(np.asarray(Mxy[:, -1]).mean())
+
+    a, b = tip(0.0), tip(delta)
+    assert abs(abs(a) - abs(b)) < 1e-6 * abs(a), 'a phase offset must not change |Mxy|'
+    got = float(np.angle(b / a))
+    assert abs(np.angle(np.exp(1j * (got - delta)))) < 1e-6, (
+        f'phase offset of {delta:.4f} rad rotated Mxy by {got:.4f} rad')
