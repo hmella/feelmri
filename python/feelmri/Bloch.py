@@ -1061,7 +1061,13 @@ class BlochSolver:
         # The solver allocates per-node state sized by this partition. Mark the
         # partition in use so a later repartition raises instead of leaving the
         # solver inconsistent.
-        phantom._partition_bound = True
+        # Problems found by validation that inspects LOCAL-node data, so a bad
+        # entry can exist on one rank only. Collected rather than raised on the
+        # spot and reported through a single collective below -- see
+        # _collective_raise. The collective must be reached UNCONDITIONALLY by
+        # every rank, which is why the messages are accumulated instead of the
+        # call being made inside the branch that found them.
+        node_problems = []
         self.M0 = M0
 
         def _node_column(value, name, template=None):
@@ -1121,14 +1127,14 @@ class BlochSolver:
             if b1.size == 1:
                 b1 = np.full(n_local, b1[0], dtype=self._np_cplx)
             elif b1.size != n_local:
-                raise ValueError(
-                    f"BlochSolver: b1_map must be a scalar or have one entry "
-                    f"per local node ({n_local}); got {b1.size}")
-            if not np.all(np.isfinite(b1)):
-                raise ValueError(
-                    "BlochSolver: b1_map contains a non-finite entry. It would "
-                    "poison that node from the first RF step and be carried "
-                    "into every later block.")
+                node_problems.append(
+                    f"b1_map must be a scalar or have one entry per local node "
+                    f"({n_local}); got {b1.size}")
+            elif not np.all(np.isfinite(b1)):
+                node_problems.append(
+                    "b1_map contains a non-finite entry. It would poison that "
+                    "node from the first RF step and be carried into every "
+                    "later block.")
             self.b1_map = np.ascontiguousarray(b1)
         # The same normalisation: these two were left on the bare idiom, so
         # initial_Mz=np.ones(n) still produced the (n, n) outer product.
@@ -1207,12 +1213,12 @@ class BlochSolver:
             if t2p.size == 1:
                 t2p = np.full(n_local, t2p[0])
             elif t2p.size != n_local:
-                raise ValueError(
-                    f"BlochSolver: t2_prime must be a scalar or have one entry "
-                    f"per local node ({n_local}); got {t2p.size}")
-            if not np.all(t2p > 0):
-                raise ValueError(
-                    "BlochSolver: every t2_prime entry must be positive; got a "
+                node_problems.append(
+                    f"t2_prime must be a scalar or have one entry per local "
+                    f"node ({n_local}); got {t2p.size}")
+            elif not np.all(np.isfinite(t2p) & (t2p > 0)):
+                node_problems.append(
+                    f"every t2_prime entry must be finite and positive; got a "
                     f"minimum of {t2p.min()}")
             self._t2_prime_ms = t2p
             if self._spectral_bins < 2:
@@ -1247,7 +1253,22 @@ class BlochSolver:
                     f"~{_LORENTZIAN_ERR(self._n_bins):.1e}, improving only as "
                     f"K^-0.55. Use 'gaussian' or 'uniform' unless you need "
                     f"continuity with the exp(-t/T2*) convention.")
-            self._check_bin_preconditions()
+
+        # Both of the following are COLLECTIVE and are therefore called
+        # unconditionally, outside the branch that decides whether this rank
+        # uses a sub-ensemble at all. Calling either inside that branch pairs
+        # this rank's allgather with a different rank's -- which is exactly the
+        # class of bug these guards exist to prevent, and it bit twice while
+        # writing them.
+        _collective_raise('BlochSolver: ' + '; '.join(node_problems)
+                          if node_problems else '')
+        self._check_bin_preconditions()
+
+        # Only now is the solver committed to this partition. Setting the flag
+        # before the validation above left a phantom permanently
+        # un-repartitionable whenever a constructor argument was rejected, with
+        # no public way to clear it.
+        phantom._partition_bound = True
 
         # Persistent Magnus state (per-node Bz, scalar rf) carried between
         # blocks so that order-2/4 maintain a continuous field history. For
@@ -1345,12 +1366,27 @@ class BlochSolver:
         proceeded into ``solve()`` and blocked forever on its closing
         ``Barrier``.
         """
+        n_ranks = MPI_comm.Get_size()
+
+        # `_n_bins` is itself rank-local, so it cannot gate participation in the
+        # collectives below: a rank that returned early here while another
+        # entered `allreduce` would deadlock, which is the very failure this
+        # function exists to prevent. Agree on it FIRST, and refuse a
+        # disagreement rather than let the ranks diverge.
+        if n_ranks > 1:
+            counts = MPI_comm.allgather(int(self._n_bins))
+            if len(set(counts)) > 1:
+                raise ValueError(
+                    f"BlochSolver: the ranks disagree on the number of spectral "
+                    f"bins ({sorted(set(counts))}). t2_prime, spectral_bins and "
+                    f"lineshape describe the whole phantom and must be the same "
+                    f"on every rank.")
         if self._n_bins <= 1:
             return
 
         def anywhere(local_flag):
             """True if the condition holds on ANY rank."""
-            if MPI_comm is None or MPI_comm.Get_size() == 1:
+            if n_ranks == 1:
                 return bool(local_flag)
             return bool(MPI_comm.allreduce(bool(local_flag), op=MPI.LOR))
 
@@ -1538,18 +1574,35 @@ class BlochSolver:
                     np.repeat(initial_Mxy, n_bins, axis=0), dtype=self._np_cplx)
                 initial_Mz = np.ascontiguousarray(
                     np.repeat(initial_Mz, n_bins, axis=0), dtype=self._np_real)
-            # The kernel sizes everything from r0.rows() and validates no other
-            # length (only b1_map), so a forgotten expansion is an out-of-bounds
-            # read under NDEBUG rather than an exception. Check here instead.
-            n_rows = nb_nodes * n_bins
-            for name, arr in (('x', x), ('T1', T1), ('T2', T2),
-                              ('delta_B', delta_B), ('Bz_old', Bz_old),
-                              ('initial_Mxy', initial_Mxy),
-                              ('initial_Mz', initial_Mz)):
-                if arr.shape[0] != n_rows:
-                    raise RuntimeError(
-                        f"BlochSolver: {name} has {arr.shape[0]} rows, expected "
-                        f"{n_rows} = {nb_nodes} nodes x {n_bins} bins")
+        # The kernel sizes everything from r0.rows() and validates no other
+        # length (only b1_map), so a wrong length is an out-of-bounds WRITE
+        # under -DNDEBUG -DEIGEN_NO_DEBUG rather than an exception -- it
+        # corrupts the heap. This runs on EVERY path, not just the sub-ensemble
+        # one: the attributes below are public, so a caller can reassign
+        # `solver.initial_Mxy = 0.0 + 0j` between solves -- the exact spelling
+        # the constructor accepts -- and `np.ascontiguousarray` of a scalar is
+        # a 0-d array, which pybind hands the kernel as a length-1 vector.
+        n_rows = nb_nodes * n_bins
+        detail = (f"{nb_nodes} nodes x {n_bins} bins" if n_bins > 1
+                  else f"{nb_nodes} nodes")
+        # `x` carries three coordinates per row; everything else is one column.
+        # Checking the columns matters: a rows-only test passes an (n, 5) array.
+        for name, arr, n_cols in (('x', x, 3), ('T1', T1, 1), ('T2', T2, 1),
+                                  ('delta_B', delta_B, 1),
+                                  ('Bz_old', Bz_old, None),
+                                  ('initial_Mxy', initial_Mxy, 1),
+                                  ('initial_Mz', initial_Mz, 1)):
+            arr = np.asarray(arr)
+            want = f"({n_rows},)" if n_cols is None else f"({n_rows}, {n_cols})"
+            ok = (arr.ndim == (1 if n_cols is None else 2)
+                  and arr.shape[0] == n_rows
+                  and (n_cols is None or arr.shape[1] == n_cols))
+            if not ok:
+                raise ValueError(
+                    f"BlochSolver: {name} has shape {arr.shape}, expected "
+                    f"{want} = {detail}. Assigning a scalar or a wrongly-sized "
+                    f"array to a public solver attribute between solve() calls "
+                    f"is the usual cause.")
 
         def collapse_bins(arr):
             """Weighted sum over each node's bins, back to one row per node."""
@@ -1819,6 +1872,28 @@ class BlochSolver:
         MPI_comm.Barrier()
 
         return Mxy[:, store_indices], Mz[:, store_indices]
+
+
+def _collective_raise(message):
+  """Raise on EVERY rank if ANY rank supplies a message.
+
+  Per-node validation inspects local data, so a bad entry can exist on one rank
+  only. A bare ``raise`` there aborts that rank while the others walk on into
+  the next collective and block forever -- an un-debuggable hang in place of a
+  one-line traceback, for what is usually a one-line input mistake.
+  """
+  if MPI_comm.Get_size() == 1:
+    if message:
+      raise ValueError(message)
+    return
+  gathered = MPI_comm.allgather(str(message or ''))
+  offenders = [r for r, m in enumerate(gathered) if m]
+  if offenders:
+    first = offenders[0]
+    raise ValueError(
+      f"{gathered[first]} [reported by rank {first}"
+      + (f" and {len(offenders) - 1} other(s)" if len(offenders) > 1 else "")
+      + f" of {len(gathered)}]")
 
 
 LINESHAPES = ('gaussian', 'uniform', 'lorentzian')
