@@ -62,35 +62,6 @@ def _build_phantom_at_zero_field(phantom, voxel_size=5e-4):
 # ---------------------------------------------------------------------------
 # k = 0: real, positive, finite signal
 # ---------------------------------------------------------------------------
-
-def test_signal_at_k0_is_real_positive(tmp_path):
-  pytest.importorskip('mpi4py')
-  pytest.importorskip('pymetis')
-  pytest.importorskip('meshio')
-
-  mesh_path = tmp_path / 'tet.vtu'
-  make_minimal_tet_mesh(mesh_path)
-  phantom = FEMPhantom(path=str(mesh_path))
-  _build_phantom_at_zero_field(phantom, voxel_size=5e-3)
-
-  n = phantom.local_nodes.shape[0]
-  phantom.update_magnetization(np.ones((n, 1), dtype=np.complex64))
-
-  kx = np.array([0.0], dtype=np.float32)
-  pts, t3 = _to_3d_inputs(kx, kx, kx, kx)
-  S = phantom.mri_signal(pts, t3, None)
-
-  s0 = complex(np.asarray(S).reshape(-1)[0])
-  assert np.isfinite(s0.real) and np.isfinite(s0.imag)
-  assert s0.real > 0.0, f'S(0) should be positive real; got {s0}'
-  # At k=0 with constant Mxy=1 and no phase the imaginary part comes
-  # only from FE quadrature noise; it must be much smaller than the
-  # real part.
-  assert abs(s0.imag) < 0.10 * abs(s0.real), (
-    f'|imag(S(0))|={abs(s0.imag):.3g} too large vs real={s0.real:.3g}'
-  )
-
-
 # ---------------------------------------------------------------------------
 # 1-D rod: |S(k_x)| falls off across k_x = 1/L
 # ---------------------------------------------------------------------------

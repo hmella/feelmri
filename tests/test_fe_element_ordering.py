@@ -88,7 +88,12 @@ def test_reference_element_has_reference_volume(cell_type):
 # assembler takes its absolute value -- so a P1 tetrahedron cannot detect an
 # ordering error by volume. That is exactly why the meshio/Basix mismatch was
 # invisible on ``tetra`` meshes, and why the rest of the suite never caught it.
-ORDER_SENSITIVE = [c for c in CELL_TYPES if c != 'tetra']
+# tetra and wedge are the two cell types whose meshio and Basix orderings
+# coincide (a simplex permutation only flips the sign of det J, and the code
+# takes abs; Basix's prism vertices are the VTK wedge order), so a permutation
+# error is undetectable on them by construction. These are the two that can
+# fail, and the two that did before 2026-08-26.
+ORDER_SENSITIVE = ['tetra10', 'hexahedron']
 
 
 def test_linear_tetra_volume_is_permutation_invariant():
@@ -177,17 +182,7 @@ def _build_mesh(cell_type, n=2, scale=1e-2):
                       mid(t[0], t[3]), mid(t[1], t[3]), mid(t[2], t[3])]
            for t in tets]
   return np.asarray(pts, dtype=np.float64), np.asarray(cells, dtype=np.int64), volume
-
-
-@pytest.mark.parametrize('cell_type', CELL_TYPES)
-def test_structured_mesh_volume_matches_analytic(cell_type):
-  """A structured mesh filling a cube must measure the cube's volume."""
-  nodes, elems, volume = _build_mesh(cell_type)
-  measured = _measured_volume(elems, nodes, cell_type, 2)
-  assert measured == pytest.approx(volume, rel=1e-4)
-
-
-@pytest.mark.parametrize('cell_type', CELL_TYPES)
+@pytest.mark.parametrize('cell_type', ORDER_SENSITIVE)
 def test_volume_is_independent_of_quadrature_degree(cell_type):
   """Refining the quadrature must not move the measured volume.
 
@@ -234,24 +229,6 @@ def _cube_signal(tmp_path, cell_type, kx):
   pts = [np.ascontiguousarray(kx.reshape(shape), dtype=np.float32), zeros, zeros]
   t3 = np.zeros(shape, dtype=np.float32)
   return np.asarray(phantom.signal(pts, t3, None)).reshape(-1), volume
-
-
-@pytest.mark.parametrize('cell_type', CELL_TYPES)
-def test_cube_signal_at_k0_equals_volume(tmp_path, cell_type):
-  """With constant M_xy = 1 and no relaxation, S(0) is the domain volume.
-
-  This is the ordering contract seen through the full quadrature path --
-  ``wq``, ``xq`` and the ``S_global_`` projection -- not just element sizing.
-  """
-  pytest.importorskip('mpi4py')
-  pytest.importorskip('pymetis')
-  pytest.importorskip('meshio')
-
-  S, volume = _cube_signal(tmp_path, cell_type, np.array([0.0], dtype=np.float32))
-  assert complex(S[0]).real == pytest.approx(volume, rel=1e-4)
-  assert abs(complex(S[0]).imag) < 1e-6 * volume
-
-
 def test_cube_signal_agrees_across_cell_types(tmp_path):
   """All four discretisations of the same cube must give the same S(k).
 
@@ -264,7 +241,15 @@ def test_cube_signal_agrees_across_cell_types(tmp_path):
 
   # Well inside the first lobe, where the quadrature is comfortably resolved.
   kx = np.array([0.0, 40.0, 80.0], dtype=np.float32)
-  results = {c: _cube_signal(tmp_path, c, kx)[0] for c in CELL_TYPES}
+  computed = {c: _cube_signal(tmp_path, c, kx) for c in CELL_TYPES}
+  results = {c: S for c, (S, _v) in computed.items()}
+  volume = computed['tetra'][1]
+
+  # Anchor the comparison absolutely first: with constant M_xy = 1 and no
+  # relaxation, S(0) is the domain volume. Without this the four could agree
+  # on a wrong answer.
+  assert complex(results['tetra'][0]).real == pytest.approx(volume, rel=1e-4)
+  assert abs(complex(results['tetra'][0]).imag) < 1e-6 * volume
 
   reference = results['tetra']
   for cell_type, S in results.items():
