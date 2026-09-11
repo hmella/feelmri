@@ -2919,6 +2919,13 @@ def simulate_pulseq(seq_path,
         pod.update_timeshift(shift)
       if bins is not None:
         phantom.set_static_fields(bins[3], bins[4])
+        # The bin loop above left the phantom holding the LAST sub-spin --
+        # a tail bin of the quadrature, weight ~1e-16 -- so anything the
+        # caller evaluates afterwards reads that instead of the collapsed
+        # magnetization. Measured on cpmg_v15 at T2' = 8 ms, K = 32: S(0)
+        # came back 1.133x too large and with a spurious real part where
+        # the correct value is purely imaginary.
+        phantom.update_magnetization(Mxy[:, rw.m_storage_idx])
     # The receiver's frequency/phase offsets and any per-sample phase shape.
     signal = rw.demodulate(signal)
     kspace.append(gather_data(signal) if gather else signal)

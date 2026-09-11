@@ -612,3 +612,57 @@ def test_t2_prime_readout_is_reproduced_per_sub_spin(cube):
     f'echoes are attenuated by up to {worst:.3f} with t2_prime on; a refocused '
     f'train must recover them. Collapsing the ensemble at the anchor gives '
     f'{np.exp(-0.5 * (5.0 / 8.0) ** 2):.4f}, which is what this guards against')
+
+  # The assertion above is satisfied by a solver that IGNORES t2_prime
+  # entirely -- with_bins would then be reference and the ratio exactly 1.0.
+  # So also show the ensemble is there and that using it is what recovers the
+  # echo: replaying a single exp(-t/T2) from the collapsed snapshot, which is
+  # what the old code did, must land on the closed-form attenuation.
+  from feelmri.PulseqAdapter import _reshape_signal_inputs
+
+  rw = with_bins.imp.readouts[0]
+  _static(phantom, T2_MS)
+  phantom.update_magnetization(with_bins.Mxy[:, rw.m_storage_idx])
+  points, t = _reshape_signal_inputs(rw.kspace[:, 0], rw.kspace[:, 1],
+                                     rw.kspace[:, 2], rw.times - rw.t_anchor,
+                                     None)
+  collapsed = float(np.abs(np.asarray(
+    phantom.mri_signal(list(points), t, None)).reshape(-1)).max())
+  attenuation = collapsed / peaks(reference)[0]
+  expected = np.exp(-0.5 * (TAU_MS / 8.0) ** 2)
+  assert abs(attenuation - expected) < 3e-2, (
+    f'the collapsed snapshot reads {attenuation:.4f} of the scalar echo where '
+    f'the ensemble standing at the anchor predicts {expected:.4f}. At 1.0 the '
+    f'sub-ensemble is not reaching the snapshot at all and the test above is '
+    f'vacuous')
+
+
+def test_the_bin_readout_leaves_the_phantom_on_the_collapsed_state(cube):
+  """The per-sub-spin readout drives `update_magnetization` once per bin, so it
+  has to put the collapsed state back when it is done.
+
+  It did not, and the phantom came back holding the LAST bin -- a tail of the
+  quadrature carrying weight ~1e-16. Anything the caller evaluated afterwards
+  read that: on cpmg_v15 at T2' = 8 ms, K = 32, S(0) was 1.133x too large and
+  had a real part where the correct value is purely imaginary.
+  """
+  from feelmri.PulseqAdapter import simulate_pulseq, _reshape_signal_inputs
+
+  phantom, _volume = cube
+  _static(phantom, T2_MS)
+  sim = simulate_pulseq(_require('cpmg_v15.seq'), phantom, M0=1.0,
+                        T1=Q_(1e9, 'ms'), T2=Q_(T2_MS, 'ms'), dtype='float64',
+                        t2_prime=Q_(8.0, 'ms'), spectral_bins=32)
+
+  zero = np.zeros(1)
+  points, t = _reshape_signal_inputs(zero, zero, zero, zero, None)
+  left_behind = complex(np.asarray(
+    phantom.mri_signal(list(points), t, None)).reshape(-1)[0])
+
+  phantom.update_magnetization(sim.Mxy[:, sim.imp.readouts[-1].m_storage_idx])
+  collapsed = complex(np.asarray(
+    phantom.mri_signal(list(points), t, None)).reshape(-1)[0])
+
+  assert abs(left_behind - collapsed) <= 1e-6 * abs(collapsed), (
+    f'simulate_pulseq left the phantom at S(0) = {left_behind:.6e} where the '
+    f'collapsed magnetization of the last window gives {collapsed:.6e}')
