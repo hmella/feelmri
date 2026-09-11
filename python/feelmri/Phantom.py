@@ -1267,6 +1267,12 @@ class FEMPhantom:
         side decays monotonically from the snapshot whatever constant it is
         given. That needs sub-voxel isochromats, not a scalar.
         """
+        # Remembered so a caller can temporarily perturb them and put them
+        # back -- the bin-by-bin readout in simulate_pulseq offsets phi_dB0 by
+        # each sub-spin's own frequency and restores this afterwards. Stored
+        # BEFORE any redistribution, i.e. in the layout the caller passed.
+        self._static_fields = (np.array(T2, copy=True),
+                               np.array(phi_dB0, copy=True))
         if getattr(self, '_dual', False) and self._active_partition != 'signal':
             T2 = self.redistribute_nodal(np.ascontiguousarray(T2), 'bloch', 'signal')
             phi_dB0 = self.redistribute_nodal(np.ascontiguousarray(phi_dB0),

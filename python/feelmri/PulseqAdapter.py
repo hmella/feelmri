@@ -2849,6 +2849,21 @@ def simulate_pulseq(seq_path,
                        scanner=scanner, **solver_kwargs)
   Mxy, Mz = solver.solve()
 
+  # When the solver carried a spectral sub-ensemble, reproduce the readout from
+  # it rather than from the collapsed magnetization. Needs the static fields the
+  # caller set, which the phantom remembers for exactly this.
+  bins = None
+  if getattr(solver, 'bin_magnetization', None) is not None:
+    remembered = getattr(phantom, '_static_fields', None)
+    if remembered is None:
+      logger.warning(
+          "t2_prime is set but set_static_fields was never called, so the "
+          "readout cannot be reproduced per sub-spin and every echo will be "
+          "attenuated by the dephasing standing at its anchor")
+    else:
+      bins = (solver.bin_magnetization, solver.bin_offsets,
+              solver.bin_weights, remembered[0], remembered[1])
+
   kspace: List[np.ndarray] = []
   times: List[np.ndarray] = []
   for rw in imp.readouts:
@@ -2878,10 +2893,32 @@ def simulate_pulseq(seq_path,
     if shift is not None:
       pod.update_timeshift(float(rw.t_anchor))
     try:
-      signal = phantom.mri_signal(list(points), t, pod)
+      if bins is None:
+        signal = phantom.mri_signal(list(points), t, pod)
+      else:
+        # Bin-by-bin readout. Collapsing the sub-ensemble at the snapshot and
+        # letting the assembler replay a single exp(-t/T2) from there cannot
+        # reproduce a readout: the snapshot sits at the coherence ANCHOR, where
+        # the ensemble is maximally dephased, and nothing downstream can bring
+        # it back. Measured on cpmg_v15 at T2' = 8 ms, every echo came out
+        # scaled by exp(-0.5*(tau/T2')^2) = 0.82.
+        #
+        # Each sub-spin is instead given its own off-resonance -- the bin
+        # offsets are in the same rad/ms frame as phi_dB0, so they simply add --
+        # and the signals are weight-summed. Exact, and it costs n_bins passes
+        # over the signal path per window.
+        bin_Mxy, offsets, weights, T2_read, phi_read = bins
+        signal = None
+        for k, w in enumerate(weights):
+          phantom.set_static_fields(T2_read, phi_read + offsets[:, k])
+          phantom.update_magnetization(bin_Mxy[:, k, rw.m_storage_idx])
+          contribution = w * phantom.mri_signal(list(points), t, pod)
+          signal = contribution if signal is None else signal + contribution
     finally:
       if shift is not None:
         pod.update_timeshift(shift)
+      if bins is not None:
+        phantom.set_static_fields(bins[3], bins[4])
     # The receiver's frequency/phase offsets and any per-sample phase shape.
     signal = rw.demodulate(signal)
     kspace.append(gather_data(signal) if gather else signal)

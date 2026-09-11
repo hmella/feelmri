@@ -571,3 +571,44 @@ def test_rf_phase_offset_reaches_the_magnetization(cube):
     got = float(np.angle(b / a))
     assert abs(np.angle(np.exp(1j * (got - delta)))) < 1e-6, (
         f'phase offset of {delta:.4f} rad rotated Mxy by {got:.4f} rad')
+
+
+def test_t2_prime_readout_is_reproduced_per_sub_spin(cube):
+  """A refocused train must recover its echoes even with a sub-ensemble on.
+
+  `cpmg_v15` refocuses static dephasing at every echo, so T2' can change the
+  signal BETWEEN echoes but must not change the echoes themselves. It used to:
+  the snapshot is taken at the coherence anchor -- just after the 180, where
+  the ensemble is maximally dephased -- and the assembler could only replay
+  exp(-t/T2) from there, so every echo came out scaled by
+  exp(-0.5*(tau/T2')^2) = 0.82 at T2' = 8 ms. `simulate_pulseq` now evaluates
+  the readout per sub-spin and weight-sums.
+
+  The residual is the dephasing accrued within the 0.44 ms window itself, which
+  is real: the echo peaks at the window centre and the ADC grid does not sample
+  exactly there.
+  """
+  from feelmri.PulseqAdapter import simulate_pulseq
+
+  phantom, _volume = cube
+  _static(phantom, T2_MS)
+  reference = simulate_pulseq(_require('cpmg_v15.seq'), phantom, M0=1.0,
+                              T1=Q_(1e9, 'ms'), T2=Q_(T2_MS, 'ms'),
+                              dtype='float64')
+  _static(phantom, T2_MS)
+  with_bins = simulate_pulseq(_require('cpmg_v15.seq'), phantom, M0=1.0,
+                              T1=Q_(1e9, 'ms'), T2=Q_(T2_MS, 'ms'),
+                              dtype='float64',
+                              t2_prime=Q_(8.0, 'ms'), spectral_bins=32)
+
+  def peaks(sim):
+    return np.array([float(np.abs(np.asarray(k).reshape(-1)).max())
+                     for k in sim.kspace])
+
+  ratio = peaks(with_bins) / peaks(reference)
+  assert ratio.size >= 3, 'the CPMG fixture should give several echoes'
+  worst = float(np.abs(ratio - 1.0).max())
+  assert worst < 2e-2, (
+    f'echoes are attenuated by up to {worst:.3f} with t2_prime on; a refocused '
+    f'train must recover them. Collapsing the ensemble at the anchor gives '
+    f'{np.exp(-0.5 * (5.0 / 8.0) ** 2):.4f}, which is what this guards against')

@@ -1071,6 +1071,8 @@ class BlochSolver:
         # Whether guard 3 has already warned for the CURRENT value of
         # perfect_spoiling. Set before any guard can run.
         self._warned_perfect_spoiling = False
+        # Per-bin magnetization at the stored columns, set by solve().
+        self.bin_magnetization = None
         self.M0 = M0
 
         def _node_column(value, name, template=None):
@@ -1343,6 +1345,23 @@ class BlochSolver:
         return self._spectral_bins
 
     @property
+    def bin_weights(self):
+        """Quadrature weights, (n_bins,), summing to 1. None without bins."""
+        return None if self._bin_w is None else self._bin_w.copy()
+
+    @property
+    def bin_offsets(self):
+        """Per-node, per-bin frequency offsets in rad/ms, (n_nodes, n_bins).
+
+        These are in the SAME units and frame as the assembler's ``phi_dB0``, so
+        a caller reproducing the readout bin by bin adds them to it directly.
+        None without bins.
+        """
+        if self._bin_z is None:
+            return None
+        return self._bin_z[None, :] / self._t2_prime_ms[:, None]
+
+    @property
     def n_spectral_bins(self):
         """Sub-spins per node actually in use -- at most ``spectral_bins``."""
         return self._n_bins
@@ -1528,6 +1547,18 @@ class BlochSolver:
         # Allocate magnetizations
         Mxy = np.zeros((nb_nodes, nb_blocks), dtype=self._np_cplx)
         Mz  = np.zeros((nb_nodes, nb_blocks), dtype=self._np_real)
+        # The UNCOLLAPSED ensemble at each stored column, (n_nodes, n_bins,
+        # n_blocks). Kept because collapsing at the snapshot is what makes a
+        # readout lose the sub-voxel rephasing: the assembler can only replay
+        # exp(-t/T2) from a single value per node, so an echo forming inside a
+        # readout window is flattened and every spin-echo readout comes out
+        # attenuated by the dephasing standing at the anchor. A caller that
+        # wants the readout right evaluates the signal per bin and weight-sums.
+        # Costs n_bins x the stored magnetization, which the caller has already
+        # accepted n_bins x of in the solver itself.
+        bins_out = (None if self._n_bins <= 1 else
+                    np.zeros((nb_nodes, self._n_bins, nb_blocks),
+                             dtype=self._np_cplx))
 
         # Strip units of Bloch parameters just once
         T1 = np.ascontiguousarray(self.T1.m_as('ms'), dtype=self._np_real)
@@ -1843,6 +1874,8 @@ class BlochSolver:
             # survives the block boundary and a 180 can rephase it.
             Mxy[:, i] = collapse_bins(Mxy_[:, -1])
             Mz[:, i]  = collapse_bins(Mz_[:, -1])
+            if bins_out is not None:
+                bins_out[:, :, i] = Mxy_[:, -1].reshape(nb_nodes, n_bins)
 
             # Update the initial magnetization for the next block. Keep the
             # cached column-vector initial_Mxy/initial_Mz in step with the
@@ -1902,6 +1935,8 @@ class BlochSolver:
         # Synchronize all processes
         MPI_comm.Barrier()
 
+        self.bin_magnetization = (None if bins_out is None
+                                  else bins_out[:, :, store_indices])
         return Mxy[:, store_indices], Mz[:, store_indices]
 
 
