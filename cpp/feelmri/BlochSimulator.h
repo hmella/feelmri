@@ -4,9 +4,10 @@
  *
  * Three rotation operators are supported per time step:
  *
- *   order = 0  Cayley-Klein hard-pulse on end-of-step field. Equivalent to the
- *              historical FEelMRI solver and to KomaMRI's BlochMagnus1 in spinor
- *              form. First-order accurate in dt for smoothly varying fields.
+ *   order = 0  Cayley-Klein hard-pulse on end-of-step field. This is the
+ *              historical FEelMRI solver, and is what a first-order Magnus
+ *              expansion reduces to in spinor form. First-order accurate in
+ *              dt for smoothly varying fields.
  *
  *   order = 2  2nd-order Magnus expansion. Builds the rotation-angle vector
  *              from the trapezoidal average of the field at the start and end
@@ -14,11 +15,12 @@
  *
  *   order = 4  Magnus expansion with the linearly-interpolated commutator
  *              Omega_2 = -dt^2 / 12 * [Omega(t_old), Omega(t_new)] added on
- *              top of the order-2 trapezoidal rotation vector. Naming follows
- *              KomaMRI ("BlochMagnus4"); globally still O(dt^2) because the
- *              trapezoidal Omega_1 quadrature limits the order, but with a
- *              smaller error constant than order = 2 because the leading
- *              commutator correction is no longer dropped. The commutator
+ *              top of the order-2 trapezoidal rotation vector. The 4 counts
+ *              the Magnus terms retained, NOT the order of accuracy: this is
+ *              globally still O(dt^2), since the trapezoidal Omega_1
+ *              quadrature limits the order. It does carry a smaller error
+ *              constant than order = 2, because the leading commutator
+ *              correction is no longer dropped. The commutator
  *              vanishes for piecewise-constant fields and for on-resonance
  *              real RF with no gradient — in those regimes the three orders
  *              agree to FP rounding. A genuine O(dt^4) Magnus scheme would

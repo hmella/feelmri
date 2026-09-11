@@ -42,24 +42,18 @@ def test_cartesian_stack_shapes(fov, scanner):
   assert traj.ph_samples == res[1]
   assert traj.slices == res[2]
 
-
-def test_cartesian_stack_kx_monotone_within_line(fov, scanner):
-  traj = CartesianStack(FOV=fov, res=np.array([16, 16, 1]),
-                        oversampling=1, lines_per_shot=1, scanner=scanner)
-  kx = traj.points[0]
-  # Each (line, slice) column should be monotone increasing in the readout.
-  diffs = np.diff(kx, axis=0)
-  assert np.all(diffs >= -1e-6), f'kx not non-decreasing: min={diffs.min()}'
-
-
-def test_cartesian_stack_times_are_non_decreasing(fov, scanner):
-  traj = CartesianStack(FOV=fov, res=np.array([16, 16, 1]),
-                        oversampling=1, lines_per_shot=1, scanner=scanner)
-  t = traj.times.m_as('ms')
-  diffs = np.diff(t, axis=0)
-  assert np.all(diffs >= -1e-6), f't not non-decreasing: min={diffs.min()}'
-
-
+  # Both readout axes advance monotonically within a line: kx because the
+  # readout gradient has one sign, t because it is a clock. Asserted on BOTH
+  # configurations -- the oversampled one above and the plain one below. The
+  # two used to be separate tests, and they were not built alike: they ran at
+  # res=16, oversampling=1, which this test does not otherwise cover.
+  plain = CartesianStack(FOV=fov, res=np.array([16, 16, 1]),
+                         oversampling=1, lines_per_shot=1, scanner=scanner)
+  for label, tr in (('oversampled', traj), ('plain', plain)):
+    for arr, what in ((tr.points[0], 'kx'), (tr.times.m_as('ms'), 't')):
+      diffs = np.diff(arr, axis=0)
+      assert np.all(diffs >= -1e-6), (
+        f'{label}: {what} not non-decreasing: min={diffs.min()}')
 # ---------------------------------------------------------------------------
 # RadialStack
 # ---------------------------------------------------------------------------

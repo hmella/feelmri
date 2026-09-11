@@ -1,31 +1,28 @@
-
 """
-Python translation of Pulseq.jl reader utilities (behavior-preserving, more Pythonic).
+Reader and FEelMRI bridge for Pulseq `.seq` files.
 
-This module provides tools to read Pulseq `.seq` files in a way that mirrors the
-logic of the original Julia implementation, but using idiomatic Python.
+The file format is a flat list of sections: a version, a table of definitions,
+a block table indexing into per-event libraries, and a shape library holding
+run-length-compressed waveforms. Reading it is therefore a two-stage job --
+parse each section into its library, then resolve every block's event ids
+against those libraries -- and this module keeps that separation.
 
-It implements:
-- read_version
-- read_definitions
-- read_signature
-- read_blocks
-- read_events
-- read_labels
-- read_extension_blocks
-- read_shapes
-- compress_shape
-- decompress_shape
-- read_Grad
-- read_RF
-- read_ADC
-- read_extension
-- read_seq  (returns a Sequence object)
-- fix_first_last_grads
+Format versions 1.2 through 1.5 are supported. The RF, ADC and
+arbitrary-gradient rows gained columns at 1.5, so those three reads dispatch on
+the declared version and assert the row length afterwards; a file whose header
+disagrees with its rows fails loudly rather than drifting silently by a column.
 
-NOTE: This is a self‑contained module. It does not depend on the rest of KomaMRI,
-so types like Sequence, Grad, RF, ADC, Trigger, LabelSet, LabelInc are defined here
-in a simplified but compatible fashion.
+The section readers are `read_version`, `read_definitions`, `read_signature`,
+`read_blocks`, `read_events`, `read_labels`, `read_extension_blocks` and
+`read_shapes`; `compress_shape` / `decompress_shape` implement the format's
+derivative-plus-repeat-count encoding. `read_Grad`, `read_RF`, `read_ADC` and
+`read_extension` turn a library row into an event, and `read_seq` drives the
+whole read and returns a `PulseqSequence`. `import_pulseq` is the entry point
+that converts one into the `feelmri.Bloch` objects the solver takes.
+
+The event types defined here (`Grad`, `RF`, `ADC`, `Trigger`, `LabelSet`,
+`LabelInc`) carry only what the format stores, and stay separate from the
+`feelmri.MRObjects` classes they are converted into.
 """
 
 from __future__ import annotations
@@ -137,7 +134,6 @@ class Version:
 def read_version(io) -> Version:
     """
     Read the [VERSION] section of a sequence file.
-    Mirrors the behavior of the Julia `read_version`.
     """
     pulseq_version = Version.from_file(io)
 
@@ -190,7 +186,7 @@ def read_definitions(io) -> Dict[str, Any]:
         else:
             defs[key] = parsed
 
-    # Default values (matching Julia code)
+    # Raster defaults for files that omit them, in seconds.
     defs.setdefault("BlockDurationRaster", 1e-5)
     defs.setdefault("GradientRasterTime", 1e-5)
     defs.setdefault("RadiofrequencyRasterTime", 1e-6)
@@ -301,7 +297,7 @@ def read_events(io, scale: List[float],
         if not parts:
             break
         if len(parts) != n_vals + 1:
-            # Julia breaks when the scanf result count != EventLength
+            # A short row ends the section: the table is over.
             break
         eid = int(float(parts[0]))
 
@@ -348,10 +344,35 @@ def read_labels(io, event_library: Optional[Dict[int, Dict[str, Any]]] = None
         val_str = parts[2]
         event_library[eid] = {"data": [val_int, val_str]}
         if len(parts) != 3:
-            # Julia breaks when scanf result count != 3
+            # A short row ends the section: the table is over.
             break
 
     return event_library
+
+
+def skip_section(io) -> int:
+    """Consume the body of a section we do not handle, up to the blank line
+    that separates it from the next one. Returns the number of lines dropped.
+
+    Every other reader consumes its own body, so a section that only warns
+    leaves its data lines in the stream. The next iteration of read_seq's
+    section loop then reads one of them as a section header and raises
+    ``Unknown section code``.
+    """
+    dropped = 0
+    while True:
+        pos = io.tell()
+        line = io.readline()
+        if not line:
+            break
+        if not line.strip():
+            break
+        if line.lstrip().startswith('['):
+            # A section header with no blank line before it: put it back.
+            io.seek(pos)
+            break
+        dropped += 1
+    return dropped
 
 
 def read_extension_blocks(io, event_library: Optional[Dict[int, Dict[str, Any]]] = None
@@ -392,7 +413,7 @@ def read_shapes(io, force_convert_uncompressed: bool):
     """
     shape_library: Dict[int, Tuple[int, np.ndarray]] = {}
 
-    # Skip the first line after [SHAPES] (Julia reads and discards it)
+    # The line after [SHAPES] is a comment header and carries no data.
     _ = io.readline()
 
     while True:
@@ -518,7 +539,7 @@ def decompress_shape(num_samples: int,
 
     # Differences: when zero, subsequent samples are equal (marker for repeats).
     data_pack_diff = data_pack[1:] - data_pack[:-1]
-    # Julia uses 1-based indices for markers; we emulate that by +1.
+    # A marker indexes the sample AFTER the repeated one, hence the +1.
     markers = np.where(data_pack_diff == 0)[0] + 1  # 1-based
 
     count_pack = 1       # 1-based index into compressed data
@@ -578,8 +599,8 @@ class RF:
     # v1.5 additions. ``use`` is the canonical functional label
     # ('excitation' | 'refocusing' | 'inversion' | 'saturation' |
     #  'preparation' | 'other' | 'undefined'). ``freq_ppm`` and
-    # ``phase_ppm`` are PPM offsets parsed for round-trip fidelity
-    # but not yet consumed by BlochSolver.
+    # ``freq_ppm`` / ``phase_ppm`` are ppm offsets, folded into the RF's
+    # frequency_offset / phase_offset by _convert_rf.
     use: str = "undefined"
     freq_ppm: float = 0.0
     phase_ppm: float = 0.0
@@ -593,9 +614,12 @@ class ADC:
     delay: float
     df: float = 0.0       # frequency offset (Hz)
     phase: float = 0.0    # phase offset (rad)
-    # v1.5 additions, parsed for round-trip fidelity but not yet consumed.
+    # v1.5 additions. freq_ppm / phase_ppm are ppm offsets folded into df /
+    # phase at conversion; phase_modulation is the per-sample phase shape
+    # referenced by the event's phase_id column (rad, one entry per sample).
     freq_ppm: float = 0.0
     phase_ppm: float = 0.0
+    phase_modulation: Optional[np.ndarray] = None
 
 
 @dataclass
@@ -682,6 +706,108 @@ def dur_adc(a: ADC) -> float:
     return float(a.delay + a.T)
 
 
+def _grad_corners_seconds(g: "Grad") -> Tuple[np.ndarray, np.ndarray]:
+  """(times_s, amplitudes_Tm) corner list for a Grad of either shape."""
+  if isinstance(g.A, np.ndarray):
+    return _shaped_waveform_seconds(g)
+  return _trap_waveform_seconds(g)
+
+
+def _rotate_on_union_grid(R: np.ndarray,
+                          gx: "Grad", gy: "Grad", gz: "Grad"
+                          ) -> Tuple["Grad", "Grad", "Grad"]:
+  """Rotate three gradients that do NOT share a time grid.
+
+  A rotation mixes the axes, so each output sample is a combination of all
+  three inputs and is only defined where all three are. Sampling them on the
+  union of their corners makes that true everywhere: a piecewise-linear
+  waveform is exactly reproduced by adding corners to it, so this is lossless
+  on each input and exact on the output.
+
+  The result is emitted as an extended trapezoid -- ``A`` the per-sample
+  amplitudes, ``T`` the per-step dwells -- which is the one Grad shape that
+  can carry a non-uniform grid. Outside its own support a gradient is zero,
+  which is what the ``left``/``right`` of the interpolation says.
+
+  Inheriting one donor axis's geometry instead, as this used to, is wrong
+  whenever the timings differ: on an ordinary block (in-plane prephasers
+  0.5 ms flat, slice-select 2.0 ms) an IDENTITY matrix inflated the x and y
+  moments by 250%.
+  """
+  corners = [_grad_corners_seconds(g) for g in (gx, gy, gz)]
+  grid = np.unique(np.concatenate([t for t, _a in corners]))
+  # Two axes naming one instant can differ in the last bits; a zero-length
+  # step would put an infinite slew into the output.
+  if grid.size > 1:
+    grid = grid[np.concatenate(([True], np.diff(grid) > 1e-12))]
+  if grid.size < 2:
+    return gx, gy, gz
+
+  stacked = np.vstack([np.interp(grid, t, a, left=0.0, right=0.0)
+                       for t, a in corners])
+  rotated = R @ stacked
+
+  local = grid - grid[0]
+  dwells = np.diff(local)
+  out = []
+  for axis in range(3):
+    amps = rotated[axis]
+    out.append(Grad(
+      A=amps,
+      T=dwells,
+      rise=0.0,
+      fall=0.0,
+      delay=float(grid[0]),
+      first=float(amps[0]),
+      last=float(amps[-1]),
+    ))
+  return tuple(out)
+
+
+def _warn_discontinuous_gradients(filename, pulseq_seq, rtol: float = 1e-3):
+  """Warn about any gradient event that ends non-zero and is not continued.
+
+  Pulseq expects a gradient to return to zero at a block boundary unless the
+  next block carries it on. When one does not, the trajectory and the solver
+  are reading two different waveforms -- see the call site for the measured
+  cost. `check_timing` does not look at this.
+
+  ``rtol`` is relative to the event's own peak, so a boundary sample at
+  round-off is ignored and one at a percent of peak is not.
+  """
+  problems = []
+  n_blocks = len(pulseq_seq)
+  for i in range(n_blocks):
+    for axis, g in enumerate(pulseq_seq.GR[i]):
+      if g is None or not isinstance(g.A, np.ndarray) or g.A.size == 0:
+        continue
+      peak = float(np.abs(g.A).max())
+      if peak <= 0.0:
+        continue
+      tail = float(abs(g.last))
+      if tail <= rtol * peak:
+        continue
+      nxt = pulseq_seq.GR[i + 1][axis] if i + 1 < n_blocks else None
+      carried = nxt is not None and (
+          (isinstance(nxt.A, np.ndarray) and nxt.A.size
+           and abs(float(nxt.first) - float(g.last)) <= rtol * peak)
+          or (not isinstance(nxt.A, np.ndarray) and float(nxt.A) != 0.0))
+      if not carried:
+        problems.append((i, 'xyz'[axis], 100.0 * tail / peak))
+
+  if problems:
+    logger.warning(
+        "%s: %d gradient event(s) end away from zero with nothing continuing "
+        "them (%s). The k-space trajectory comes from pypulseq, which bridges "
+        "the gap linearly to the next event on that axis, while the solver "
+        "reads zero there -- so the readout carries phase the simulation never "
+        "played. Make the waveform return to zero, or continue it in the next "
+        "block.",
+        filename, len(problems),
+        ', '.join(f'block {b} G{a} ends at {pc:.2f}% of peak'
+                  for b, a, pc in problems[:5]))
+
+
 def _apply_rotation_to_grads(R: np.ndarray,
                              gx: Grad, gy: Grad, gz: Grad
                              ) -> Tuple[Grad, Grad, Grad]:
@@ -693,10 +819,29 @@ def _apply_rotation_to_grads(R: np.ndarray,
     ndarray of length N), the output is the row of R applied per sample,
     producing a new shaped gradient.
 
-    Timing fields (`T`, `rise`, `fall`, `delay`) are inherited from the
-    largest-amplitude input axis; if the three axes already share timing
-    (the common case generated by Pulseq writers), this is exact.
+    Timing fields (`T`, `rise`, `fall`, `delay`) are inherited from one donor
+    axis, which is exact ONLY when every active axis already shares them --
+    the common case a Pulseq writer emits, and the only case accepted here.
+
+    A rotation mixes the axes, so an output amplitude is a combination of
+    three inputs and is only meaningful where all three are defined on the
+    same grid. With a single donor and differing timings the result is
+    silently wrong rather than approximate: measured on an ordinary block
+    (x/y prephasers 0.5 ms flat, z slice-select 2 ms flat) an IDENTITY matrix
+    inflated the x and y moments by **+250%**, and promoting a trapezoid to a
+    constant array to match a shaped gradient discards its ramps (-9.5%).
+    Both now raise instead. Doing it properly means resampling all three onto
+    the union of their corners and emitting shaped gradients; that is a real
+    feature, not a patch.
     """
+    active = [g for g in (gx, gy, gz)
+              if isinstance(g.A, np.ndarray) or float(g.A) != 0.0]
+    if len(active) > 1:
+        shapes = {('array', a.A.size) if isinstance(a.A, np.ndarray)
+                  else ('trap', a.T, a.rise, a.fall, a.delay) for a in active}
+        if len(shapes) > 1:
+            return _rotate_on_union_grid(R, gx, gy, gz)
+
     # Coerce all amplitudes to a common shape: scalars stay scalar; arrays
     # broadcast to the longest. Mixed scalar/array becomes array.
     amps = []
@@ -743,16 +888,22 @@ def _apply_rotation_to_grads(R: np.ndarray,
         return abs(float(g.A))
     donor = max((gx, gy, gz), key=_score)
 
+    # first/last are amplitudes on the same three axes, so they rotate with
+    # the waveform. Dropping them would leave the boundary samples of a
+    # rotated arbitrary gradient at zero.
+    new_first = R @ np.array([gx.first, gy.first, gz.first], dtype=float)
+    new_last = R @ np.array([gx.last, gy.last, gz.last], dtype=float)
+
     out = []
-    for new_A in new_amps:
+    for axis, new_A in enumerate(new_amps):
         out.append(Grad(
             A=new_A,
             T=donor.T,
             rise=donor.rise,
             fall=donor.fall,
             delay=donor.delay,
-            first=0.0,
-            last=0.0,
+            first=float(new_first[axis]),
+            last=float(new_last[axis]),
         ))
     return tuple(out)
 
@@ -764,7 +915,9 @@ def _apply_rotation_to_grads(R: np.ndarray,
 def fix_first_last_grads(seq: PulseqSequence) -> None:
     """
     Update Sequence with first/last points for gradients.
-    Mirrors the logic of Julia `fix_first_last_grads!`.
+
+    Only needed below v1.5, where the boundary samples are absent from the file
+    and have to be reconstructed from the shape and the preceding block.
     """
     grad_prev_last = [0.0, 0.0, 0.0]
 
@@ -797,8 +950,9 @@ def fix_first_last_grads(seq: PulseqSequence) -> None:
                     # time-shaped case – last sample is last amplitude
                     gr.last = float(A[-1])
                 else:
-                    # uniformly-shaped case (extended trapezoid)
-                    # replicate Julia odd-step construction
+                    # Uniformly-shaped case (extended trapezoid): the
+                    # boundary sample follows from an alternating-sign
+                    # cumulative sum over the amplitudes.
                     odd_step1 = np.concatenate(([gr.first], 2.0 * A))
                     idx = np.arange(1, odd_step1.size + 1)
                     sign_vec = (idx % 2) * 2 - 1
@@ -840,9 +994,9 @@ def read_Grad(grad_library: Dict[int, Dict[str, Any]],
 
     Arbitrary-gradient rows have a version-dependent column layout:
     v1.4 has 4 columns ``(amp, amp_id, time_id, delay)``; v1.5 inserts
-    ``first`` and ``last`` boundary samples to yield 6 columns
-    ``(amp, amp_id, time_id, first, last, delay)``. Trapezoidal rows
-    are unchanged.
+    the ``first`` and ``last`` boundary samples immediately after the
+    amplitude, giving 6 columns ``(amp, first, last, amp_id, time_id,
+    delay)``. Trapezoidal rows are unchanged.
     """
     if not grad_library or idx == 0:
         return Grad(0.0, 0.0)
@@ -865,10 +1019,10 @@ def read_Grad(grad_library: Dict[int, Dict[str, Any]],
                 f"[Grad id {idx}] v1.5 expects 6 arbitrary-grad columns, got {len(data)}"
             )
             amplitude = float(data[0])
-            amp_shape_id = int(math.floor(float(data[1])))
-            time_shape_id = int(math.floor(float(data[2])))
-            first_val = float(data[3])
-            last_val = float(data[4])
+            first_val = float(data[1])
+            last_val = float(data[2])
+            amp_shape_id = int(math.floor(float(data[3])))
+            time_shape_id = int(math.floor(float(data[4])))
             delay = float(data[5])
         else:
             assert len(data) == 4, (
@@ -979,13 +1133,16 @@ def read_RF(rf_library: Dict[int, Dict[str, Any]],
 
 
 def read_ADC(adc_library: Dict[int, Dict[str, Any]], idx: int,
-             pulseq_version: Version = Version(1, 4, 0)) -> ADC:
+             pulseq_version: Version = Version(1, 4, 0),
+             shape_library: Optional[Dict[int, Tuple[int, np.ndarray]]] = None
+             ) -> ADC:
     """
     Construct an ADC object from library.
 
     v1.4: 5 columns ``(num, dwell, delay, freq, phase)``.
     v1.5: 8 columns ``(num, dwell, delay, freq_ppm, phase_ppm, freq,
-    phase, phase_id)``.
+    phase, phase_id)``, where ``phase_id`` references a per-sample phase
+    shape resolved against ``shape_library``.
     """
     if not adc_library or idx == 0:
         return ADC(0, 0.0, 0.0, 0.0, 0.0)
@@ -1002,6 +1159,19 @@ def read_ADC(adc_library: Dict[int, Dict[str, Any]], idx: int,
         phase_ppm = float(data[4])
         freq = float(data[5])
         phase = float(data[6])
+        # data[7] is a shape id into the shape library, holding one phase
+        # value per ADC sample. 0 means no modulation.
+        phase_shape_id = int(math.floor(float(data[7])))
+        if phase_shape_id > 0:
+            if shape_library is None or phase_shape_id not in shape_library:
+                raise KeyError(
+                    f"[ADC id {idx}] references phase shape {phase_shape_id}, "
+                    f"which is not in the shape library"
+                )
+            num_ph, ph_data = shape_library[phase_shape_id]
+            phase_modulation = decompress_shape(num_ph, ph_data)
+        else:
+            phase_modulation = None
     else:
         assert len(data) == 5, (
             f"[ADC id {idx}] v1.4 expects 5 columns, got {len(data)}"
@@ -1013,9 +1183,11 @@ def read_ADC(adc_library: Dict[int, Dict[str, Any]], idx: int,
         phase = float(data[4])
         freq_ppm = 0.0
         phase_ppm = 0.0
+        phase_modulation = None
     T = (num - 1) * dwell
     return ADC(num, T, delay, freq, phase,
-               freq_ppm=freq_ppm, phase_ppm=phase_ppm)
+               freq_ppm=freq_ppm, phase_ppm=phase_ppm,
+               phase_modulation=phase_modulation)
 
 
 # ---------------------------------------------------------------------------
@@ -1039,8 +1211,15 @@ def read_extension(extension_library: Dict[int, Dict[str, Any]],
 
     result: List[Extension] = []
 
-    # Each entry in extension_library is: [type, ref, next_id]
-    type_id, ref, next_id = extension_library[idx]["data"]
+    # Each entry in extension_library is: [type, ref, next_id]. The chain is
+    # walked by next_id, which the file is free to make cyclic, so track what
+    # has been visited rather than trusting it to terminate.
+    entry = extension_library.get(idx)
+    if entry is None:
+        logger.warning("Extension list #%d does not exist", idx)
+        return []
+    type_id, ref, next_id = entry["data"]
+    visited = {idx}
 
     while True:
         if type_id not in extension_type:
@@ -1073,7 +1252,17 @@ def read_extension(extension_library: Dict[int, Dict[str, Any]],
 
         if next_id == 0:
             break
-        type_id, ref, next_id = extension_library[next_id]["data"]
+        if next_id in visited:
+            logger.warning(
+                "Extension list #%d is cyclic at entry #%d; stopping the walk",
+                idx, next_id)
+            break
+        entry = extension_library.get(next_id)
+        if entry is None:
+            logger.warning("Extension list entry #%d does not exist", next_id)
+            break
+        visited.add(next_id)
+        type_id, ref, next_id = entry["data"]
 
     return result
 
@@ -1082,10 +1271,16 @@ def read_extension(extension_library: Dict[int, Dict[str, Any]],
 # High-level sequence reader
 # ---------------------------------------------------------------------------
 
-def read_seq(filename: str) -> PulseqSequence:
+def read_seq(filename: str, gamma: float = GAMMA) -> PulseqSequence:
     """
     Read a Pulseq `.seq` file and return a PulseqSequence object.
-    This follows the control flow of the Julia `read_seq` function.
+
+    ``gamma`` (Hz/T) converts the file's Hz/m gradients and Hz RF amplitudes
+    into T/m and T. It must be the SAME constant the solver later multiplies
+    by, or the encoding is off by the ratio of the two: the file fixes the
+    phase integral in Hz, and only a matching gamma reproduces it from
+    ``gamma * B``. :func:`import_pulseq` therefore passes the scanner's
+    ``gammabar`` rather than the module default.
     """
     logger.info("Loading sequence %s ...", os.path.basename(filename))
 
@@ -1136,39 +1331,42 @@ def read_seq(filename: str) -> PulseqSequence:
                     # ``np.nan`` sentinel keeps it as a raw string token.
                     rf_library = read_events(
                         io,
-                        [1.0 / GAMMA, 1.0, 1.0, 1.0, 1e-6, 1e-6,
+                        [1.0 / gamma, 1.0, 1.0, 1.0, 1e-6, 1e-6,
                          1.0, 1.0, 1.0, 1.0, np.nan],
                     )
                 elif pulseq_version >= Version(1, 4, 0):
                     rf_library = read_events(
-                        io, [1.0 / GAMMA, 1.0, 1.0, 1.0, 1e-6, 1.0, 1.0]
+                        io, [1.0 / gamma, 1.0, 1.0, 1.0, 1e-6, 1.0, 1.0]
                     )
                 else:
                     rf_library = read_events(
-                        io, [1.0 / GAMMA, 1.0, 1.0, 1e-6, 1.0, 1.0]
+                        io, [1.0 / gamma, 1.0, 1.0, 1e-6, 1.0, 1.0]
                     )
             elif section == "[GRADIENTS]":
                 if pulseq_version >= Version(1, 5, 0):
-                    # v1.5: amp, amp_id, time_id, first, last, delay
+                    # v1.5: amp, first, last, amp_id, time_id, delay. The two
+                    # boundary samples are inserted directly after the
+                    # amplitude, not after the shape ids, and carry the same
+                    # Hz/m units as the amplitude.
                     grad_library = read_events(
                         io,
-                        [1.0 / GAMMA, 1.0, 1.0,
-                         1.0 / GAMMA, 1.0 / GAMMA, 1e-6],
+                        [1.0 / gamma, 1.0 / gamma, 1.0 / gamma,
+                         1.0, 1.0, 1e-6],
                         type_=ord("g"), event_library=grad_library
                     )
                 elif pulseq_version >= Version(1, 4, 0):
                     grad_library = read_events(
-                        io, [1.0 / GAMMA, 1.0, 1.0, 1e-6],
+                        io, [1.0 / gamma, 1.0, 1.0, 1e-6],
                         type_=ord("g"), event_library=grad_library
                     )
                 else:
                     grad_library = read_events(
-                        io, [1.0 / GAMMA, 1.0, 1e-6],
+                        io, [1.0 / gamma, 1.0, 1e-6],
                         type_=ord("g"), event_library=grad_library
                     )
             elif section == "[TRAP]":
                 grad_library = read_events(
-                    io, [1.0 / GAMMA, 1e-6, 1e-6, 1e-6, 1e-6],
+                    io, [1.0 / gamma, 1e-6, 1e-6, 1e-6, 1e-6],
                     type_=ord("t"), event_library=grad_library
                 )
             elif section == "[ADC]":
@@ -1220,9 +1418,15 @@ def read_seq(filename: str) -> PulseqSequence:
                             io, [1.0] * 9, event_library=rotation_library
                         )
                     elif extension_name.startswith("DELAYS"):
-                        logger.warning("DELAYS extension is not handled")
+                        n_dropped = skip_section(io)
+                        logger.warning(
+                            "DELAYS extension is not handled; %d row(s) ignored",
+                            n_dropped)
                     else:
-                        logger.warning("Ignoring unknown extension: %s", extension_name)
+                        n_dropped = skip_section(io)
+                        logger.warning(
+                            "Ignoring unknown extension %s (%d row(s))",
+                            extension_name, n_dropped)
                 else:
                     raise RuntimeError(f"Unknown section code: {section}")
 
@@ -1266,8 +1470,7 @@ def read_seq(filename: str) -> PulseqSequence:
 
         # For versions prior to 1.4.0 blockDurations have not been initialized
         if not block_durations:
-            # blockDurations is treated as a list indexed by block index 1..N in Julia.
-            # Here we construct a dict with same semantics.
+            # Durations are keyed by block id, not by position.
             for bid in block_events.keys():
                 idelay = delay_ind_tmp.get(bid, 0)
                 delay = 0.0
@@ -1295,7 +1498,8 @@ def read_seq(filename: str) -> PulseqSequence:
 
         rf = read_RF(rf_library, shape_library, rf_raster_time, irf,
                      pulseq_version=pulseq_version)
-        adc = read_ADC(adc_library, iadc, pulseq_version=pulseq_version)
+        adc = read_ADC(adc_library, iadc, pulseq_version=pulseq_version,
+                       shape_library=shape_library)
 
         # block duration: max of blockDurations[i] and event durations
         d_list = [
@@ -1319,8 +1523,8 @@ def read_seq(filename: str) -> PulseqSequence:
         )
 
         # Apply ROTATIONS extension(s) to the (gx, gy, gz) triple in place.
-        # Per Pulseq spec §2.8.4 and KomaMRI ReadPulseq.jl `_apply_rotations_to_owned_sequence`,
-        # the rotation acts on gradient amplitudes (scalar trapezoid or per-sample shaped).
+        # Per Pulseq spec §2.8.4 the rotation acts on gradient amplitudes,
+        # whether a scalar trapezoid or a per-sample shape.
         for ext in ext_list:
             if isinstance(ext, Rotation):
                 gx, gy, gz = _apply_rotation_to_grads(ext.matrix, gx, gy, gz)
@@ -1343,7 +1547,7 @@ def read_seq(filename: str) -> PulseqSequence:
     # v1.5 k-space-calculation API.
     seq.DEF["__pulseq_path__"] = os.path.abspath(filename)
 
-    # Guessing recon dimensions (approximate mirrors of Julia logic)
+    # Recon dimensions are not in the file; infer them from the events.
     # Nx
     if "Nx" not in seq.DEF:
         nx = max((adc.num for adc in seq.ADC), default=0)
@@ -1386,9 +1590,18 @@ def _trap_waveform_seconds(g: "Grad") -> Tuple[np.ndarray, np.ndarray]:
 def _shaped_waveform_seconds(g: "Grad") -> Tuple[np.ndarray, np.ndarray]:
   """Build a (timings_seconds, amplitudes_Tm) pair for an arbitrary gradient.
 
-  ``g.A`` is the per-sample amplitude array. ``g.T`` is either a scalar
-  total duration (uniform raster) or a per-step dwell array of length
-  ``len(g.A) - 1``.
+  ``g.A`` is the per-sample amplitude array. ``g.T`` is either a per-step
+  dwell array of length ``len(g.A) - 1`` (an extended trapezoid, whose shape
+  already carries its own boundary samples) or a scalar total duration (an
+  arbitrary gradient on the regular raster).
+
+  In the regular-raster case the samples sit at raster CENTRES, not at the
+  block boundaries: ``read_Grad`` records the two half-raster shoulders as
+  ``rise`` and ``fall``, and the amplitudes at the boundaries themselves are
+  the ``first`` / ``last`` columns of the file (v1.5) or the values
+  ``fix_first_last_grads`` derives (v1.4). Both are prepended and appended
+  here, which is what pypulseq's ``waveforms_and_times`` does. Without them
+  the waveform is shifted half a raster and its two end ramps are missing.
   """
   delay = float(g.delay)
   amps = np.asarray(g.A, dtype=float)
@@ -1399,10 +1612,30 @@ def _shaped_waveform_seconds(g: "Grad") -> Tuple[np.ndarray, np.ndarray]:
       n = min(times.size, amps.size)
       times = times[:n]
       amps = amps[:n]
-  else:
-    total = float(g.T)
-    times = np.linspace(0.0, total, amps.size)
+    return delay + times, amps
+
+  total = float(g.T)
+  rise = float(g.rise)
+  fall = float(g.fall)
+  times = rise + np.linspace(0.0, total, amps.size)
+  times = np.concatenate(([0.0], times, [rise + total + fall]))
+  amps = np.concatenate(([float(g.first)], amps, [float(g.last)]))
   return delay + times, amps
+
+
+def _ppm_to_hz(scanner: Scanner) -> float:
+  """Hz per ppm of the Larmor frequency, i.e. ``gammabar * B0``.
+
+  Pulseq v1.5 stores RF and ADC offsets both in Hz (``freq``) and in ppm
+  (``freq_ppm``); the effective offset is the sum, with the ppm term scaled
+  by the Larmor frequency. This mirrors pypulseq's
+  ``Sequence.waveforms_and_times`` (``freq_ppm * 1e-6 * gamma * B0``). B0 is
+  NOT stored in the ``.seq`` file -- both libraries take it from the scanner
+  definition -- so pass the right :class:`~feelmri.MRObjects.Scanner` to
+  :func:`import_pulseq` when reading a sequence written for a field other
+  than the 1.5 T default, or every ppm offset is scaled wrongly.
+  """
+  return float(scanner.gammabar.m_as('Hz/T') * scanner.field_strength.m_as('T')) * 1e-6
 
 
 def _convert_gradient(g: "Grad", axis: int, scanner: Scanner) -> Optional[Gradient]:
@@ -1456,6 +1689,15 @@ def _convert_rf(rf: "RF", scanner: Scanner) -> Optional[feelmriRF]:
     duration_ms = 1e-3
   duration_ms *= 1e3
 
+  # v1.5 ppm offsets, scaled by the Larmor frequency. The .seq header gives
+  # freq_ppm in ppm and phase_ppm in rad/MHz, so both take the same
+  # gammabar*B0 factor: rad/MHz x MHz is rad. This matches pypulseq's
+  # sequence.py, which is the path calculate_kspace and waveforms_and_times
+  # take; its seq_plot.py drops the gamma factor and is the odd one out.
+  ppm_to_hz = _ppm_to_hz(scanner)
+  freq_hz = float(rf.df) + float(getattr(rf, 'freq_ppm', 0.0)) * ppm_to_hz
+  phase_rad = float(getattr(rf, 'phase_ppm', 0.0)) * ppm_to_hz
+
   return feelmriRF(
     scanner=scanner,
     shape='custom',
@@ -1465,18 +1707,24 @@ def _convert_rf(rf: "RF", scanner: Scanner) -> Optional[feelmriRF]:
     time=Quantity(0.0, 'ms'),
     timings=Quantity(timings_s * 1e3, 'ms'),
     waveform=Quantity(waveform, 'T').to('mT'),
-    frequency_offset=Quantity(float(rf.df), 'Hz'),
-    phase_offset=Quantity(0.0, 'rad'),
+    frequency_offset=Quantity(freq_hz, 'Hz'),
+    # The per-sample RF phase and the file's constant `phase` column are
+    # already folded into the complex waveform by read_RF, so only the ppm
+    # term is left to add here.
+    phase_offset=Quantity(phase_rad, 'rad'),
     use=str(getattr(rf, 'use', 'undefined')),
   )
 
 
-def _convert_adc(adc: "ADC") -> Optional[feelmriADC]:
+def _convert_adc(adc: "ADC", scanner: Scanner) -> Optional[feelmriADC]:
   """Convert a parsed ADC event to a feelmri.Bloch.ADC.
 
-  Returns None when the ADC is inactive (num == 0). Preserves the
-  per-event frequency and phase offsets so downstream signal demodulation
-  has access to them.
+  Returns None when the ADC is inactive (num == 0). The v1.5 ppm offsets are
+  folded into the Hz / rad offsets exactly as for RF, and the per-sample
+  phase-modulation shape (the ``phase_id`` column) is carried through. All
+  three are demodulation parameters: the solver does not sample the ADC, so
+  it is the caller reconstructing from ``Phantom.mri_signal`` that applies
+  them.
   """
   num = int(adc.num)
   if num <= 0:
@@ -1488,16 +1736,66 @@ def _convert_adc(adc: "ADC") -> Optional[feelmriADC]:
   else:
     dwell = T / (num - 1)
     times_s = delay_s + np.arange(num, dtype=float) * dwell
+  ppm_to_hz = _ppm_to_hz(scanner)
   return feelmriADC(
     times_s * 1e3,
-    freq_offset=Quantity(float(adc.df), 'Hz'),
-    phase_offset=Quantity(float(adc.phase), 'rad'),
+    freq_offset=Quantity(
+      float(adc.df) + float(getattr(adc, 'freq_ppm', 0.0)) * ppm_to_hz, 'Hz'),
+    phase_offset=Quantity(
+      float(adc.phase) + float(getattr(adc, 'phase_ppm', 0.0)) * ppm_to_hz, 'rad'),
+    phase_modulation=getattr(adc, 'phase_modulation', None),
   )
 
 
 # ---------------------------------------------------------------------------
 # K-space trajectory extraction
 # ---------------------------------------------------------------------------
+
+def pypulseq_version() -> Optional[Version]:
+  """Version of the installed pypulseq, or None when it is not importable."""
+  try:
+    import pypulseq as pp
+  except ImportError:
+    return None
+  raw = str(getattr(pp, '__version__', '') or '')
+  parts = raw.split('.')[:3]
+  try:
+    nums = [int(''.join(c for c in p if c.isdigit()) or 0) for p in parts]
+  except ValueError:  # pragma: no cover - defensive
+    return None
+  while len(nums) < 3:
+    nums.append(0)
+  return Version(*nums[:3])
+
+
+def pypulseq_can_read(file_version: Version) -> bool:
+  """Whether the installed pypulseq can read a file of this Pulseq version.
+
+  pypulseq reads only formats up to its own, and the v1.5 layout is not
+  backward readable: 1.4.x silently mis-parses a v1.5 file and then fails
+  inside ``calculate_kspace``. FEelMRI's own reader handles both, but the
+  trajectory comes from pypulseq, so a v1.5 file with an ADC needs
+  pypulseq >= 1.5.
+  """
+  installed = pypulseq_version()
+  if installed is None:
+    return False
+  return (installed.major, installed.minor) >= (file_version.major,
+                                                file_version.minor)
+
+
+def _read_with_pypulseq(filename):  # pragma: no cover (optional dep)
+  """Read ``filename`` into a ``pp.Sequence``.
+
+  One read serves three purposes -- the k-space trajectory, ``check_timing``
+  and the excitation / refocusing anchor times -- and costs milliseconds even
+  on a 231-block file, so it is not worth doing more than once.
+  """
+  pp = _require_pypulseq('import_pulseq')
+  pp_seq = pp.Sequence()
+  pp_seq.read(str(filename), detect_rf_use=False)
+  return pp_seq
+
 
 def _calculate_kspace_via_pypulseq(  # pragma: no cover (optional dep)
     filename,
@@ -1518,10 +1816,8 @@ def _calculate_kspace_via_pypulseq(  # pragma: no cover (optional dep)
   Re-implementing this locally would force us to duplicate the
   use-label bookkeeping that pypulseq already encodes correctly.
   """
-  pp = _require_pypulseq('kspace_trajectory')
-  pp_seq = pp.Sequence()
-  pp_seq.read(str(filename), detect_rf_use=False)
-  k_traj_adc, _k_full, _t_exc, _t_ref, t_adc = pp_seq.calculate_kspace()
+  k_traj_adc, _k_full, _t_exc, _t_ref, t_adc = (
+      _read_with_pypulseq(filename).calculate_kspace())
   return (
       np.asarray(k_traj_adc, dtype=float),
       np.asarray(t_adc, dtype=float),
@@ -1553,6 +1849,33 @@ def kspace_trajectory(pulseq_seq: "PulseqSequence") -> Dict[str, np.ndarray]:
     'kz': k_traj_adc[2],
     'times': t_adc * 1e3,
   }
+
+
+def _reshape_signal_inputs(kx, ky, kz, times_ms, shape):
+  """Cast a flat trajectory to the rank-3 float32 tensors mri_signal takes.
+
+  The C++ ``SignalAssembler`` kernels want ``kloc`` as
+  ``std::vector<Eigen::Tensor<float, 3>>`` and ``t`` as one rank-3 float
+  tensor of matching shape ``(nb_meas, nb_lines, nb_kz)``, so the flat
+  arrays need a reshape and a dtype / contiguity cast. ``shape`` defaults to
+  ``(N, 1, 1)``, the per-readout pattern used everywhere else in FEelMRI.
+  """
+  n = int(np.asarray(times_ms).size)
+  if shape is None:
+    shape = (n, 1, 1)
+  shape = tuple(int(d) for d in shape)
+  if int(np.prod(shape)) != n:
+    raise ValueError(
+      f'requested shape {shape} (prod={int(np.prod(shape))}) does not '
+      f'match N={n} ADC samples'
+    )
+  points = tuple(
+    np.ascontiguousarray(np.asarray(a).reshape(shape), dtype=np.float32)
+    for a in (kx, ky, kz)
+  )
+  times = np.ascontiguousarray(
+    np.asarray(times_ms).reshape(shape), dtype=np.float32)
+  return points, times
 
 
 def as_signal_inputs(traj: Dict[str, np.ndarray],
@@ -1587,23 +1910,8 @@ def as_signal_inputs(traj: Dict[str, np.ndarray],
       ndarrays (one per axis); ``kspace_times`` is a single float32
       C-contiguous rank-3 ndarray of the same shape.
   """
-  n = int(traj['times'].size)
-  if shape is None:
-    shape = (n, 1, 1)
-  shape = tuple(int(d) for d in shape)
-  if int(np.prod(shape)) != n:
-    raise ValueError(
-      f'requested shape {shape} (prod={int(np.prod(shape))}) does not '
-      f'match N={n} ADC samples'
-    )
-  points = tuple(
-    np.ascontiguousarray(traj[axis].reshape(shape), dtype=np.float32)
-    for axis in ('kx', 'ky', 'kz')
-  )
-  times = np.ascontiguousarray(
-    traj['times'].reshape(shape), dtype=np.float32
-  )
-  return points, times
+  return _reshape_signal_inputs(
+      traj['kx'], traj['ky'], traj['kz'], traj['times'], shape)
 
 
 def kspace_to_signal_inputs(  # pragma: no cover (optional dep)
@@ -1645,23 +1953,8 @@ def kspace_to_signal_inputs(  # pragma: no cover (optional dep)
   k_traj_adc, _k_full, _t_exc, _t_ref, t_adc = pp_seq.calculate_kspace()
   k_traj_adc = np.asarray(k_traj_adc, dtype=float)
   t_adc = np.asarray(t_adc, dtype=float)
-  n = int(t_adc.size)
-  if shape is None:
-    shape = (n, 1, 1)
-  shape = tuple(int(d) for d in shape)
-  if int(np.prod(shape)) != n:
-    raise ValueError(
-      f'requested shape {shape} (prod={int(np.prod(shape))}) does not '
-      f'match N={n} ADC samples'
-    )
-  points = tuple(
-    np.ascontiguousarray(k_traj_adc[axis].reshape(shape), dtype=np.float32)
-    for axis in range(3)
-  )
-  times = np.ascontiguousarray(
-    (t_adc * 1e3).reshape(shape), dtype=np.float32
-  )
-  return points, times
+  return _reshape_signal_inputs(
+      k_traj_adc[0], k_traj_adc[1], k_traj_adc[2], t_adc * 1e3, shape)
 
 
 # ---------------------------------------------------------------------------
@@ -1695,11 +1988,26 @@ class ReadoutWindow:
       Shape (N, 3) float32 array of (kx, ky, kz) at every ADC sample
       inside the window, in 1/m.
   times : np.ndarray
-      Shape (N,) float32 absolute sequence time of each ADC sample, in ms.
+      Shape (N,) float64 absolute sequence time of each ADC sample, in ms.
   adc_freq_offset : float
       Hz; constant within window (assumed identical across blocks).
   adc_phase_offset : float
       Rad; constant within window.
+  adc_phase_modulation : np.ndarray or None
+      Per-sample phase (rad) from the leading block's Pulseq v1.5 phase
+      shape, or None. All three are demodulation parameters and are applied
+      by the caller, not by the solver.
+  kspace_file : np.ndarray
+      The trajectory exactly as ``calculate_kspace`` reports it, measured
+      from the excitation. ``kspace`` is this minus ``k_at_anchor``.
+  k_at_anchor : np.ndarray, shape (3,)
+      Gradient moment (1/m) already carried by the magnetization at
+      ``m_storage_block``. It is subtracted from ``kspace`` because the
+      assembler would otherwise wind it a second time.
+  t_anchor : float
+      Absolute time (ms) of the snapshot, i.e. the end of the anchor block.
+      ``times - t_anchor`` is the elapsed time the assembler's
+      ``exp(-t/T2)`` and ``exp(i*phi*t)`` expect.
   """
   first_block: int
   last_block: int
@@ -1709,6 +2017,40 @@ class ReadoutWindow:
   times: np.ndarray
   adc_freq_offset: float
   adc_phase_offset: float
+  adc_phase_modulation: Optional[np.ndarray] = None
+  kspace_file: Optional[np.ndarray] = None
+  k_at_anchor: Optional[np.ndarray] = None
+  t_anchor: float = 0.0
+
+  def demodulation_phase(self) -> np.ndarray:
+    """Receiver phase Pulseq specifies for this window's samples, in rad.
+
+    Delegates to :func:`feelmri.Bloch.demodulation_phase`, which is also what
+    :meth:`feelmri.Bloch.ADC.demodulate` uses, so the window-level and
+    block-level paths cannot drift apart.
+
+    An EPI train collapses many ADC events into one window and the window
+    carries the offsets of its HEAD event only, so this is exact just when
+    every event shares them -- the usual case, since they come from one
+    `make_adc` call. The origin is this window's first sample, while Pulseq
+    references each ADC event's own start; for a train with a non-zero
+    frequency offset that difference grows along the echo train.
+    """
+    from feelmri.Bloch import demodulation_phase as _phase
+    return _phase(self.times, self.adc_freq_offset, self.adc_phase_offset,
+                  self.adc_phase_modulation)
+
+  def demodulate(self, signal: np.ndarray) -> np.ndarray:
+    """Apply :meth:`demodulation_phase` to a signal sampled on this window.
+
+    The solver never samples the ADC -- the readout is synthesized from the
+    trajectory -- so the receiver's offsets are applied here or not at all.
+    `simulate_pulseq` calls this for you; a caller driving
+    `update_magnetization` + `mri_signal` by hand must call it explicitly, or
+    use :meth:`feelmri.Bloch.ADC.demodulate` on the block's own ADC.
+    """
+    from feelmri.Bloch import apply_demodulation
+    return apply_demodulation(signal, self.demodulation_phase())
 
 
 @dataclass(frozen=True)
@@ -1733,6 +2075,13 @@ class PulseqImport:
   Use :meth:`filter_blocks` to query block indices that match a
   particular label state.
 
+  ``timing_errors`` holds whatever ``pp.Sequence.check_timing`` reported
+  for the file, as strings, and is empty both when the file is clean and
+  when the check could not run (no pypulseq, or a file pypulseq refuses).
+  The errors are raster and dead-time violations the scanner would reject;
+  they are surfaced rather than raised because a file that fails them still
+  simulates.
+
   ``feelmri_sim_seq`` is a parallel :class:`feelmriSequence` with the
   same block count and indices as ``feelmri_seq``, except that every
   block whose running ``SET`` label value matches the
@@ -1754,6 +2103,7 @@ class PulseqImport:
   prep_storage_indices: List[int]
   block_labels: List[Dict[str, int]]
   readout_sim_block_indices: List[int]
+  timing_errors: Tuple[str, ...] = ()
 
   def filter_blocks(self, **labels: int) -> List[int]:
     """Return block indices whose running LABELSET/LABELINC state matches
@@ -1785,11 +2135,59 @@ class PulseqImport:
         matches.append(i)
     return matches
 
+  @staticmethod
+  def contiguous_groups(indices: List[int]) -> List[List[int]]:
+    """Split block indices into runs of consecutive integers.
 
-# RF use labels that anchor a coherence period. ADC blocks following one
-# of these — until the next anchor — belong to the same readout group.
-# 'undefined' mirrors pypulseq's Sequence.calculate_kspace behaviour
-# (sequence.py:1322-1325).
+    A writer emits the blocks of one shot or one slice adjacently, so a
+    label query returns several such runs concatenated:
+    ``filter_blocks(SET=2)`` on a two-slice sequence gives
+    ``[4, 5, 11, 12]`` and this returns ``[[4, 5], [11, 12]]``. Take
+    ``[0]`` for the first shot without needing to know the slice count.
+    """
+    groups: List[List[int]] = []
+    for i in sorted(indices):
+      if groups and i == groups[-1][-1] + 1:
+        groups[-1].append(i)
+      else:
+        groups.append([i])
+    return groups
+
+  def duration_of(self, indices: List[int], *, sim: bool = True) -> Quantity:
+    """Total duration of the given blocks, in ms.
+
+    Use it to size a placeholder delay that stands in for blocks whose
+    physics is not being evolved -- a readout train during steady-state
+    convergence, say -- so the timeline still adds up.
+    """
+    seq = self.feelmri_sim_seq if sim else self.feelmri_seq
+    total = Quantity(0.0, 'ms')
+    for i in indices:
+      total = total + seq.blocks[i].dur.to('ms')
+    return total
+
+  def copy_block(self, index: int, *, sim: bool = True,
+                 store_magnetization: bool = False,
+                 spoiler: bool = False) -> SequenceBlock:
+    """Return an independent copy of one block, ready to be assembled into
+    a hand-built :class:`~feelmri.Bloch.Sequence`.
+
+    ``store_magnetization`` is set explicitly rather than inherited: the
+    import stamps it on prep and readout-anchor blocks for its own
+    ``m_storage_idx`` bookkeeping, and a caller rebuilding the sequence
+    wants its own snapshot points, not those. ``spoiler`` turns on the
+    solver's multi-isochromat dephasing for the block.
+    """
+    seq = self.feelmri_sim_seq if sim else self.feelmri_seq
+    block = seq.blocks[index].copy()
+    block.store_magnetization = bool(store_magnetization)
+    block.spoiler = bool(spoiler)
+    return block
+
+
+# RF use labels that open a coherence period. Kept for reference and for
+# callers that reason about grouping; the ANCHOR itself is not chosen from this
+# set -- see _identify_readout_groups for why any RF must anchor.
 _ANCHOR_USES = frozenset(('excitation', 'refocusing', 'undefined'))
 
 
@@ -1831,20 +2229,66 @@ def _compute_block_labels(pulseq_seq: PulseqSequence) -> List[Dict[str, int]]:
   return out
 
 
+def _gradient_moment_between(feelmri_seq, t0_ms: float, t1_ms: float,
+                             gammabar_hz_per_t: float) -> np.ndarray:
+  """Gradient moment accumulated over ``[t0_ms, t1_ms]``, in 1/m per axis.
+
+  Integrates FEelMRI's own converted gradients rather than pypulseq's
+  ``waveforms_and_times``: the latter concatenates each block's shape pieces
+  with no padding between them, so interpolating across it silently bridges
+  the gaps where no gradient is playing. Our blocks carry their own support
+  and are zero outside it, so the sum is gap-free. The waveforms are
+  piecewise linear, so evaluating at every corner inside the interval plus the
+  two endpoints makes the trapezoid rule exact.
+  """
+  total = np.zeros(3, dtype=float)
+  if t1_ms <= t0_ms:
+    return total
+  for block in feelmri_seq.blocks:
+    if (block.time_extent[1].m_as('ms') <= t0_ms
+        or block.time_extent[0].m_as('ms') >= t1_ms):
+      continue
+    for g in block.gradients:
+      ts = g.timings.m_as('ms')
+      amp = g.amplitudes.m_as('mT/m')
+      lo = max(t0_ms, float(ts[0]))
+      hi = min(t1_ms, float(ts[-1]))
+      if hi <= lo:
+        continue
+      inner = ts[(ts > lo) & (ts < hi)]
+      grid = np.concatenate(([lo], inner, [hi]))
+      total[g.axis] += float(np.trapezoid(
+          np.interp(grid, ts, amp, left=0.0, right=0.0), grid))
+  # mT/m * ms -> T/m * s, then Hz/T -> 1/m
+  return total * 1e-6 * gammabar_hz_per_t
+
+
 def _identify_readout_groups(pulseq_seq: PulseqSequence
                              ) -> List[Tuple[int, int, int]]:
-  """Group ADC-bearing blocks by their most recent coherence anchor.
+  """Group ADC-bearing blocks by the last RF pulse that precedes them.
 
   Returns a list of ``(first_block, last_block, anchor_block)`` tuples.
-  ``anchor_block`` is the index of the latest RF block with
-  ``use ∈ {'excitation', 'refocusing', 'undefined'}``. Refocusing
-  pulses keep the current anchor (they flip k but do not start a new
-  coherence period). ``preparation`` / ``saturation`` / ``inversion`` /
-  ``other`` pulses do not anchor.
 
-  When no use-labeled anchor exists (the v1.4 fallback path), each ADC
-  block becomes its own group anchored on the most recent non-ADC
-  block — exactly the legacy partitioning.
+  The anchor is the block holding the most recent ACTIVE RF pulse,
+  whatever its ``use`` label. That is not a grouping convenience, it is
+  what the dual-path factorisation requires. The readout is synthesized
+  as
+
+      M(t) = M(t_anchor) · exp(-i2π(k(t) − k(t_anchor))·x) · exp(-Δt/T2)
+
+  which substitutes the snapshot for the magnetization at the ADC. It is
+  valid only while nothing but gradients and relaxation act in between,
+  so an RF pulse between the snapshot and the ADC breaks it. Anchoring a
+  spin echo on its excitation leaves the refocusing pulse *after* the
+  snapshot, and the inversion never reaches the signal at all: measured
+  on tests/data/se_an_v15.seq, the off-resonance phase at the echo came
+  out fully unrefocused (2.77 rad, i.e. ω·TE).
+
+  An EPI echo train is unaffected — it carries no RF — so blip-separated
+  ADCs sharing one excitation still collapse into a single window.
+
+  When no RF precedes an ADC at all, that ADC becomes its own group
+  anchored on the most recent non-ADC block.
   """
   n = len(pulseq_seq)
   anchor = -1
@@ -1852,25 +2296,41 @@ def _identify_readout_groups(pulseq_seq: PulseqSequence
   anchor_order: List[Any] = []
 
   for i in range(n):
-    use = _block_use_label(pulseq_seq, i)
-    if use in _ANCHOR_USES and use != 'refocusing':
+    has_adc = int(pulseq_seq.ADC[i].num) > 0
+    # Any active RF anchors: what matters is that no pulse falls between the
+    # snapshot and the ADC, not which coherence period the pulse opens.
+    #
+    # A block carrying BOTH an RF and an ADC must NOT become its own anchor:
+    # the snapshot is taken at the block's END, which is after its own ADC
+    # samples, so `times - t_anchor` goes negative and the assembler's
+    # exp(-t/T2) becomes exponential GROWTH. Such a block (FID or
+    # spectroscopy style) keeps the previous anchor and only updates it for
+    # the blocks that follow.
+    opens_anchor = _block_use_label(pulseq_seq, i) is not None
+    if opens_anchor and not has_adc:
       anchor = i
 
-    has_adc = int(pulseq_seq.ADC[i].num) > 0
     if not has_adc:
       continue
 
     if anchor < 0:
-      # No use-labeled anchor yet — fall back to legacy per-ADC rule.
+      # No use-labeled anchor yet -- fall back to legacy per-ADC rule.
       key = ('fallback', i)
       groups[key] = [i]
       anchor_order.append(key)
+      if opens_anchor:
+        anchor = i
       continue
 
     if anchor not in groups:
       groups[anchor] = []
       anchor_order.append(anchor)
     groups[anchor].append(i)
+
+    if opens_anchor:
+      # Its own readout belonged to the PREVIOUS anchor, but its pulse does
+      # open a coherence period for everything after it.
+      anchor = i
 
   out: List[Tuple[int, int, int]] = []
   for key in anchor_order:
@@ -1892,6 +2352,8 @@ def _identify_readout_groups(pulseq_seq: PulseqSequence
 def import_pulseq(
     filename,
     *,
+    scanner: Optional[Scanner] = None,
+    validate: bool = True,
     readout_set_values: Tuple[int, ...] = (3,),
     placeholder_dt: Quantity = Quantity(1.0, 'ms'),
 ) -> PulseqImport:
@@ -1903,6 +2365,16 @@ def import_pulseq(
   ----------
   filename : str or Path
       Path to a Pulseq ``.seq`` file.
+  scanner : Scanner, optional
+      Hardware definition used to convert the events. Its field strength
+      sets the Hz-per-ppm scale of the v1.5 ``freq_ppm`` / ``phase_ppm``
+      offsets, which the ``.seq`` file does not carry. Default is
+      :class:`~feelmri.MRObjects.Scanner`'s 1.5 T; pass a matching scanner
+      when reading a sequence written for another field.
+  validate : bool, optional
+      Run ``pp.Sequence.check_timing`` on the file and report what it finds
+      on :attr:`PulseqImport.timing_errors`. Default True; the check costs
+      milliseconds even on a few hundred blocks.
   readout_set_values : tuple of int, optional
       ``SET`` label values that mark readout-train blocks. Every block
       whose running ``LABELSET`` state has ``SET`` in this set is
@@ -1921,9 +2393,95 @@ def import_pulseq(
 
   See :class:`PulseqImport` for the returned object's shape.
   """
-  pulseq_seq = read_seq(str(filename))
-  scanner = Scanner()
+  scanner_was_given = scanner is not None
+  if scanner is None:
+    scanner = Scanner()
+  # Read with the scanner's own gyromagnetic ratio, so that gamma * B in the
+  # solver reproduces the Hz/m and Hz the file specifies. GAMMA (42.576 MHz/T)
+  # and Scanner.gammabar (42.58 MHz/T) differ by 9.4e-5 relative, which would
+  # otherwise appear as that much error in every encoding phase.
+  pulseq_seq = read_seq(str(filename), gamma=scanner.gammabar.m_as('Hz/T'))
+
+  # One pypulseq read serves the trajectory below and the timing check here.
+  # It is best-effort: a file using an extension pypulseq does not implement
+  # (ROTATIONS) still imports, it just goes unvalidated -- and if it also has
+  # an ADC the trajectory step below raises, since that one is not optional.
+  pp_seq = None
+  timing_errors: Tuple[str, ...] = ()
+  try:
+    pp_seq = _read_with_pypulseq(filename)
+  except Exception as exc:
+    logger.info("%s: pypulseq could not read the file (%s); timings are not "
+                "validated", filename, exc)
+  if pp_seq is not None and validate:
+    ok, errors = pp_seq.check_timing()
+    if not ok:
+      timing_errors = tuple(str(e) for e in errors)
+      logger.warning(
+          "%s: check_timing reports %d violation(s), which a scanner would "
+          "reject: %s%s", filename, len(timing_errors),
+          '; '.join(timing_errors[:3]),
+          '...' if len(timing_errors) > 3 else '')
+  ppm_to_hz = _ppm_to_hz(scanner)
+  gammabar = scanner.gammabar.m_as('Hz/T')
+
+  # ppm offsets are a fraction of the Larmor frequency, and the .seq file does
+  # not record B0 -- so they are scaled by the SCANNER's. Imported with the
+  # default scanner, a sequence written for 3 T silently gets half the offset
+  # it was designed with, and a fat-sat pulse lands on the wrong resonance.
+  if not scanner_was_given:
+    n_ppm = 0
+    for i in range(len(pulseq_seq)):
+      rf_i, adc_i = pulseq_seq.RF[i], pulseq_seq.ADC[i]
+      for ev in (rf_i, adc_i):
+        if ev is None:
+          continue
+        if (abs(float(getattr(ev, 'freq_ppm', 0.0) or 0.0)) > 0.0
+            or abs(float(getattr(ev, 'phase_ppm', 0.0) or 0.0)) > 0.0):
+          n_ppm += 1
+    if n_ppm:
+      logger.warning(
+          "%s: %d event(s) carry a ppm frequency/phase offset, which is scaled "
+          "by gammabar*B0*1e-6 = %.4g Hz/ppm from the DEFAULT scanner (B0 = %s). "
+          "The .seq file does not record B0 -- pass import_pulseq(..., "
+          "scanner=Scanner(field_strength=...)) if it was not written for "
+          "this field.",
+          filename, n_ppm, ppm_to_hz, scanner.field_strength)
   feelmri_seq = feelmriSequence()
+  # A .seq file spells out its spoiler gradients and RF phase cycling, so the
+  # solver must not zero Mxy between blocks on top of them -- that would
+  # destroy the coherence pathways an EPI train, a FLASH or a bSSFP depends
+  # on. BlochSolver reads this flag when perfect_spoiling is left at None.
+  feelmri_seq.explicit_spoiling = True
+
+  # Triggers are hardware handshakes with no simulated counterpart. A WAIT
+  # trigger stalls the scanner for an unknown time, so the simulated timeline
+  # and the executed one then differ by however long the scanner waited.
+  trigger_blocks = [i for i, ext in enumerate(pulseq_seq.EXT)
+                    if any(isinstance(e, Trigger) for e in ext)]
+  if trigger_blocks:
+    logger.warning(
+        "%s: %d block(s) carry TRIGGERS extensions, which are ignored "
+        "(blocks %s%s). A trigger that makes the scanner wait shifts every "
+        "later event, and the simulated timing will not reflect that.",
+        filename, len(trigger_blocks), trigger_blocks[:10],
+        '...' if len(trigger_blocks) > 10 else '')
+
+  # A gradient that ends away from zero with nothing continuing it leaves the
+  # file ill-posed, and the two halves of the dual path then disagree: the
+  # trajectory comes from pypulseq, whose calculate_kspace bridges the gap by
+  # interpolating linearly from `last` to the next event on that axis, while
+  # the solver integrates FEelMRI's own gradients, which are zero outside the
+  # event. Neither is what a scanner does -- one ramps absurdly slowly, the
+  # other jumps infinitely fast -- so refusing to guess and saying so is the
+  # only honest answer.
+  #
+  # Measured on the old tests/data/arb_v15.seq, whose shaped Gx stopped one
+  # sample short of a full sine period and so ended at 1.57% of peak: the kx
+  # handed to mri_signal ran to -8.43 1/m where the solver's own gradients
+  # played ~0, i.e. **1.686 cycles of phase across the 0.2 m FOV**, invisible
+  # to check_timing (which returns ok=True) and to every test.
+  _warn_discontinuous_gradients(filename, pulseq_seq)
 
   for i in range(len(pulseq_seq)):
     gx, gy, gz = pulseq_seq.GR[i]
@@ -1935,7 +2493,7 @@ def import_pulseq(
     Gy = _convert_gradient(gy, 1, scanner)
     Gz = _convert_gradient(gz, 2, scanner)
     Rf = _convert_rf(rf_ev, scanner)
-    Adc = _convert_adc(adc_ev)
+    Adc = _convert_adc(adc_ev, scanner)
 
     gradients = [g for g in (Gx, Gy, Gz) if g is not None]
     rf_pulses = [Rf] if Rf is not None else []
@@ -1969,10 +2527,27 @@ def import_pulseq(
 
   if adc_block_indices:
     try:
-      k_traj_adc, t_adc = _calculate_kspace_via_pypulseq(filename)
+      if pp_seq is None:
+        # Re-raise whatever the read failed with, rather than a bare None.
+        pp_seq = _read_with_pypulseq(filename)
+      k_traj_adc, _k_full, _t_exc, _t_ref, t_adc = pp_seq.calculate_kspace()
+      k_traj_adc = np.asarray(k_traj_adc, dtype=float)
+      t_adc = np.asarray(t_adc, dtype=float)
     except Exception as exc:  # pragma: no cover - surfaced as hard error
+      file_version = pulseq_seq.DEF.get('PulseqVersion')
+      hint = ''
+      if file_version is not None and not pypulseq_can_read(file_version):
+        installed = pypulseq_version()
+        hint = (
+            f" The file declares Pulseq v{file_version.major}."
+            f"{file_version.minor}.{file_version.revision} and the installed "
+            f"pypulseq is {installed and f'{installed.major}.{installed.minor}'}"
+            f", which cannot read that layout. FEelMRI's own reader handles "
+            f"it, but the k-space trajectory comes from pypulseq, so a file "
+            f"with an ADC needs pypulseq >= "
+            f"{file_version.major}.{file_version.minor}.")
       raise RuntimeError(
-          f"Failed to compute k-space trajectory for {filename!s}: {exc}"
+          f"Failed to compute k-space trajectory for {filename!s}: {exc}.{hint}"
       ) from exc
   else:
     k_traj_adc = np.zeros((3, 0), dtype=float)
@@ -1996,8 +2571,32 @@ def import_pulseq(
     t_start = float(block_start_s[first])
     t_end = float(block_end_s[last])
     mask = (t_adc >= t_start - 1e-12) & (t_adc < t_end + 1e-12)
-    kspace = k_traj_adc[:, mask].T.astype(np.float32, copy=False)
-    times_arr = (t_adc[mask] * 1e3).astype(np.float32, copy=False)
+    kspace_file = k_traj_adc[:, mask].T.astype(np.float32, copy=False)
+    # float64: these are absolute sequence times, and float32 only resolves
+    # about 6e-6 ms at 100 ms. The signal assembler takes float32, so callers
+    # cast at that boundary, usually after subtracting the window start.
+    times_arr = np.ascontiguousarray(t_adc[mask] * 1e3, dtype=np.float64)
+
+    # The magnetization is snapshotted at the END of the anchor block, and
+    # calculate_kspace measures k from the excitation, so the snapshot already
+    # carries whatever moment had accumulated by then. Handing the assembler
+    # the file's k as-is winds that moment a second time -- on the bundled
+    # files that is 252 to 460 1/m of slice-select, one to two whole cycles
+    # across the slice. Subtract it, so rw.kspace is the encoding measured
+    # FROM THE SNAPSHOT, which is what pairs with rw's Mxy column.
+    #
+    # The anchor is the last RF before the readout, so nothing between it and
+    # the first sample reflects k and a plain integral is valid there. Working
+    # backwards from the first ADC sample also keeps any earlier refocusing
+    # reflections, which pypulseq has already folded into k_traj_adc.
+    if m_block >= 0 and times_arr.size:
+      t_anchor_ms = float(block_end_s[m_block]) * 1e3
+      k_at_anchor = kspace_file[0].astype(float) - _gradient_moment_between(
+          feelmri_seq, t_anchor_ms, float(times_arr[0]), gammabar)
+    else:
+      t_anchor_ms = float(t_start) * 1e3
+      k_at_anchor = np.zeros(3, dtype=float)
+    kspace = (kspace_file - k_at_anchor).astype(np.float32, copy=False)
 
     head_adc = pulseq_seq.ADC[first]
     readouts.append(ReadoutWindow(
@@ -2006,9 +2605,13 @@ def import_pulseq(
       m_storage_block=m_block,
       m_storage_idx=m_idx,
       kspace=kspace,
+      kspace_file=kspace_file,
+      k_at_anchor=k_at_anchor,
+      t_anchor=t_anchor_ms,
       times=times_arr,
-      adc_freq_offset=float(head_adc.df),
-      adc_phase_offset=float(head_adc.phase),
+      adc_freq_offset=float(head_adc.df) + float(head_adc.freq_ppm) * ppm_to_hz,
+      adc_phase_offset=float(head_adc.phase) + float(head_adc.phase_ppm) * ppm_to_hz,
+      adc_phase_modulation=head_adc.phase_modulation,
     ))
 
   # Prep storage points: each block with use='preparation' flags the
@@ -2051,6 +2654,7 @@ def import_pulseq(
   # event content is safe with respect to the snapshot machinery.
   readout_set = set(int(v) for v in readout_set_values)
   feelmri_sim_seq = feelmriSequence()
+  feelmri_sim_seq.explicit_spoiling = True
   readout_sim_block_indices: List[int] = []
   for i, blk in enumerate(feelmri_seq.blocks):
     set_value = block_labels[i].get('SET') if i < len(block_labels) else None
@@ -2084,19 +2688,182 @@ def import_pulseq(
     prep_storage_indices=prep_storage_indices,
     block_labels=block_labels,
     readout_sim_block_indices=readout_sim_block_indices,
+    timing_errors=timing_errors,
   )
+
+
+# ---------------------------------------------------------------------------
+# One-call simulation
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class PulseqSimulation:
+  """Result of :func:`simulate_pulseq`.
+
+  Attributes
+  ----------
+  kspace : list of np.ndarray
+      One complex array per :class:`ReadoutWindow`, shaped
+      ``(N_samples, 1, 1, n_coils)`` as ``Phantom.mri_signal`` returns it.
+      Under MPI these are reduced onto rank 0 unless ``gather=False``, in
+      which case each rank holds its own partial sum.
+  times : list of np.ndarray
+      Absolute sample times (ms) matching each ``kspace`` entry. The signal is
+      assembled with ``times - ReadoutWindow.t_anchor``; these are kept
+      absolute so a caller can place each window on the sequence timeline.
+  Mxy, Mz : np.ndarray
+      The solver's stored magnetization columns, one per block flagged
+      ``store_magnetization``. ``ReadoutWindow.m_storage_idx`` indexes them.
+  imp : PulseqImport
+      The parsed sequence, so callers can reach the readout windows, the
+      label state and the timing report without importing twice.
+  """
+  kspace: List[np.ndarray]
+  times: List[np.ndarray]
+  Mxy: np.ndarray
+  Mz: np.ndarray
+  imp: PulseqImport
+
+  @property
+  def kspace_flat(self) -> np.ndarray:
+    """Every readout concatenated along the sample axis."""
+    if not self.kspace:
+      return np.zeros((0, 1, 1, 1), dtype=np.complex64)
+    return np.concatenate(self.kspace, axis=0)
+
+  @property
+  def times_flat(self) -> np.ndarray:
+    """Sample times matching :attr:`kspace_flat`, in ms."""
+    if not self.times:
+      return np.zeros((0,), dtype=np.float64)
+    return np.concatenate(self.times)
+
+
+def simulate_pulseq(seq_path,
+                    phantom,
+                    *,
+                    scanner: Optional[Scanner] = None,
+                    pod=None,
+                    gather: bool = True,
+                    import_kwargs: Optional[Dict[str, Any]] = None,
+                    **solver_kwargs) -> PulseqSimulation:
+  """Import a ``.seq``, evolve the magnetization and assemble its k-space.
+
+  This is the dual-path workflow in one call: :func:`import_pulseq`, one
+  :class:`~feelmri.Bloch.BlochSolver` pass over the whole sequence, then per
+  readout window ``phantom.update_magnetization`` followed by
+  ``phantom.mri_signal``. The readout is not evolved by the solver -- it is
+  synthesized from the k-space trajectory -- which is why one solve serves
+  every window.
+
+  ``phantom`` must already have ``set_assembler`` and ``set_static_fields``
+  called on it. Those carry modelling decisions (voxel size, quadrature
+  order, the T2 and off-resonance maps) that no wrapper should guess.
+
+  Parameters
+  ----------
+  seq_path : str or Path
+      The Pulseq file.
+  phantom : FEMPhantom
+      Configured as above.
+  scanner : Scanner, optional
+      Passed to both the import and the solver, so the gamma the file is
+      read with is the gamma the solver integrates. Default 1.5 T.
+  pod : POD or PODSum or None
+      Motion trajectory handed to ``mri_signal``. To move the spins during
+      the Bloch evolution as well, pass it as ``pod_trajectory=`` too.
+  gather : bool, optional
+      Reduce each readout's signal onto rank 0 with
+      :func:`~feelmri.MPIUtilities.gather_data`. Default True. ``mri_signal``
+      has no collective of its own, so with ``gather=False`` every rank
+      returns only its own nodes' contribution.
+
+      ``gather_data`` is an ``MPI_comm.Reduce(root=0)``, **not** an Allreduce:
+      with ``gather=True`` the complete signal exists on rank 0 alone and every
+      other rank receives ZEROS. Guard reconstruction, plotting and file output
+      with ``if MPI_rank == 0``, and do not test a non-root rank's ``kspace``
+      for correctness -- it is expected to be empty, not wrong.
+  import_kwargs : dict, optional
+      Forwarded to :func:`import_pulseq` (``readout_set_values``,
+      ``placeholder_dt``, ``validate``).
+  **solver_kwargs
+      Forwarded to :class:`~feelmri.Bloch.BlochSolver` -- ``M0``, ``T1``,
+      ``T2``, ``delta_B``, ``pod_trajectory``, ``method``, ``dtype`` and the
+      isochromat controls. ``perfect_spoiling`` is left at its default,
+      which resolves to False for an imported sequence.
+
+  Returns
+  -------
+  PulseqSimulation
+  """
+  from feelmri.Bloch import BlochSolver
+  from feelmri.MPIUtilities import gather_data
+
+  if scanner is None:
+    scanner = Scanner()
+  imp = import_pulseq(seq_path, scanner=scanner, **(import_kwargs or {}))
+
+  solver = BlochSolver(sequence=imp.feelmri_seq, phantom=phantom,
+                       scanner=scanner, **solver_kwargs)
+  Mxy, Mz = solver.solve()
+
+  kspace: List[np.ndarray] = []
+  times: List[np.ndarray] = []
+  for rw in imp.readouts:
+    if rw.m_storage_idx < 0:
+      logger.warning(
+          "readout blocks %d-%d have no coherence anchor and are skipped",
+          rw.first_block, rw.last_block)
+      continue
+    phantom.update_magnetization(Mxy[:, rw.m_storage_idx])
+    # Elapsed time since the snapshot, not absolute time from the start of the
+    # file. mri_signal uses t for exp(-t/T2) and exp(i*phi*t), both of which
+    # continue from the instant the magnetization was captured; feeding it
+    # absolute times applies a spurious exp(-t_anchor/T2) to the whole window.
+    points, t = _reshape_signal_inputs(
+        rw.kspace[:, 0], rw.kspace[:, 1], rw.kspace[:, 2],
+        rw.times - rw.t_anchor, None)
+    # `t` is elapsed-since-snapshot, which is what the relaxation and
+    # off-resonance factors need -- but the POD weights need ABSOLUTE
+    # sequence time, because that is the frame the motion is defined in.
+    # `get_weights` reconciles the two by adding the trajectory's own
+    # `timeshift`, so point it at this window's anchor. Without this every
+    # window sampled the motion from cycle phase 0 and the readout
+    # deformation disagreed with the one the solver used at the same
+    # instant. Restored afterwards so the caller's object comes back
+    # unchanged.
+    shift = getattr(pod, 'timeshift', None) if pod is not None else None
+    if shift is not None:
+      pod.update_timeshift(float(rw.t_anchor))
+    try:
+      signal = phantom.mri_signal(list(points), t, pod)
+    finally:
+      if shift is not None:
+        pod.update_timeshift(shift)
+    # The receiver's frequency/phase offsets and any per-sample phase shape.
+    signal = rw.demodulate(signal)
+    kspace.append(gather_data(signal) if gather else signal)
+    times.append(rw.times)
+
+  return PulseqSimulation(kspace=kspace, times=times, Mxy=Mxy, Mz=Mz, imp=imp)
 
 
 # ---------------------------------------------------------------------------
 # High-level sequence reader for FEelMRI
 # ---------------------------------------------------------------------------
 
-def read_seq_feelmri(filename) -> Tuple[feelmriSequence, PulseqSequence]:
+def read_seq_feelmri(filename, *, scanner: Optional[Scanner] = None,
+                     validate: bool = True) -> Tuple[feelmriSequence, PulseqSequence]:
   """Backward-compatible wrapper around :func:`import_pulseq`.
 
   Returns ``(feelmri_seq, pulseq_seq)`` so existing callers keep working;
   new callers should prefer :func:`import_pulseq` for the partitioned
   view (with readout windows ready for the dual-path workflow).
+
+  ``scanner`` and ``validate`` are forwarded. ``scanner`` is not optional in
+  practice for anything but 1.5 T: the file carries no B0, so every ppm offset
+  is scaled by the scanner's, and the gamma the file is read with must be the
+  gamma the solver integrates.
   """
-  imp = import_pulseq(filename)
+  imp = import_pulseq(filename, scanner=scanner, validate=validate)
   return imp.feelmri_seq, imp.pulseq_seq

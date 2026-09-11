@@ -124,7 +124,8 @@ if __name__ == '__main__':
   sim  = imp.feelmri_sim_seq
 
   # Diagnostic: report which blocks each SET category covers.
-  for s, name in [(0, 'prepx'), (1, 'prepy'), (100, 'spoiler'), (2, 'excitation'), (3, 'readout')]:
+  for s, name in [(0, 'prep x'), (1, 'prep y'), (100, 'spoiler'),
+                  (2, 'excitation'), (4, 'prephaser'), (3, 'readout')]:
     n = len(imp.filter_blocks(SET=s))
     MPI_print(f"  SET={s} ({name}): {n} block(s)")
 
@@ -132,64 +133,37 @@ if __name__ == '__main__':
   prep_x_idx  = imp.filter_blocks(SET=0)
   prep_y_idx  = imp.filter_blocks(SET=1)
   excite_idx  = imp.filter_blocks(SET=2)
+  prephas_idx = imp.filter_blocks(SET=4)
   readout_idx = imp.filter_blocks(SET=3)
   spoiler_idx = imp.filter_blocks(SET=100)
 
-  def _first_contiguous_group(indices):
-    """Return the longest run of consecutive integers at the start of
-    ``indices``. The writer emits one excitation + one rephaser as two
-    adjacent SET=2 blocks per slice; this picks slice 0's pair without
-    having to know ``n_slices`` at runtime."""
-    if not indices:
-      return []
-    out = [indices[0]]
-    for j in indices[1:]:
-      if j == out[-1] + 1:
-        out.append(j)
-      else:
-        break
-    return out
-
-  ex_group_idx    = _first_contiguous_group(excite_idx)
-  ro_group_idx    = _first_contiguous_group(readout_idx)
+  # The writer emits one excitation + one rephaser as two adjacent SET=2
+  # blocks per slice, so the first contiguous run is slice 0's pair and the
+  # slice count never has to be known here.
+  ex_group_idx    = imp.contiguous_groups(excite_idx)[0]
+  pre_group_idx   = imp.contiguous_groups(prephas_idx)[0] if prephas_idx else []
+  ro_group_idx    = imp.contiguous_groups(readout_idx)[0]
   sp_template_idx = spoiler_idx[0] if spoiler_idx else None
 
-  def _block_total_dur(indices):
-    total = Q_(0.0, 'ms')
-    for j in indices:
-      total = total + sim.blocks[j].dur.to('ms')
-    return total
-
-  ex_dur = _block_total_dur(ex_group_idx)
-  ro_dur = _block_total_dur(ro_group_idx)
-  sp_dur = sim.blocks[sp_template_idx].dur.to('ms') if sp_template_idx is not None else Q_(0.0, 'ms')
+  ex_dur  = imp.duration_of(ex_group_idx)
+  pre_dur = imp.duration_of(pre_group_idx)
+  ro_dur  = imp.duration_of(ro_group_idx)
+  sp_dur = imp.duration_of([sp_template_idx] if sp_template_idx is not None else [])
 
   # Create sequence object
   seq    = Sequence()
   dt_seq = Q_(1e-2, 'ms')  # Time step for sequence blocks (10 us)
 
-  def _copy_clean(idx):
-    """Deep-copy a sim-seq block and clear any auto-set storage flag.
-    Storage flags are added explicitly by the runner where they matter
-    (one snapshot per imaging frame), so any flag stamped by the
-    adapter on prep / readout-anchor blocks is dropped here."""
-    b = sim.blocks[idx].copy()
-    b.store_magnetization = False
-    return b
-
   def _spoiler_copy():
-    """Spoiler block copy with the multi-isochromat dephasing path
-    enabled (`_spoiler=True` triggers ``BlochSolver``'s isochromat
-    expansion). All SET=100 blocks in the writer are built from the
-    same gradient events, so the first one suffices as a template."""
+    # All SET=100 blocks come from the same gradient events, so the first is
+    # a valid template for every spoiler in the sequence.
     if sp_template_idx is None:
       return None
-    b = _copy_clean(sp_template_idx)
-    b._spoiler = True
-    return b
+    return imp.copy_block(sp_template_idx, spoiler=True)
 
   # Time spacing between frames, computed from sim-seq block durations.
-  time_spacing = (parameters.Imaging.TimeSpacing - ex_dur - ro_dur - sp_dur).to('ms')
+  time_spacing = (parameters.Imaging.TimeSpacing
+                  - ex_dur - pre_dur - ro_dur - sp_dur).to('ms')
   print("Time spacing between frames: {:.2f} ms".format(time_spacing.m_as('ms')))
 
   # Dummy steady-state pulses: real excitation, then duration-only
@@ -197,8 +171,8 @@ if __name__ == '__main__':
   # runner's performance shortcut (no need to evolve the spoiler or
   # readout physics during steady-state convergence).
   for _ in range(dummy_pulses):
-    for j in ex_group_idx:
-      seq.add_block(_copy_clean(j), dt=dt_seq)
+    for j in ex_group_idx + pre_group_idx:
+      seq.add_block(imp.copy_block(j))
     seq.add_block(ro_dur, dt=Q_(1, 'ms'))
     seq.add_block(sp_dur, dt=dt_seq)
     seq.add_block(time_spacing, dt=Q_(1, 'ms'))
@@ -206,40 +180,47 @@ if __name__ == '__main__':
   # Sync the sequence to the cardiac-cycle boundary.
   seq.add_block(u_times[-1] - seq.blocks[-1].time_extent[1] % u_times[-1], dt=Q_(1, 'ms'))
 
-  # Tagging prepulses (X then Y) each followed by a spoiler. Prep
-  # blocks come straight from the simulation skeleton; they carry no
-  # readout content.
+  # Tagging preparation: one SPAMM module along x, then one along y, each
+  # followed by a spoiler. Together they give a tag grid. Prep blocks come
+  # straight from the simulation skeleton; they carry no readout content.
   for j in prep_x_idx:
-    seq.add_block(_copy_clean(j), dt=dt_seq)
-  seq.add_block(_spoiler_copy(), dt=dt_seq)
+    seq.add_block(imp.copy_block(j))
+  seq.add_block(_spoiler_copy())
   for j in prep_y_idx:
-    seq.add_block(_copy_clean(j), dt=dt_seq)
-  seq.add_block(_spoiler_copy(), dt=dt_seq)
+    seq.add_block(imp.copy_block(j))
+  seq.add_block(_spoiler_copy())
 
   # Imaging frames: real excitation (snapshot Mxy at the end of the
   # excitation group), then readout-as-delay (already collapsed on
   # `sim`), then real spoiler with multi-isochromat dephasing, then
   # the per-frame timing gap.
   for fr in range(Nb_frames):
-    ex_blks = [_copy_clean(j) for j in ex_group_idx]
+    # Snapshot at the end of the SET=2 group. The writer ends that group on
+    # the slice rephaser, where the gradient moment measured from the
+    # excitation is zero on all three axes -- the only instant at which the
+    # magnetization can be captured for the k-space integral, since
+    # calculate_kspace resets k=0 at the RF and the assembler then applies the
+    # whole trajectory itself. The in-plane prephasers are SET=4 and follow
+    # the snapshot, so their winding reaches the signal only through k.
+    ex_blks = [imp.copy_block(j) for j in ex_group_idx]
     if ex_blks:
       ex_blks[-1].store_magnetization = True
     for b in ex_blks:
-      seq.add_block(b, dt=dt_seq)
+      seq.add_block(b)
+    for j in pre_group_idx:
+      seq.add_block(imp.copy_block(j))
     seq.add_block(ro_dur, dt=Q_(1, 'ms'))
-    seq.add_block(_spoiler_copy(), dt=dt_seq)
+    seq.add_block(_spoiler_copy())
     seq.add_block(time_spacing, dt=Q_(1, 'ms'))
 
   # Bloch solver.
-  # Note: perfect_spoiling=False is required here. The script marks
-  # store_magnetization=True on the rephaser/encoder block (the last
-  # block of `ex`, which is RF-free per write_epi_tagging.py:160-161),
-  # so the transverse magnetization created by the preceding RF block
-  # must survive across the block boundary. With perfect_spoiling=True
-  # (BlochSolver's default, Bloch.py:495) the solver zeros initial_Mxy
-  # on every non-empty block (Bloch.py:642-645), and the captured Mxy
-  # comes out identically zero while Mz still shows a credible
-  # slice-selective profile.
+  # perfect_spoiling=False is passed explicitly because `seq` is rebuilt here
+  # from individual blocks, so it does not carry the explicit_spoiling flag
+  # import_pulseq sets on the sequences it returns. It is required either
+  # way: the script marks store_magnetization=True on the rephaser/encoder
+  # block, which is RF-free, so the transverse magnetization created by the
+  # preceding RF block must survive the block boundary. Zeroing it leaves the
+  # captured Mxy identically zero while Mz still looks credible.
   solver = BlochSolver(seq, phantom,
                        scanner=scanner,
                        M0=1e+9,
@@ -248,8 +229,8 @@ if __name__ == '__main__':
                        delta_B=delta_B0.m_as('mT').reshape((-1, 1)),
                        pod_trajectory=pod_trajectory,
                        perfect_spoiling=False,
-                       isochromat_K=100,
-                       method='magnus2')
+                       isochromat_K=200,
+                       method='cayley_klein')
 
   # Solve for x and y directions
   Mxy, Mz = solver.solve()
@@ -286,7 +267,14 @@ if __name__ == '__main__':
   kspace_points = (traj['kx'].reshape((-1, 1, 1)).astype(np.float32),
                   traj['ky'].reshape((-1, 1, 1)).astype(np.float32),
                   traj['kz'].reshape((-1, 1, 1)).astype(np.float32))
-  kspace_times = 1e-3 * traj['times'].reshape((-1, 1, 1)).astype(np.float32)
+  # traj['times'] is in ms, which is what mri_signal expects (T2 is passed as
+  # ms and phi_dB0 as rad/ms), but it is measured from the start of the .seq
+  # file. The exponentials exp(-t/T2) and exp(i*phi*t) are applied to the
+  # magnetization captured at the excitation, so t has to be measured from the
+  # start of the readout. Same convention as gradient_spoiling.py, which
+  # subtracts traj.t_start.
+  kspace_times = (traj['times'] - traj['times'].min())
+  kspace_times = kspace_times.reshape((-1, 1, 1)).astype(np.float32)
 
   # k-space buffer matches the (N, 1, 1, 1) shape that mri_signal returns
   # for the default as_signal_inputs layout; an additional leading axis
@@ -336,6 +324,11 @@ if __name__ == '__main__':
     mode='adjoint',
     combine=None,
   )
+  # reconstruct_nufft drops the channel axis when there is only one, which is
+  # the single-frame case. Put it back before moving it to the end.
+  Im = np.asarray(Im)
+  if Im.ndim == len(RES):
+    Im = Im[np.newaxis, ...]
   Im = Im.transpose((1,2,3,0)).reshape((RES[0], RES[1], RES[2], 1, -1))  # (Nx, Ny, Nz, enc, C)
   print(Im.shape)
 

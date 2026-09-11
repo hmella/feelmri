@@ -106,7 +106,7 @@ if __name__ == '__main__':
                           rf_pulses=[], 
                           dt_gr=Q_(1e-2, 'ms'), 
                           store_magnetization=False)
-  spoiler._spoiler = True
+  spoiler.spoiler = True
 
   # Generate kspace trajectory
   traj = CartesianStack(FOV=planning.FOV.to('m'),
@@ -142,7 +142,7 @@ if __name__ == '__main__':
                       M0=1e+9, 
                       T1=parameters.Phantom.T1, 
                       T2=parameters.Phantom.T2star, 
-                      delta_B=delta_B0.reshape((-1, 1)),
+                      delta_B=Q_(delta_B0, 'T').m_as('mT').reshape((-1, 1)),
                       pod_trajectory=None,
                       perfect_spoiling=False)
 

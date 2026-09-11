@@ -2,6 +2,7 @@
 Demo low-performance EPI sequence without ramp-sampling.
 """
 
+import os
 import sys
 
 import matplotlib.pyplot as plt
@@ -38,8 +39,9 @@ def main(
     n_y: int = 64,
     slice_thickness: float = 8e-3,
     n_slices: int = 1,
+    ramp_sampling: bool = True,
 ):
-    """Create a basic EPI sequence without ramp-sampling.
+    """Create an EPI sequence with a ramp-sampled readout.
 
     Parameters
     ----------
@@ -62,6 +64,13 @@ def main(
         Slice thickness in meters. Default is 3e-3.
     n_slices : int, optional
         Number of slices. Default is 3.
+    ramp_sampling : bool, optional
+        Sample during the readout ramps instead of only the flat top. The
+        ramps then contribute k-space coverage rather than dead time, which
+        shortens the echo train by about 40% -- worth having when the train
+        is long against T2*. The samples are no longer evenly spaced in k,
+        which the NUFFT reconstruction handles. Default True; False restores
+        the flat-top-only readout.
 
     Returns
     -------
@@ -76,7 +85,7 @@ def main(
     system = pp.Opts(
         max_grad=32,
         grad_unit='mT/m',
-        max_slew=120,
+        max_slew=180,
         slew_unit='T/m/s',
         rf_ringdown_time=30e-6,
         rf_dead_time=100e-6,
@@ -94,8 +103,21 @@ def main(
         delay=system.rf_dead_time
     )
 
+    # Closing pulses, one per SPAMM module. Each is built with the flip angle
+    # it needs: make_block_pulse computes rf.signal at construction, so
+    # assigning rf.flip_angle afterwards does NOT recompute it and both
+    # modules would silently close with the same pulse.
     rf_prep2 = pp.make_block_pulse(
         flip_angle=np.deg2rad(-90),
+        system=system,
+        duration=1000e-6,
+        time_bw_product=4,
+        use='preparation',
+        delay=system.rf_dead_time
+    )
+
+    rf_prep3 = pp.make_block_pulse(
+        flip_angle=np.deg2rad(90),
         system=system,
         duration=1000e-6,
         time_bw_product=4,
@@ -128,21 +150,37 @@ def main(
     delta_ky = 1 / fov_y
     delta_kz = 1 / (slice_thickness * n_slices)
     k_width = n_x * delta_kx
-    adc_dwell = 4e-6
-    adc_duration = n_x * adc_dwell
-    gx_flat_time = adc_duration
-    gx_flat_time = np.ceil(gx_flat_time * 1e5) * 1e-5  # Round-up to the gradient raster
-    gx = pp.make_trapezoid(
-        channel='x',
-        system=system,
-        amplitude=k_width / adc_duration,
-        flat_time=gx_flat_time,
-    )
-    adc = pp.make_adc(
-        num_samples=n_x,
-        duration=adc_duration,
-        delay=gx.rise_time + gx_flat_time / 2 - (adc_duration - adc_dwell) / 2,
-    )
+    if ramp_sampling:
+        # Shortest trapezoid carrying the required k-space area, then an ADC
+        # spanning all of it. The ramps read k-space instead of idling, so the
+        # echo is set by the gradient area and the hardware limits rather than
+        # by the dwell time.
+        gx = pp.make_trapezoid(channel='x', system=system, area=k_width)
+        gx_duration = gx.rise_time + gx.flat_time + gx.fall_time
+        adc_dwell = np.floor(gx_duration / n_x / system.adc_raster_time) \
+            * system.adc_raster_time
+        adc_duration = n_x * adc_dwell
+        adc = pp.make_adc(
+            num_samples=n_x,
+            duration=adc_duration,
+            delay=(gx_duration - adc_duration) / 2,
+        )
+    else:
+        adc_dwell = 4e-6
+        adc_duration = n_x * adc_dwell
+        gx_flat_time = adc_duration
+        gx_flat_time = np.ceil(gx_flat_time * 1e5) * 1e-5  # Round-up to the gradient raster
+        gx = pp.make_trapezoid(
+            channel='x',
+            system=system,
+            amplitude=k_width / adc_duration,
+            flat_time=gx_flat_time,
+        )
+        adc = pp.make_adc(
+            num_samples=n_x,
+            duration=adc_duration,
+            delay=gx.rise_time + gx_flat_time / 2 - (adc_duration - adc_dwell) / 2,
+        )
 
     # Pre-phasing gradients
     pre_time = 8e-4
@@ -150,10 +188,11 @@ def main(
     gz_reph = pp.make_trapezoid(channel='z', system=system, area=-gz.area / 2, duration=pre_time)
     gy_pre = pp.make_trapezoid(channel='y', system=system, area=-n_y / 2 * delta_ky, duration=pre_time)
 
-    # Phase blip in the shortest possible time
-    gy_blip_duration = 2 * np.sqrt(delta_ky / system.max_slew)
-    gy_blip_duration = np.ceil(gy_blip_duration / 10e-6) * 10e-6
-    gy = pp.make_trapezoid(channel='y', system=system, area=delta_ky, duration=gy_blip_duration)
+    # Phase blip in the shortest possible time. Let make_trapezoid pick the
+    # duration: the closed form 2*sqrt(area/slew) ignores the gradient raster
+    # that rise and fall are rounded onto, so it under-estimates and fails the
+    # area assertion whenever the slew limit is raised.
+    gy = pp.make_trapezoid(channel='y', system=system, area=delta_ky)
 
     # Gradient spoiling
     f = 2
@@ -161,7 +200,7 @@ def main(
     gy_spoil = pp.make_trapezoid(channel='y', area=f * 2 * n_y * delta_ky, system=system)
     gz_spoil = pp.make_trapezoid(channel='z', area=f * 4 / slice_thickness, system=system)
 
-    # Loop over slices
+    # Tagging preparation: 90 - tag gradient - 90, then a spoiler.
     seq.add_block(rf_prep1, pp.make_label(type='SET', label='SET', value=0))
     # seq.add_block(pp.make_delay(system.rf_dead_time))
     seq.add_block(g_tag_x, pp.make_label(type='SET', label='SET', value=0))
@@ -170,19 +209,26 @@ def main(
     # seq.add_block(pp.make_delay(system.rf_dead_time))
     seq.add_block(gx_spoil, gy_spoil, gz_spoil, pp.make_label(type='SET', label='SET', value=100))
 
-    rf_prep2.flip_angle = np.deg2rad(90)
+    # Second SPAMM module, along y, applied to the already-tagged Mz. The two
+    # together give Mz ~ cos(kx x) cos(ky y): a tag grid.
     seq.add_block(rf_prep1, pp.make_label(type='SET', label='SET', value=1))
-    # seq.add_block(pp.make_delay(system.rf_dead_time))
     seq.add_block(g_tag_y, pp.make_label(type='SET', label='SET', value=1))
-    # seq.add_block(pp.make_delay(system.rf_dead_time))
-    seq.add_block(rf_prep2, pp.make_label(type='SET', label='SET', value=1))
-    # seq.add_block(pp.make_delay(system.rf_dead_time))
+    seq.add_block(rf_prep3, pp.make_label(type='SET', label='SET', value=1))
     seq.add_block(gx_spoil, gy_spoil, gz_spoil, pp.make_label(type='SET', label='SET', value=100))
 
     for i_slice in range(n_slices):
         rf.freq_offset = gz.amplitude * slice_thickness * (i_slice - (n_slices - 1) / 2)
+        # The slice rephaser is played on its own, and the in-plane prephasers
+        # follow it as SET=4. That puts a block boundary where the gradient
+        # moment measured from the excitation is exactly zero on all three
+        # axes, which is the only instant at which the magnetization can be
+        # snapshotted for the k-space integral: calculate_kspace resets k=0 at
+        # the RF, so any moment already accumulated when the snapshot is taken
+        # gets applied a second time by the assembler. Playing gz_reph and the
+        # prephasers together, as one block, leaves no such boundary.
         seq.add_block(rf, gz, pp.make_label(type='SET', label='SET', value=2))
-        seq.add_block(gx_pre, gy_pre, gz_reph, pp.make_label(type='SET', label='SET', value=2))
+        seq.add_block(gz_reph, pp.make_label(type='SET', label='SET', value=2))
+        seq.add_block(gx_pre, gy_pre, pp.make_label(type='SET', label='SET', value=4))
         for _ in range(n_y):
             seq.add_block(gx, adc, pp.make_label(type='SET', label='SET', value=3))  # Read one line of k-space
             seq.add_block(gy, pp.make_label(type='SET', label='SET', value=3))  # Phase blip
@@ -243,9 +289,18 @@ if __name__ == '__main__':
                             transform_name='Transform1',
                             length_units=parameters.Formatting.units)
 
-    main(plot=True,
+    # The checked-in epi_pypulseq.seq is a v1.4.2 fixture the adapter tests
+    # read, so overwriting it from a test run would silently change what they
+    # measure. Write next to it instead when running under the test harness.
+    if os.getenv('FEELMRI_FAST_TEST', '0') == '1':
+      seq_out = script_path/'output'/'epi_pypulseq_generated.seq'
+      seq_out.parent.mkdir(parents=True, exist_ok=True)
+    else:
+      seq_out = script_path/'pulseq/epi_pypulseq.seq'
+
+    main(plot=os.getenv('FEELMRI_FAST_TEST', '0') != '1',
          write_seq=True,
-         seq_filename=script_path/'pulseq/epi_pypulseq.seq',
+         seq_filename=seq_out,
          fov = tuple(2*planning.FOV[:-1].m_as('m')),
          n_x = parameters.Imaging.RES[0],
          n_y = parameters.Imaging.RES[1],

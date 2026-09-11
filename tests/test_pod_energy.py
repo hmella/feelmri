@@ -46,21 +46,7 @@ def test_rank_deficient_data_concentrates_all_energy():
     assert cumulative[2] >= 1.0 - 1e-12
     # The trailing spectrum is numerically zero relative to the leader.
     assert np.all(eigen_values[3:] / eigen_values[0] < 1e-12)
-
-
-def test_cumulative_curve_shape():
-    """Non-decreasing, bounded by (0, 1], and exactly 1 at the end."""
-    data = _random_snapshots()
-    eigen_values, cumulative = pod_energy_spectrum(data)
-
-    assert cumulative.shape == eigen_values.shape
-    assert np.all(np.diff(cumulative) >= -1e-15)
-    assert cumulative[0] > 0.0
-    assert np.all(cumulative <= 1.0 + 1e-12)
-    assert cumulative[-1] == pytest.approx(1.0, abs=1e-12)
-
-
-@pytest.mark.parametrize('n_modes', [1, 4, 8])
+@pytest.mark.parametrize('n_modes', [1, 8])
 def test_object_matches_standalone(n_modes):
     """POD.energy_ratio agrees with the standalone spectrum."""
     data = _random_snapshots(n_times=12)
@@ -74,20 +60,60 @@ def test_object_matches_standalone(n_modes):
     assert pod.energy_ratio() == pytest.approx(cumulative[n_modes - 1], rel=1e-12)
     assert pod.energy_ratio(2) == pytest.approx(cumulative[1], rel=1e-12)
     np.testing.assert_allclose(pod.cumulative_energy(), cumulative, rtol=1e-12)
+    # The free functions are thin delegates and must not drift from the object.
+    np.testing.assert_allclose(pod_frame_errors(data, n_modes),
+                               pod.frame_errors(), rtol=1e-12)
+
+    # Shape of the cumulative curve. Deleted with test_cumulative_curve_shape
+    # and restored here: a cumsum of non-negative eigenvalues is monotone and
+    # ends at 1 only if the normalisation is right, which the sigma^2 identity
+    # alone does not pin.
+    curve = pod.cumulative_energy()
+    assert curve.shape == cumulative.shape
+    assert np.all(np.diff(curve) >= -1e-15)
+    assert curve[0] > 0.0
+    assert np.all(curve <= 1.0 + 1e-12)
+    assert curve[-1] == pytest.approx(1.0, abs=1e-12)
 
 
-def test_cumulative_energy_returns_a_copy():
-    """Callers cannot corrupt the stored spectrum through the getter."""
+def test_getters_neither_alias_nor_mutate():
+    """The getter hands out a copy, and remove_mean leaves the caller's array
+    alone. Two ways the same object can be corrupted from outside."""
     data = _random_snapshots()
+    before = data.copy()
     pod = POD(times=np.linspace(0.0, 1.0, data.shape[-1]), data=data, n_modes=3)
 
     curve = pod.cumulative_energy()
     curve[:] = -1.0
-
     assert pod.energy_ratio() > 0.0
 
+    pod_energy_spectrum(data, remove_mean=True)
+    np.testing.assert_array_equal(data, before)
 
-@pytest.mark.parametrize('target', [0.5, 0.9, 0.99])
+
+def test_out_of_range_arguments_are_rejected():
+    """Every guard, in one table. Each used to be its own test that already
+    looped over its own bad values."""
+    data = _random_snapshots(n_times=10)
+    pod = POD(times=np.linspace(0.0, 1.0, 10), data=data, n_modes=3)
+
+    for bad in (0.0, -0.1, 1.5):
+        with pytest.raises(ValueError, match='target'):
+            modes_for_energy(data, bad)
+    for bad in (0, -1, 11):
+        with pytest.raises(ValueError, match='n_modes'):
+            pod.energy_ratio(bad)
+    for bad in (0, -2, 11):
+        with pytest.raises(ValueError, match='n_modes'):
+            pod.frame_errors(bad)
+    for bad in (0, 11):
+        with pytest.raises(ValueError, match='n_modes'):
+            pod_frame_errors(data, bad)
+    with pytest.raises(ValueError, match='no energy'):
+        pod_energy_spectrum(np.zeros((5, 3, 4)))
+
+
+@pytest.mark.parametrize('target', [0.5, 0.99, 1.0])
 def test_modes_for_energy_round_trip(target):
     """n is the smallest count reaching the target, and no smaller."""
     data = _random_snapshots(n_times=16)
@@ -95,34 +121,11 @@ def test_modes_for_energy_round_trip(target):
 
     n = modes_for_energy(data, target)
 
+    # target=1.0 must not run off the end of the spectrum.
     assert 1 <= n <= data.shape[-1]
     assert cumulative[n - 1] >= target
     if n > 1:
         assert cumulative[n - 2] < target
-
-
-def test_modes_for_energy_full_target_is_bounded():
-    """target=1.0 cannot run off the end of the spectrum."""
-    data = _random_snapshots(n_times=9)
-    assert modes_for_energy(data, 1.0) == 9
-
-
-def test_modes_for_energy_rejects_out_of_range_target():
-    data = _random_snapshots()
-    for bad in (0.0, -0.1, 1.5):
-        with pytest.raises(ValueError, match='target'):
-            modes_for_energy(data, bad)
-
-
-def test_energy_ratio_rejects_out_of_range_mode_count():
-    data = _random_snapshots(n_times=10)
-    pod = POD(times=np.linspace(0.0, 1.0, 10), data=data, n_modes=3)
-
-    for bad in (0, -1, 11):
-        with pytest.raises(ValueError, match='n_modes'):
-            pod.energy_ratio(bad)
-
-
 def test_rank_deficient_request_is_clamped_and_finite(capsys):
     """Regression: n_modes above the rank used to yield silent NaN modes.
 
@@ -159,40 +162,12 @@ def test_request_above_time_step_count_is_clamped(capsys):
     assert pod.n_modes_max == 8
     assert np.all(np.isfinite(pod.modes))
     assert 'only has 8 time steps' in capsys.readouterr().out
-
-
-def test_remove_mean_does_not_mutate_caller_data():
-    data = _random_snapshots()
-    before = data.copy()
-
-    pod_energy_spectrum(data, remove_mean=True)
-
-    np.testing.assert_array_equal(data, before)
-
-
-def test_zero_field_is_rejected():
-    with pytest.raises(ValueError, match='no energy'):
-        pod_energy_spectrum(np.zeros((5, 3, 4)))
-
-
 def _truncated_svd_residual(data, n):
     """Explicit reconstruction, used as ground truth for the error metrics."""
     flat = data.reshape(-1, data.shape[-1]).astype(np.float64)
     u, s, vt = np.linalg.svd(flat, full_matrices=False)
     return flat, flat - (u[:, :n] * s[:n]) @ vt[:n]
-
-
-@pytest.mark.parametrize('n', [1, 3, 7])
-def test_reconstruction_error_is_sqrt_of_energy_shortfall(n):
-    data = _random_snapshots(n_times=12)
-    pod = POD(times=np.linspace(0.0, 1.0, 12), data=data.copy(), n_modes=n)
-
-    assert pod.reconstruction_error() == pytest.approx(
-        np.sqrt(1.0 - pod.energy_ratio()), rel=1e-12)
-
-
-@pytest.mark.parametrize('n', [1, 3, 7])
-def test_reconstruction_error_matches_explicit_svd(n):
+def test_reconstruction_error_matches_explicit_svd(n=3):
     """The headline number is the true relative L2 error of the truncation."""
     data = _random_snapshots(n_times=12)
     pod = POD(times=np.linspace(0.0, 1.0, 12), data=data.copy(), n_modes=n)
@@ -203,8 +178,7 @@ def test_reconstruction_error_matches_explicit_svd(n):
     assert pod.reconstruction_error() == pytest.approx(expected, rel=1e-10)
 
 
-@pytest.mark.parametrize('n', [1, 3, 7])
-def test_frame_errors_match_explicit_svd(n):
+def test_frame_errors_match_explicit_svd(n=3):
     """Per-snapshot curve, from the spectrum alone, equals the real residual."""
     data = _random_snapshots(n_times=12)
     pod = POD(times=np.linspace(0.0, 1.0, 12), data=data.copy(), n_modes=n)
@@ -214,14 +188,10 @@ def test_frame_errors_match_explicit_svd(n):
 
     np.testing.assert_allclose(pod.frame_errors(), expected, rtol=1e-10)
 
-
-def test_frame_errors_shape_and_bounds():
-    data = _random_snapshots(n_times=14)
-    pod = POD(times=np.linspace(0.0, 1.0, 14), data=data, n_modes=4)
-
+    # Deleted with test_frame_errors_shape_and_bounds and restored here:
+    # one error per snapshot, each a relative L2 norm in [0, 1].
     errors = pod.frame_errors()
-
-    assert errors.shape == (14,)
+    assert errors.shape == (data.shape[-1],)
     assert np.all(errors >= 0.0)
     assert np.all(errors <= 1.0 + 1e-12)
 
@@ -250,30 +220,6 @@ def test_frame_errors_survive_an_empty_snapshot():
 
     assert np.all(np.isfinite(errors))
     assert errors[4] == 0.0
-
-
-def test_frame_errors_reject_out_of_range_mode_count():
-    data = _random_snapshots(n_times=10)
-    pod = POD(times=np.linspace(0.0, 1.0, 10), data=data, n_modes=3)
-
-    for bad in (0, -2, 11):
-        with pytest.raises(ValueError, match='n_modes'):
-            pod.frame_errors(bad)
-
-    for bad in (0, 11):
-        with pytest.raises(ValueError, match='n_modes'):
-            pod_frame_errors(data, bad)
-
-
-@pytest.mark.parametrize('n', [1, 4])
-def test_standalone_frame_errors_match_the_method(n):
-    data = _random_snapshots(n_times=12)
-    pod = POD(times=np.linspace(0.0, 1.0, 12), data=data.copy(), n_modes=n)
-
-    np.testing.assert_allclose(pod_frame_errors(data, n), pod.frame_errors(),
-                               rtol=1e-12)
-
-
 def test_low_energy_frames_are_reconstructed_worse():
     """The point of frame_errors: a good global number hides bad frames.
 

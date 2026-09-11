@@ -1,0 +1,41 @@
+{
+  "duration_ms": 43.0,
+  "first_adc_ms": 10.43125,
+  "kspace_file_max_1_per_m": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "kspace_file_min_1_per_m": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "kspace_max_1_per_m": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "kspace_min_1_per_m": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "last_adc_ms": 42.96874999999999,
+  "n_adc_samples": 32,
+  "n_blocks": 17,
+  "n_gradients": [
+    0,
+    0,
+    0
+  ],
+  "n_readouts": 4,
+  "n_rf": 5,
+  "n_stored_columns": 4,
+  "peak_gradient_mT_per_m": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "timing_errors": 0
+}

@@ -1,10 +1,18 @@
 """
-Functional tests that verify FEelMRI examples run successfully.
+The MPI leg of the example runner.
 
-These tests ensure that example scripts (e.g., 4dflow.py, phase_contrast.py)
-execute without errors — a form of regression testing for the full workflow.
+``test_examples_run.py`` runs each example serially; this file runs the
+subset that supports it under ``mpirun -n 2``, so a rank-dependent failure
+(an ungated collective, a rank-0-only array) surfaces as a non-zero exit.
+The physics equivalence between rank counts is a different question and is
+tested directly in ``test_mpi_equivalence.py``.
+
+These are subprocess tests: 11 scripts, ~74 s, a third of the suite's wall
+clock. They are marked ``slow`` so ``-m "not slow"`` is a fast suite, and
+``requires_mpi`` because they need ``mpirun`` on PATH.
 """
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -13,11 +21,13 @@ import pytest
 
 EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "examples"
 
-# Example scripts run their own internal Bloch + signal-assembly
-# pipeline via subprocess with a 180 s per-script budget. They
-# intentionally exceed the new global 30 s pytest-timeout default;
-# apply a per-test 240 s override to every parametrisation here.
-pytestmark = pytest.mark.timeout(240)
+# Each script runs a full Bloch + signal-assembly pipeline in a subprocess
+# with a 180 s budget, well past the global 30 s pytest-timeout default.
+pytestmark = [
+    pytest.mark.slow,
+    pytest.mark.requires_mpi,
+    pytest.mark.timeout(240),
+]
 
 
 @pytest.mark.parametrize("script", [
@@ -34,12 +44,10 @@ pytestmark = pytest.mark.timeout(240)
     "water_and_fat.py",
 ])
 def test_example_parallel(script):
-    """
-    Run each example script using the system Python interpreter.
+    """Run one example under ``mpirun -n 2`` and require a clean exit."""
+    if shutil.which('mpirun') is None:
+        pytest.skip('mpirun not on PATH')
 
-    This test passes if the script runs without throwing an exception.
-    The stdout/stderr are captured for debugging if it fails.
-    """
     script_path = EXAMPLES_DIR / script
     assert script_path.exists(), f"Example script not found: {script_path}"
 

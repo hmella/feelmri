@@ -88,6 +88,13 @@ def test_reference_element_has_reference_volume(cell_type):
 # assembler takes its absolute value -- so a P1 tetrahedron cannot detect an
 # ordering error by volume. That is exactly why the meshio/Basix mismatch was
 # invisible on ``tetra`` meshes, and why the rest of the suite never caught it.
+# Only `tetra` is permutation-blind: a permutation of a SIMPLEX's vertices
+# changes the sign of det J and nothing else, and the code takes abs. That
+# argument does not extend to a prism -- swapping two wedge vertices gives a
+# twisted cell whose det J changes sign inside it, and the measured volume
+# drops from 0.5 to 0.2887. So wedge belongs here even though its meshio ->
+# Basix permutation is the identity today: this is the test that keeps
+# test_reference_element_has_reference_volume[wedge] from passing for free.
 ORDER_SENSITIVE = [c for c in CELL_TYPES if c != 'tetra']
 
 
@@ -122,72 +129,18 @@ def test_scrambled_ordering_is_detectable(cell_type):
 # 2. Structured multi-element meshes with an analytically known volume
 # --------------------------------------------------------------------------
 
-def _unit_cube_grid(n=2, scale=1e-2):
-  """(n+1)^3 lattice of points spanning a cube of side ``n * scale``."""
-  c = np.arange(n + 1, dtype=np.float64) * scale
-  pts = np.array([[x, y, z] for z in c for y in c for x in c])
-  idx = lambda i, j, k: i + (n + 1) * (j + (n + 1) * k)
-  # VTK hexahedron order: bottom face walked cyclically, then the top face.
-  hexes = [[idx(i, j, k), idx(i + 1, j, k), idx(i + 1, j + 1, k), idx(i, j + 1, k),
-            idx(i, j, k + 1), idx(i + 1, j, k + 1),
-            idx(i + 1, j + 1, k + 1), idx(i, j + 1, k + 1)]
-           for k in range(n) for j in range(n) for i in range(n)]
-  return pts, np.asarray(hexes, dtype=np.int64), float((n * scale) ** 3)
-
 
 def _build_mesh(cell_type, n=2, scale=1e-2):
-  """Structured mesh of ``cell_type`` filling a cube, plus its exact volume."""
-  pts, hexes, volume = _unit_cube_grid(n, scale)
+  """Structured mesh of ``cell_type`` filling a cube, plus its exact volume.
 
-  if cell_type == 'hexahedron':
-    return pts, hexes, volume
+  The geometry lives in ``_phantom_fixtures`` so this file and the ones that
+  build a phantom from the same cube cannot drift apart on the VTK hexahedron
+  order, the six-tetrahedron cut or the tetra10 midpoint order.
+  """
+  from _phantom_fixtures import cube_cells
+  return cube_cells(cell_type, n=n, scale=scale)
 
-  if cell_type == 'wedge':
-    # Cut each cube along the bottom-face diagonal into two prisms.
-    # VTK wedge: bottom triangle (0,1,2), top triangle (3,4,5) directly above.
-    cells = []
-    for h in hexes:
-      cells.append([h[0], h[1], h[2], h[4], h[5], h[6]])
-      cells.append([h[0], h[2], h[3], h[4], h[6], h[7]])
-    return pts, np.asarray(cells, dtype=np.int64), volume
-
-  # Six-tetrahedron decomposition of each cube.
-  tets = []
-  for h in hexes:
-    for a, b, c, d in ((0, 1, 2, 6), (0, 2, 3, 6), (0, 3, 7, 6),
-                       (0, 7, 4, 6), (0, 4, 5, 6), (0, 5, 1, 6)):
-      tets.append([h[a], h[b], h[c], h[d]])
-  tets = np.asarray(tets, dtype=np.int64)
-
-  if cell_type == 'tetra':
-    return pts, tets, volume
-
-  # tetra10: append edge midpoints in VTK edge order.
-  pts = list(map(list, pts))
-  midpoints = {}
-
-  def mid(u, v):
-    key = (min(u, v), max(u, v))
-    if key not in midpoints:
-      midpoints[key] = len(pts)
-      pts.append(list(0.5 * (np.asarray(pts[u]) + np.asarray(pts[v]))))
-    return midpoints[key]
-
-  cells = [list(t) + [mid(t[0], t[1]), mid(t[1], t[2]), mid(t[0], t[2]),
-                      mid(t[0], t[3]), mid(t[1], t[3]), mid(t[2], t[3])]
-           for t in tets]
-  return np.asarray(pts, dtype=np.float64), np.asarray(cells, dtype=np.int64), volume
-
-
-@pytest.mark.parametrize('cell_type', CELL_TYPES)
-def test_structured_mesh_volume_matches_analytic(cell_type):
-  """A structured mesh filling a cube must measure the cube's volume."""
-  nodes, elems, volume = _build_mesh(cell_type)
-  measured = _measured_volume(elems, nodes, cell_type, 2)
-  assert measured == pytest.approx(volume, rel=1e-4)
-
-
-@pytest.mark.parametrize('cell_type', CELL_TYPES)
+@pytest.mark.parametrize('cell_type', ORDER_SENSITIVE)
 def test_volume_is_independent_of_quadrature_degree(cell_type):
   """Refining the quadrature must not move the measured volume.
 
@@ -234,24 +187,6 @@ def _cube_signal(tmp_path, cell_type, kx):
   pts = [np.ascontiguousarray(kx.reshape(shape), dtype=np.float32), zeros, zeros]
   t3 = np.zeros(shape, dtype=np.float32)
   return np.asarray(phantom.signal(pts, t3, None)).reshape(-1), volume
-
-
-@pytest.mark.parametrize('cell_type', CELL_TYPES)
-def test_cube_signal_at_k0_equals_volume(tmp_path, cell_type):
-  """With constant M_xy = 1 and no relaxation, S(0) is the domain volume.
-
-  This is the ordering contract seen through the full quadrature path --
-  ``wq``, ``xq`` and the ``S_global_`` projection -- not just element sizing.
-  """
-  pytest.importorskip('mpi4py')
-  pytest.importorskip('pymetis')
-  pytest.importorskip('meshio')
-
-  S, volume = _cube_signal(tmp_path, cell_type, np.array([0.0], dtype=np.float32))
-  assert complex(S[0]).real == pytest.approx(volume, rel=1e-4)
-  assert abs(complex(S[0]).imag) < 1e-6 * volume
-
-
 def test_cube_signal_agrees_across_cell_types(tmp_path):
   """All four discretisations of the same cube must give the same S(k).
 
@@ -264,7 +199,15 @@ def test_cube_signal_agrees_across_cell_types(tmp_path):
 
   # Well inside the first lobe, where the quadrature is comfortably resolved.
   kx = np.array([0.0, 40.0, 80.0], dtype=np.float32)
-  results = {c: _cube_signal(tmp_path, c, kx)[0] for c in CELL_TYPES}
+  computed = {c: _cube_signal(tmp_path, c, kx) for c in CELL_TYPES}
+  results = {c: S for c, (S, _v) in computed.items()}
+  volume = computed['tetra'][1]
+
+  # Anchor the comparison absolutely first: with constant M_xy = 1 and no
+  # relaxation, S(0) is the domain volume. Without this the four could agree
+  # on a wrong answer.
+  assert complex(results['tetra'][0]).real == pytest.approx(volume, rel=1e-4)
+  assert abs(complex(results['tetra'][0]).imag) < 1e-6 * volume
 
   reference = results['tetra']
   for cell_type, S in results.items():

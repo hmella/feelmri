@@ -13,10 +13,14 @@ import pytest
 
 EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "examples"
 
-# Example scripts run their own internal pipeline via subprocess with
-# a 180 s per-script budget. They intentionally exceed the new global
-# 30 s pytest-timeout default; apply a 240 s per-test override.
-pytestmark = pytest.mark.timeout(240)
+# Each script runs a full pipeline in a subprocess with a 180 s budget,
+# well past the global 30 s pytest-timeout default. Measured, the 13 of
+# them are 97 s -- half the suite's wall clock -- so they carry `slow`
+# and leave `-m "not slow"` a fast suite. CI does not deselect them.
+pytestmark = [
+    pytest.mark.slow,
+    pytest.mark.timeout(240),
+]
 
 
 @pytest.mark.parametrize("script", [
@@ -31,6 +35,12 @@ pytestmark = pytest.mark.timeout(240)
     "trajectories.py",    
     "spamm.py",
     "water_and_fat.py",
+    # Both exit 0 with a message when pypulseq is absent, so they are safe to
+    # list unconditionally. The writer redirects its .seq under
+    # FEELMRI_FAST_TEST so it cannot overwrite the tracked fixture the
+    # adapter tests read.
+    "pulseq_write_epi_tagging.py",
+    "pulseq_run_epi_tagging.py",
 ])
 def test_example_runs(script):
     """
