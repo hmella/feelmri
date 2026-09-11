@@ -14,7 +14,7 @@ import pytest
 EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "examples"
 
 # Each script runs a full pipeline in a subprocess with a 180 s budget,
-# well past the global 30 s pytest-timeout default. Measured, the 15 of
+# well past the global 30 s pytest-timeout default. Measured, the 16 of
 # them are 97 s -- half the suite's wall clock -- so they carry `slow`
 # and leave `-m "not slow"` a fast suite. CI does not deselect them.
 pytestmark = [
@@ -36,6 +36,7 @@ pytestmark = [
     "pvsm_parameters.py",
     "trajectories.py",    
     "spamm.py",
+    "t2_prime_spin_echo.py",
     "water_and_fat.py",
     # Both exit 0 with a message when pypulseq is absent, so they are safe to
     # list unconditionally. The writer redirects its .seq under
