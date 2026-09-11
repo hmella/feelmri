@@ -35,6 +35,8 @@ from __future__ import annotations
 
 import warnings
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 from pint import Quantity
@@ -746,6 +748,20 @@ def _concomitant_field_mT(positions, G, B0_mT):
   return (Bx**2 + By**2) / (2.0 * B0_mT)
 
 
+def _shifted_phantom(phantom, shift, _cache={}):
+  """The same node cloud translated rigidly, as a separate phantom."""
+  import meshio as _meshio
+  import tempfile
+  key = (id(phantom), tuple(shift))
+  if key not in _cache:
+    points = phantom.local_nodes.astype(np.float64) + np.asarray(shift)
+    cells = np.asarray(phantom.local_elements)
+    path = Path(tempfile.mkdtemp()) / 'shifted.vtu'
+    _meshio.write(str(path), _meshio.Mesh(points, [('tetra', cells)]))
+    _cache[key] = FEMPhantom(path=str(path))
+  return _cache[key]
+
+
 def _precess(phantom, block, dtype='float64', method='magnus2', **solver_kwargs):
   seq = make_single_block_sequence(block)
   solver = BlochSolver(
@@ -1166,3 +1182,190 @@ def test_the_new_features_hold_up_at_the_default_float32(wide_phantom,
       dtype='float32', t2_prime=Quantity(20.0, 'ms'), spectral_bins=32)
   Mxy, _ = solver.solve()
   assert abs(abs(Mxy[0, 0]) - np.exp(-0.5)) < 1e-3
+
+
+# ---------------------------------------------------------------------------
+# 6. Second-audit regressions
+# ---------------------------------------------------------------------------
+#
+# Each of these reproduces a defect the second audit found in the first
+# audit's work. The first two used to crash or hang rather than fail.
+
+
+def test_a_wrong_length_attribute_raises_instead_of_corrupting_the_heap(
+        minimal_phantom):
+  """The kernel sizes everything from r0.rows() and validates nothing else, so
+  a short array is an out-of-bounds WRITE under -DNDEBUG -DEIGEN_NO_DEBUG.
+
+  Reassigning a public attribute between solves is the reachable way in, and
+  a scalar is the exact spelling the constructor accepts. Before the fix this
+  aborted the process with `free(): invalid next size (fast)`.
+  """
+  seq = make_single_block_sequence(make_empty_block(2.0, dt_ms=0.5))
+  solver = BlochSolver(
+    seq, minimal_phantom, T1=Quantity(1e9, 'ms'), T2=Quantity(50.0, 'ms'),
+    initial_Mxy=1.0 + 0.0j, initial_Mz=0.0, perfect_spoiling=False,
+    dtype='float64')
+  solver.solve()
+
+  n_nodes = minimal_phantom.local_nodes.shape[0]
+  for attribute, value in (('initial_Mxy', 0.0 + 0.0j),
+                           ('initial_Mz', 1.0),
+                           ('delta_B', np.zeros((n_nodes + 3, 1)))):
+    fresh = BlochSolver(
+      seq, minimal_phantom, T1=Quantity(1e9, 'ms'), T2=Quantity(50.0, 'ms'),
+      initial_Mxy=1.0 + 0.0j, initial_Mz=0.0, perfect_spoiling=False,
+      dtype='float64')
+    fresh.solve()
+    setattr(fresh, attribute, value)
+    with pytest.raises(ValueError, match=attribute):
+      fresh.solve()
+
+
+def test_a_failed_solve_does_not_tear_the_sub_ensemble(minimal_phantom):
+  """A solve() that raises midway must leave the carried ensemble where the
+  previous call left it, so a retry reproduces the clean run.
+
+  The resume path used to alias self._bin_Mxy rather than copy it, and the
+  block loop writes in place -- so a failure left the ensemble half-advanced
+  while the stamp still described the state before the call, and the next
+  solve() resumed from it silently. Measured 0.2416 error, no warning.
+  """
+  def build():
+    seq = Sequence()
+    for _ in range(4):
+      block = make_empty_block(10.0, dt_ms=10.0)
+      block.store_magnetization = True
+      seq.add_block(block)
+    return seq
+
+  def make():
+    return BlochSolver(
+      build(), minimal_phantom, T1=Quantity(1e9, 'ms'), T2=Quantity(1e9, 'ms'),
+      initial_Mxy=1.0 + 0.0j, initial_Mz=0.0, perfect_spoiling=False,
+      dtype='float64', t2_prime=Quantity(20.0, 'ms'), spectral_bins=16)
+
+  reference = np.abs(make().solve()[0][0])
+
+  solver = make()
+  solver.solve(start=0, end=1)
+
+  class _Boom:
+    def m_as(self, *_args, **_kwargs):
+      raise RuntimeError('injected failure mid-loop')
+
+  block = solver.sequence.blocks[2]
+  saved, block.discrete_times = block.discrete_times, _Boom()
+  with pytest.raises(RuntimeError):
+    solver.solve(start=1, end=4)
+  block.discrete_times = saved
+
+  retry = np.abs(solver.solve(start=1, end=4)[0][0])
+  np.testing.assert_allclose(retry, reference[1:], atol=1e-12)
+
+
+def test_a_non_finite_b1_map_is_refused_by_the_kernel_too(minimal_phantom):
+  """-Ofast implies -ffinite-math-only, under which `v != v`, std::isnan and
+  Eigen's allFinite() are all folded to false. The kernel's guard was
+  therefore dead code and a NaN b1_map produced a NaN magnetization.
+
+  Exercised through the kernel directly, since the Python check would
+  otherwise fire first and the C++ one would never be reached.
+  """
+  from feelmri.BlochSimulator import solve_mri_f64
+
+  n_nodes, n_time = 4, 3
+  args = dict(
+    r0=np.zeros((n_nodes, 3)), T1=np.full((n_nodes, 1), 1e9),
+    T2=np.full((n_nodes, 1), 1e9), delta_B=np.zeros((n_nodes, 1)),
+    M0=1.0, gamma=267.5, rf_all=np.full((n_time, 1), 0.01 + 0j),
+    G_all=np.asfortranarray(np.zeros((n_time, 3))), dt=np.full(n_time, 0.01),
+    regime_idx=np.ones((n_time, 1), dtype=bool),
+    Mxy_initial=np.zeros((n_nodes, 1), dtype=complex),
+    Mz_initial=np.ones((n_nodes, 1)),
+    modes=np.asfortranarray(np.zeros((0, 0))), weights=np.zeros((0, 0)),
+    has_traj=False, order=2, Bz_old_init=np.zeros((n_nodes, 1)),
+    rf_old_init=0j)
+
+  solve_mri_f64(**args, b1_map=np.ones(n_nodes, dtype=complex))
+  for poison in (np.nan, np.inf):
+    for component in (poison, 1 + poison * 1j):
+      bad = np.ones(n_nodes, dtype=complex)
+      bad[1] = component
+      with pytest.raises(Exception, match='non-finite'):
+        solve_mri_f64(**args, b1_map=bad)
+
+
+def test_a_spoiler_block_solves_with_the_other_features_on(minimal_phantom):
+  """The spoiler branch carries a SECOND concomitant Magnus seed, derived from
+  the jittered isochromat positions, and its own np.repeat of b1_map. Nothing
+  else in the suite solves a spoiler block at all, so both were dead code.
+
+  With no gradient the jitter cannot change the field, so spoiler=True must
+  equal spoiler=False exactly -- and all three integrators must agree with the
+  gradient on, which is the probe for a missing seed mirror since order 0 never
+  reads the seed.
+  """
+  def run(spoiler, amplitude, method='magnus2', **kwargs):
+    block = _gradient_block((amplitude, -amplitude, amplitude), 3.0)
+    block.spoiler = spoiler
+    seq = Sequence()
+    pulse = make_hard_pulse_block(np.pi / 2, dur_ms=0.05)
+    pulse.store_magnetization = False
+    seq.add_block(pulse)
+    seq.add_block(block)
+    solver = BlochSolver(
+      seq, minimal_phantom, T1=Quantity(1e9, 'ms'), T2=Quantity(1e9, 'ms'),
+      initial_Mxy=0.0 + 0.0j, initial_Mz=1.0, perfect_spoiling=False,
+      dtype='float64', method=method, isochromat_K=25, **kwargs)
+    return solver.solve()[0][:, -1]
+
+  for kwargs in ({}, dict(concomitant_fields=True), dict(b1_map=0.8),
+                 dict(concomitant_fields=True, b1_map=0.8)):
+    np.testing.assert_allclose(run(False, 0.0, **kwargs),
+                               run(True, 0.0, **kwargs), atol=1e-14)
+
+  spread = [run(True, 12.0, method=m, concomitant_fields=True)
+            for m in ('cayley_klein', 'magnus2', 'magnus4')]
+  for other in spread[1:]:
+    np.testing.assert_allclose(np.abs(spread[0]), np.abs(other), rtol=1e-6)
+
+
+def test_concomitant_fields_follow_a_moving_phantom(wide_phantom):
+  """The concomitant term is evaluated at the DEFORMED position in the kernel
+  and at the deformed position in the Python Magnus seed. A constant POD
+  displacement must therefore be indistinguishable from building the phantom
+  at the displaced position.
+
+  The residual is the POD's own float32 mode representation, not the term: it
+  is identical with the feature on and off, which the test asserts so a real
+  disagreement cannot hide behind it.
+  """
+  pytest.importorskip('meshio')
+  from feelmri.Motion import POD
+
+  shift = np.array([0.03, -0.02, 0.025])
+  nodes = wide_phantom.local_nodes.astype(np.float64)
+  n_nodes, n_times = nodes.shape[0], 6
+  data = np.zeros((n_nodes, 3, n_times), dtype=np.float32)
+  for axis in range(3):
+    data[:, axis, :] = shift[axis]
+  pod = POD(data=data, times=np.linspace(0.0, 5.0, n_times), n_modes=1)
+
+  block = _gradient_block((15.0, -10.0, 18.0), 5.0)
+  gaps = {}
+  for concomitant in (False, True):
+    moving = _precess(wide_phantom, block, pod_trajectory=pod,
+                      concomitant_fields=concomitant)
+    # The same block on a phantom that is simply built at the shifted position.
+    static_phantom = _shifted_phantom(wide_phantom, shift)
+    static = _precess(static_phantom, block, concomitant_fields=concomitant)
+    gaps[concomitant] = float(np.abs(np.exp(1j * np.angle(moving))
+                                     - np.exp(1j * np.angle(static))).max())
+
+  assert gaps[True] < 5e-3, (
+    f'a moving phantom disagrees with a statically shifted one by '
+    f'{gaps[True]:.2e}; the concomitant term is not following the motion')
+  assert abs(gaps[True] - gaps[False]) < 1e-6, (
+    f'the residual differs with the term on ({gaps[True]:.2e}) and off '
+    f'({gaps[False]:.2e}), so it is NOT just the float32 POD representation')
