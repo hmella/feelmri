@@ -595,9 +595,18 @@ def test_bin_weights_are_a_probability_distribution(minimal_phantom):
   for lineshape in ('gaussian', 'uniform', 'lorentzian'):
     for K in (4, 8, 16, 32):
       z, w = lineshape_bins(K, lineshape)
-      assert z.shape == (K,) and w.shape == (K,)
+      # AT MOST K bins: the rule prunes sub-spins whose weight is below
+      # float64 epsilon, which Gauss-Hermite produces in quantity (4 of 32,
+      # 70 of 128). Pruning them is free -- it moves neither the error nor the
+      # reach -- so the contract is the distribution, not the array length.
+      assert z.shape == w.shape and 1 <= z.size <= K
       assert w.min() >= 0.0, f'{lineshape} K={K} has a negative weight'
       assert abs(w.sum() - 1.0) < 1e-15, f'{lineshape} K={K} sums to {w.sum()}'
+
+  # The rules break down at large K and numpy does not say so; without this
+  # guard a big spectral_bins produced NaN weights and NaN magnetization.
+  with pytest.raises(ValueError, match='loses all precision'):
+    lineshape_bins(400, 'gaussian')
 
   # End to end: the recovery curve is M0 * sum(w) * (1 - exp(-t/T1)), so an
   # unnormalised rule scales the whole phantom. Compared against the closed

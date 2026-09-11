@@ -1177,7 +1177,9 @@ class BlochSolver:
                     f"set; got {self.spectral_bins}. One bin is no ensemble.")
             self._bin_z, self._bin_w = lineshape_bins(self.spectral_bins,
                                                       self.lineshape)
-            self._n_bins = self.spectral_bins
+            # Follow the rule, not the request: lineshape_bins prunes sub-spins
+            # whose weight is below float64 epsilon.
+            self._n_bins = int(self._bin_z.size)
             if self.lineshape == 'lorentzian':
                 warnings.warn(
                     f"lineshape='lorentzian' targets exp(-t/T2*) but cannot be "
@@ -1780,12 +1782,34 @@ def lineshape_bins(K, lineshape='gaussian'):
   else:
     u = (np.arange(K) + 0.5) / K
     z, w = np.tan(np.pi * (u - 0.5)), np.ones(K)
+  z = np.asarray(z, dtype=np.float64)
+  w = np.asarray(w, dtype=np.float64)
+  # The rules break down at large K and numpy does not say so. hermegauss
+  # returns NaN weights somewhere between K=320 and K=400, and `spectral_bins`
+  # has no natural ceiling, so without this check a large K silently produced
+  # NaN magnetization for the whole phantom.
+  if not (np.all(np.isfinite(z)) and np.all(np.isfinite(w)) and w.sum() > 0.0):
+    raise ValueError(
+      f"lineshape_bins: the {key} rule loses all precision at K = {K} "
+      f"(non-finite nodes or weights). Use a smaller K; the gaussian rule is "
+      f"reliable to about K = 320, and its weights are already negligible far "
+      f"below that.")
   # Normalise in float64. The T1 recovery term (1 - e1) * M0 is AFFINE, so the
   # collapsed equilibrium is M0 * sum(w): raw Gauss-Hermite weights sum to
   # 2.5066 and Gauss-Legendre to 2.0, either of which would put the whole
   # phantom at the wrong M0.
-  w = np.asarray(w, dtype=np.float64)
-  return np.asarray(z, dtype=np.float64), w / w.sum()
+  w = w / w.sum()
+  # Drop sub-spins that cannot contribute. Gauss-Hermite spends its extreme
+  # abscissae on weights far below machine epsilon -- 4 of 32, 70 of 128 and
+  # 172 of 256 sit under 1e-16 -- and each one is a full sub-spin carried
+  # through every time step and then multiplied by nothing. Pruning at float64
+  # epsilon changes no result that float64 can represent, and it keeps large K
+  # from being mostly waste.
+  keep = w >= 1e-16
+  if keep.sum() >= 1:
+    z, w = z[keep], w[keep]
+    w = w / w.sum()
+  return z, w
 
 
 def _draw_in_sphere_offsets(M, R, distribution='uniform', seed=None):
