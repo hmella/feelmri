@@ -4,6 +4,10 @@
 #include <pybind11/complex.h>
 #include <complex>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <limits>
+#include <type_traits>
 #include <stdexcept>
 #include <tuple>
 #include <utility>
@@ -43,6 +47,24 @@ using MagnetizationState = std::tuple<
 // apodized-sinc raster is not uniform in dt: the free-running imaging block has
 // 142 distinct dt values over 294 steps, so the naive path re-exponentiates
 // every node on two thirds of all steps.
+// Finiteness test that survives -ffinite-math-only (implied by the default
+// -Ofast build), under which `v != v` and std::isnan are folded away. Reads the
+// IEEE exponent field from the object representation: all ones means Inf or
+// NaN. memcpy is the standard-blessed spelling and compiles to a register move.
+template <typename T>
+inline bool feelmri_is_finite(T value) {
+  static_assert(std::numeric_limits<T>::is_iec559,
+                "feelmri_is_finite assumes IEEE 754 binary32/binary64");
+  using Bits = typename std::conditional<sizeof(T) == 4,
+                                         std::uint32_t, std::uint64_t>::type;
+  static_assert(sizeof(Bits) == sizeof(T), "unexpected floating-point width");
+  Bits bits;
+  std::memcpy(&bits, &value, sizeof(T));
+  const Bits exponent = (sizeof(T) == 4)
+      ? Bits(0x7F800000u) : Bits(0x7FF0000000000000ull);
+  return (bits & exponent) != exponent;
+}
+
 template <typename T, int Order, bool UniformRelax>
 MagnetizationState<T> solve_mri_impl(
   Eigen::Ref<const Matrix<T, Dynamic, 3, RowMajor>> r0,
@@ -98,11 +120,22 @@ MagnetizationState<T> solve_mri_impl(
   }
   // A non-finite entry poisons that node from the first RF step and is then
   // carried into every later block through the returned magnetization, with no
-  // diagnostic anywhere. The default build is -ffast-math, which already
-  // assumes finiteness, so reject rather than propagate.
-  if (has_b1 && !b1_map.allFinite()) {
-    throw std::invalid_argument(
-        "solve_mri: b1_map contains a non-finite entry");
+  // diagnostic anywhere.
+  //
+  // This CANNOT be written as `!b1_map.allFinite()`, `v != v` or std::isnan:
+  // the default build is -Ofast, which implies -ffinite-math-only, under which
+  // the compiler is entitled to assume no NaN or Inf exists and folds every
+  // such test to false. Measured: the Eigen form accepted both NaN and Inf and
+  // returned a NaN magnetization. Test the IEEE exponent field through the
+  // object representation instead, which no fast-math flag may reinterpret.
+  if (has_b1) {
+    for (Eigen::Index p = 0; p < b1_map.size(); ++p) {
+      if (!feelmri_is_finite(b1_map(p).real()) ||
+          !feelmri_is_finite(b1_map(p).imag())) {
+        throw std::invalid_argument(
+            "solve_mri: b1_map contains a non-finite entry");
+      }
+    }
   }
 
   const int n_out = store_history ? n_time : 1;
