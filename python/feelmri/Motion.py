@@ -503,8 +503,41 @@ class POD:
 
         return spline_coefficients
 
+    def _weights_at(self, t_eff):
+        """Evaluate the spline batch, refusing a time it does not cover.
+
+        ``_pp_batch`` is built with ``extrapolate=False``, so scipy answers
+        NaN outside ``[times[0], times[-1]]`` rather than raising. That NaN
+        then multiplies into every mode, so ONE out-of-range time point does
+        not spoil its own sample -- it turns the whole displacement field, and
+        with it the entire magnetization and every k-space sample, into NaN.
+
+        The predicate is on TIME, which is sequence-level and therefore the
+        same on every rank, so this raises directly rather than through
+        ``collective_raise``: no rank can reach it while another does not, and
+        it sits in the per-block hot path where a collective would not be free.
+        """
+        out = self._pp_batch(t_eff)
+        bad = ~np.isfinite(out)
+        if bad.any():
+            t_arr = np.atleast_1d(np.asarray(t_eff, dtype=float))
+            rows = bad.reshape(t_arr.size, -1).any(axis=1)
+            first = float(t_arr[np.flatnonzero(rows)[0]])
+            lo, hi = float(self.times[0]), float(self.times[-1])
+            raise ValueError(
+                f"{type(self).__name__}: no motion data at t = {first:.6g} ms; "
+                f"the snapshots cover [{lo:.6g}, {hi:.6g}] ms and the "
+                f"interpolator does not extrapolate, so it answers NaN -- "
+                f"which spreads to every mode, every node and every k-space "
+                f"sample rather than to that one time point. Pass "
+                f"`is_periodic=True` if the motion repeats, extend the "
+                f"snapshots, or keep the sequence inside the covered range. "
+                f"Note `timeshift` ({self.timeshift}) is added before this "
+                f"check, so it moves the window too.")
+        return out
+
     def _evaluate_weights(self, t):
-        self._weights[:] = self._pp_batch(t).astype(self._weights.dtype, copy=False)
+        self._weights[:] = self._weights_at(t).astype(self._weights.dtype, copy=False)
 
     def _evaluate_trajectory(self, t: float) -> np.ndarray:
         """Evaluate the full spatial displacement at time ``t``.
@@ -551,7 +584,7 @@ class POD:
         """Evaluate the spline interpolator for all time points simultaneously."""
         t_eff = self._fold_time(t_array + self.timeshift)
         # scipy's PPoly natively returns (N_times, M_modes) when evaluated with an array
-        return self._pp_batch(t_eff).astype(np.float32)
+        return self._weights_at(t_eff).astype(np.float32)
 
     def energy_ratio(self, n_modes: int = None) -> float:
         """Fraction of the snapshot energy retained by the leading modes.
@@ -700,8 +733,13 @@ class PODVelocity(POD):
     def get_weights(self, t_array: np.ndarray) -> np.ndarray:
         """Evaluate velocity weights (integrated displacement scaled by t_ro)."""
         t_eff = self._fold_time(t_array + self.timeshift)
-        weights = self._pp_batch(t_eff).astype(np.float32)
-        # Scale by readout time to convert displacement modes to instantaneous velocity
+        weights = self._weights_at(t_eff).astype(np.float32)
+        # Scale by readout time to convert displacement modes to instantaneous
+        # velocity. `t_array` is `t_ro`, the time since the EXCITATION -- the
+        # Taylor time of `x = x0 + v * t_ro` -- while `t_eff` above is absolute
+        # and only picks the cardiac phase. The two are different quantities
+        # and must not be conflated: handing this absolute sequence time made
+        # the displacement grow without bound over a long sequence.
         weights *= t_array[:, np.newaxis]
         return weights
 

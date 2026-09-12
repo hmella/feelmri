@@ -260,3 +260,65 @@ def test_plot_pod_energy_accepts_both_sources():
     assert ax_from_pod is not None
     assert ax_from_data is not None
     plt.close('all')
+
+
+# ---------------------------------------------------------------------------
+# Evaluating outside the snapshot range
+# ---------------------------------------------------------------------------
+#
+# The spline batch is built with `extrapolate=False`, so scipy answers NaN
+# rather than raising. A NaN weight multiplies into every mode, so one
+# out-of-range time point does not spoil its own sample -- it turns the whole
+# displacement field, the magnetization and every k-space sample into NaN.
+
+
+@pytest.mark.parametrize('cls_name', ['POD', 'PODVelocity'])
+@pytest.mark.parametrize('t_bad', [200.0, -10.0], ids=['after', 'before'])
+def test_a_time_outside_the_snapshots_is_refused(cls_name, t_bad):
+    """Both ends, and both classes -- `PODVelocity` overrides `get_weights`,
+    so it has its own path to the same interpolator."""
+    from feelmri import Motion
+    cls = getattr(Motion, cls_name)
+    times = np.arange(4, dtype=np.float32) * 50.0
+    data = np.zeros((8, 3, 4), dtype=np.float32)
+    data[:, 2, :] = 2.0e-3
+    pod = cls(times=times, data=data, n_modes=1, is_periodic=False,
+              global_to_local=np.arange(8))
+
+    assert np.isfinite(pod.get_weights(np.array([0.0, 150.0], np.float32))).all()
+    with pytest.raises(ValueError, match='no motion data at t'):
+        pod.get_weights(np.array([0.0, t_bad], dtype=np.float32))
+    # `_evaluate_trajectory` is the other entry point and reaches the same
+    # interpolator through `_evaluate_weights`.
+    with pytest.raises(ValueError, match='no motion data at t'):
+        pod._evaluate_trajectory(t_bad)
+
+
+def test_a_periodic_pod_accepts_any_time():
+    """The fold maps every time back into the covered range, so a periodic
+    trajectory must stay usable arbitrarily far from its snapshots -- which is
+    what every shipped example relies on."""
+    from feelmri.Motion import PODVelocity
+    times = np.arange(4, dtype=np.float32) * 50.0
+    data = np.zeros((8, 3, 4), dtype=np.float32)
+    data[:, 2, :] = 2.0e-3
+    pod = PODVelocity(times=times, data=data, n_modes=1, is_periodic=True,
+                      global_to_local=np.arange(8))
+    w = pod.get_weights(np.array([-500.0, 0.0, 5000.0], dtype=np.float32))
+    assert np.isfinite(w).all(), 'the periodic fold left a time uncovered'
+
+
+def test_the_timeshift_moves_the_covered_window():
+    """`timeshift` is added before the range check, so it shifts which times
+    are legal. Stated in the error because a caller who set one will otherwise
+    read the message against the wrong window."""
+    from feelmri.Motion import POD
+    times = np.arange(4, dtype=np.float32) * 50.0
+    data = np.zeros((8, 3, 4), dtype=np.float32)
+    data[:, 2, :] = 2.0e-3
+    pod = POD(times=times, data=data, n_modes=1, is_periodic=False,
+              global_to_local=np.arange(8))
+    assert np.isfinite(pod.get_weights(np.array([120.0], np.float32))).all()
+    pod.update_timeshift(100.0)
+    with pytest.raises(ValueError, match='no motion data at t'):
+        pod.get_weights(np.array([120.0], dtype=np.float32))
