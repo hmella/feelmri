@@ -1823,18 +1823,39 @@ class BlochSolver:
             # Pre-compute the POD modes and weights for this block's timeframe
             has_traj = self.pod_trajectory is not None
             if has_traj:
-                # `discrete_times` is already absolute sequence time, which is
-                # the frame the motion is defined in, so hand it over as is.
-                # `get_weights` adds the trajectory's own `timeshift` itself
-                # (Motion.py: `_fold_time(t + self.timeshift)`), so a caller
-                # who set one gets it honoured here.
+                # The argument is time measured from the START OF THIS BLOCK,
+                # and the two roles it plays are NOT the same quantity:
                 #
-                # This used to call `update_timeshift(block_start)` and then
-                # subtract the same value back off, which cancelled exactly --
-                # the evolution was right, but a user-set `timeshift` was
-                # silently discarded and the attribute was left mutated at the
-                # LAST block's start time for every later consumer.
-                weights = self.pod_trajectory.get_weights(discrete_times)
+                #   fold(t + timeshift)  picks the cardiac phase -- absolute
+                #   t itself             is `t_ro`, the Taylor time
+                #
+                # `PODVelocity` models position as the first-order expansion
+                # `x0 + v * t_ro`, with `t_ro` measured from the excitation, so
+                # the argument sets HOW FAR the spins have moved. Passing
+                # absolute sequence time let `t_ro` run to the whole sequence
+                # duration: on `examples/phase_contrast.py` the imaging block
+                # sits at 1305 ms, so the displacement came out ~450x too
+                # large -- median 195 mm against a 10.4 mm slab, with 84-90% of
+                # the moving nodes advected clean out of the slice, which
+                # emptied the fast core of the vessel and left only its walls.
+                #
+                # The base `POD` class is immune: it ignores the scale and uses
+                # the argument only inside the fold, where the block offset
+                # cancels against the shift. That asymmetry is why "the two
+                # spellings cancel exactly" was measured on `POD`, held there,
+                # and was wrong for the subclass that overrides `get_weights`.
+                #
+                # The shift is COMPOSED and restored rather than overwritten,
+                # so a caller's own `timeshift` is honoured and the attribute is
+                # not left mutated at the last block's start time.
+                block_start = float(block.time_extent[0].m_as('ms'))
+                user_shift = self.pod_trajectory.timeshift
+                try:
+                    self.pod_trajectory.update_timeshift(user_shift + block_start)
+                    weights = self.pod_trajectory.get_weights(
+                        discrete_times - block_start)
+                finally:
+                    self.pod_trajectory.update_timeshift(user_shift)
 
                 # Get the static modes mapped to the original local nodes
                 # (built once and cached -- they do not change between blocks)

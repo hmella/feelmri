@@ -1785,3 +1785,141 @@ def test_a_nan_relaxation_time_is_refused_rather_than_absorbed(minimal_phantom):
                        initial_Mz=0.0, perfect_spoiling=False, dtype='float64')
   np.testing.assert_allclose(np.abs(solver.solve()[0][:, 0]), 1.0, atol=1e-12)
 
+
+
+# ---------------------------------------------------------------------------
+# PODVelocity: the Taylor time is measured from the block, not from the origin
+# ---------------------------------------------------------------------------
+#
+# `PODVelocity` models position as the first-order expansion `x0 + v * t_ro`,
+# and `t_ro` is the time since the excitation. `POD` (displacement) ignores
+# that scale entirely and reads its argument only inside the periodic fold,
+# where a block offset cancels against the trajectory's `timeshift`. So the
+# two classes respond DIFFERENTLY to the same call, and the subclass is the
+# one that carries the physics.
+#
+# Nothing exercised `PODVelocity` at all before this, which is how the solver
+# came to hand it absolute sequence time: on `examples/phase_contrast.py` that
+# put `t_ro` at 1305 ms instead of ~3 ms, inflating every displacement ~450x
+# and advecting 84-90% of the moving spins out of an 10.4 mm slice.
+
+
+def _constant_velocity_pod(n_nodes, vz_m_per_s, n_frames=4, dt_ms=50.0):
+  """A POD whose velocity field is CONSTANT in time and uniform in space.
+
+  Constant in time on purpose: the cardiac phase then cannot influence the
+  answer, so the only thing a test can be measuring is `t_ro`.
+  """
+  from feelmri.Motion import PODVelocity
+  times = np.arange(n_frames, dtype=np.float32) * dt_ms
+  data = np.zeros((n_nodes, 3, n_frames), dtype=np.float32)
+  data[:, 2, :] = vz_m_per_s * 1e-3          # m/s -> m/ms, the POD's own unit
+  # Periodic, like every example: a NON-periodic POD evaluated past its last
+  # frame returns NaN from the interpolator, which would poison the whole
+  # magnetization and mask what this is measuring.
+  return PODVelocity(times=times, data=data, n_modes=1, is_periodic=True,
+                     global_to_local=np.arange(n_nodes))
+
+
+def _displacement_probe_sequence(scanner, lead_ms, grad_mT_per_m, dur_ms):
+  """An optional leading delay, then one gradient block that reads position.
+
+  The gradient is constant, so the phase it winds is
+  `-gamma * G * (z0 + v*t_ro) * t` -- a direct readout of how far the solver
+  thinks the spins have moved.
+  """
+  seq = Sequence()
+  if lead_ms > 0.0:
+    seq.add_block(make_empty_block(lead_ms, dt_ms=lead_ms))
+  g = Gradient(timings=Quantity(np.array([0.0, dur_ms]), 'ms'),
+               amplitudes=Quantity(np.array([grad_mT_per_m] * 2), 'mT/m'),
+               scanner=scanner, ref=Quantity(0.0, 'ms'),
+               time=Quantity(0.0, 'ms'), axis=2)
+  seq.add_block(SequenceBlock(gradients=[g], dur=Quantity(dur_ms, 'ms'),
+                              dt=Quantity(0.05, 'ms'), empty=False,
+                              store_magnetization=True))
+  return seq
+
+
+@pytest.mark.parametrize('lead_ms', [0.0, 500.0], ids=['no_delay', 'delay_500ms'])
+def test_pod_velocity_taylor_time_is_measured_from_the_block(rod_phantom, lead_ms):
+  """With a constant velocity field, a leading DELAY must not change how far
+  the spins move during the readout block.
+
+  `t_ro` is time since the excitation, so the displacement inside the block is
+  `v * t_ro` with `t_ro` running 0 -> dur -- whatever absolute time the block
+  happens to sit at. Handing the trajectory absolute time instead makes the
+  displacement grow with the delay, which is what this pins.
+
+  The delay block carries no gradient, so position cannot reach the field
+  there; the only way the delay can matter is through `t_ro`.
+  """
+  phantom = rod_phantom
+  scanner = Scanner()
+  n = phantom.local_nodes.shape[0]
+  # A modest gradient keeps the total phase near 5 rad, so the float32
+  # POD weights (`get_weights` casts) stay well under the bound below.
+  vz, grad, dur = 2.0, 2.0, 3.0
+
+  seq = _displacement_probe_sequence(scanner, lead_ms, grad, dur)
+  pod = _constant_velocity_pod(n, vz)
+  solver = BlochSolver(seq, phantom, scanner=scanner, M0=1.0,
+                       T1=Quantity(1e9, 'ms'), T2=Quantity(1e9, 'ms'),
+                       initial_Mxy=1.0 + 0j, initial_Mz=0.0,
+                       perfect_spoiling=False, dtype='float64',
+                       pod_trajectory=pod)
+  Mxy, _ = solver.solve()
+  phase = np.angle(np.asarray(Mxy)[:, -1])
+
+  # Closed form: with G constant and z(t) = z0 + v*t,
+  #   phi = -gamma * G * (z0 * dur + v * dur^2 / 2)
+  gamma = scanner.gamma.m_as('rad/ms/mT')
+  z0 = phantom.local_nodes[:, 2]
+  expected = -gamma * grad * (z0 * dur + (vz * 1e-3) * dur ** 2 / 2.0)
+  worst = float(np.abs(np.angle(np.exp(1j * (phase - expected)))).max())
+  # 1e-5: the weights are float32 by construction, so the floor is
+  # ~eps32 * |phase|. Measured 6.3e-07 here; the defect this pins moves the
+  # 500 ms case by many radians, so the bound is nowhere near the signal.
+  assert worst < 1e-5, (
+    f'the in-block displacement disagrees with v*t_ro by {worst:.3e} rad at a '
+    f'lead of {lead_ms} ms; t_ro is not being measured from the block')
+
+  # The trajectory must come back as the caller left it. The solver composes
+  # the block offset onto `timeshift` to keep the cardiac phase absolute, and
+  # a version that overwrote it left every later consumer reading the LAST
+  # block's start time.
+  assert pod.timeshift == 0.0, (
+    f'the solver left timeshift at {pod.timeshift}, not the 0.0 it was given')
+
+
+def test_a_caller_set_timeshift_still_reaches_the_cardiac_phase(rod_phantom):
+  """The block offset is COMPOSED onto the caller's `timeshift`, not
+  substituted for it. A time-varying velocity makes the two distinguishable:
+  shifting the trajectory by half a cycle must change the answer."""
+  from feelmri.Motion import PODVelocity
+  phantom = rod_phantom
+  scanner = Scanner()
+  n = phantom.local_nodes.shape[0]
+  period, n_frames = 200.0, 9
+  times = np.linspace(0.0, period, n_frames, dtype=np.float32)
+  data = np.zeros((n, 3, n_frames), dtype=np.float32)
+  data[:, 2, :] = (2.0e-3 * np.cos(2 * np.pi * times / period)).astype(np.float32)
+
+  results = {}
+  for shift in (0.0, 0.5 * period):
+    pod = PODVelocity(times=times, data=data.copy(), n_modes=3,
+                      is_periodic=True, global_to_local=np.arange(n))
+    pod.update_timeshift(shift)
+    seq = _displacement_probe_sequence(scanner, 0.0, 20.0, 3.0)
+    solver = BlochSolver(seq, phantom, scanner=scanner, M0=1.0,
+                         T1=Quantity(1e9, 'ms'), T2=Quantity(1e9, 'ms'),
+                         initial_Mxy=1.0 + 0j, initial_Mz=0.0,
+                         perfect_spoiling=False, dtype='float64',
+                         pod_trajectory=pod)
+    results[shift] = np.angle(np.asarray(solver.solve()[0])[:, -1])
+    assert pod.timeshift == shift, 'the caller\'s timeshift was not restored'
+
+  apart = float(np.abs(results[0.0] - results[0.5 * period]).max())
+  assert apart > 1e-3, (
+    f'half a cycle of timeshift moved the phase by only {apart:.2e} rad, so '
+    f'the caller\'s shift is being discarded')
