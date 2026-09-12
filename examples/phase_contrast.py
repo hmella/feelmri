@@ -17,6 +17,7 @@ from feelmri.MRImaging import SliceProfile, VelocityEncoding
 from feelmri.MRObjects import RF, Gradient, Scanner
 from feelmri.Noise import add_cpx_noise
 from feelmri.Parameters import ParameterHandler, PVSMParser
+from feelmri.PulseqAdapter import maxwell_moments, maxwell_phase_coefficients
 from feelmri.Phantom import FEMPhantom
 from feelmri.Plotter import MRIPlotter
 from feelmri.Recon import CartesianRecon
@@ -128,6 +129,7 @@ if __name__ == '__main__':
   # Create sequence object and solve magnetization
   Nb_frames = phantom.Nfr if not FAST_MODE else 1
   Mxy_PC = np.zeros([phantom.local_nodes.shape[0], Nb_frames, enc.nb_directions], dtype=np.complex64)
+  conc_coefficients = []
   for d in range(enc.nb_directions):
 
     # Create sequence object and Bloch solver
@@ -151,6 +153,17 @@ if __name__ == '__main__':
                             dt_gr=Q_(1e-2, 'ms'), 
                             dt=Q_(1, 'ms'), 
                             store_magnetization=True)
+    # The concomitant phase THIS direction's imaging block accumulates between
+    # the excitation and the snapshot, as a quadratic form in imaging-frame
+    # position. Same helpers the readout uses, integrated over the block's own
+    # gradients from the RF centre -- which is where the transverse
+    # magnetization is created and so where the clock starts.
+    conc_coefficients.append(maxwell_phase_coefficients(
+        maxwell_moments(imaging.gradients, sp.rf.time.m_as('ms'),
+                        np.array([imaging.time_extent[1].m_as('ms')]),
+                        rotation=planning.MPS),
+        scanner, rotation=planning.MPS)[0])
+
     dummy = imaging.copy()
     dummy.store_magnetization = False
 
@@ -259,8 +272,37 @@ if __name__ == '__main__':
   phi_v = np.angle(Im[...,0,:] * np.conj(Im[...,1,:]))
   phi_0 = np.angle(Im[...,1,:])
   phi   = np.angle(Im[...,0,:])
-  plotter = MRIPlotter(images=[mag, phi_v, phi, phi_0], 
-                        title=['M', '$\\phi_v$ ', '$\\phi_v + \\phi_0$', '$\\phi_0$'], 
+
+  # Concomitant field: the part that SURVIVES the velocity subtraction.
+  #
+  # phi_v is direction 0 minus the reference, so any phase the two share
+  # cancels -- and the READOUT term does share: `maxwell` above is one array
+  # handed to every direction, because the readout gradients do not change
+  # with the encoding. What does not cancel is the phase the SOLVER
+  # accumulates from the VENC bipolar, which direction 0 plays and the
+  # reference does not. That difference is a systematic velocity error, fixed
+  # in space and quadratic in position -- it does not average out over frames
+  # and it is indistinguishable from flow.
+  # Voxel centres, sized from the RECONSTRUCTED shape rather than from
+  # `Imaging.RES`: `CartesianRecon` undoes the readout oversampling, and if the
+  # two ever disagreed the map would be evaluated on the wrong grid.
+  vox = planning.FOV.m_as('m') / np.array(Im.shape[:3])
+  grid = [(np.arange(n) - 0.5 * (n - 1)) * h
+          for n, h in zip(Im.shape[:3], vox)]
+  gx, gy, gz = np.meshgrid(*grid, indexing='ij')
+  def _quadratic(c):
+      return (c[0]*gx*gx + c[1]*gy*gy + c[2]*gz*gz
+              + c[3]*gx*gy + c[4]*gx*gz + c[5]*gy*gz)
+  phi_c = _quadratic(conc_coefficients[0]) - _quadratic(conc_coefficients[1])
+  phi_c = np.repeat(phi_c[..., np.newaxis], Im.shape[-1], axis=-1)
+  v_err = parameters.VelocityEncoding.VENC.m_as('m/s') / np.pi * phi_c
+  MPI_print(f'[concomitant] bias in phi_v over the FOV: '
+            f'{phi_c.min():+.4f} to {phi_c.max():+.4f} rad, i.e. an apparent '
+            f'{v_err.min():+.4f} to {v_err.max():+.4f} m/s')
+
+  plotter = MRIPlotter(images=[mag, phi_v, phi, phi_0, phi_c],
+                        title=['M', '$\\phi_v$ ', '$\\phi_v + \\phi_0$', '$\\phi_0$',
+                               '$\\phi_c$ (concomitant bias in $\\phi_v$)'],
                         FOV=planning.FOV.m_as('m'))
   plotter.show()
   plotter.export_images(script_path/'phase_contrast/')
