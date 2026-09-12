@@ -13,6 +13,7 @@ from feelmri.Bloch import BlochSolver, Sequence, SequenceBlock
 from feelmri.MPIUtilities import MPI_comm, MPI_print, MPI_rank
 from feelmri.MRObjects import Gradient, Scanner
 from feelmri.Phantom import FEMPhantom
+from feelmri.PulseqAdapter import maxwell_moments, maxwell_phase_coefficients
 
 # Concomitant (Maxwell) fields. Maxwell's equations forbid a gradient that is
 # purely longitudinal, so every imaging gradient drags along transverse
@@ -32,18 +33,23 @@ from feelmri.Phantom import FEMPhantom
 # concomitant fields a real nuisance for phase contrast, where the velocity
 # encoding IS a bipolar pair.
 
-# SCOPE: this is a SOLVER term, and the readout is not solved. The k-space
-# signal is synthesized by the assembler from the trajectory, exp(-t/T2) and a
-# static off-resonance phi_dB0, none of which carries Bc -- so concomitant
-# phase accumulated DURING an ADC window is NOT modelled. What IS carried is
-# everything the solver integrates up to the magnetization snapshot: the prep,
-# the slice select, the velocity-encoding lobes.
+# BOTH HALVES CARRY IT. The solver integrates Bc up to the magnetization
+# snapshot -- prep, slice select, velocity-encoding lobes -- and the assembler
+# applies the rest during the ADC window, from a second trajectory of
+# time-integrated gradient products that factorises the same way `k` does
+# (`maxwell_moments` / `maxwell_phase_coefficients`, wired into `mri_signal`
+# through its `maxwell=` argument). An earlier version of this note said the
+# readout half was not modelled; it is, and the fifth panel below shows it.
 #
-# The size of what is missed follows from which term survives an in-plane
-# readout gradient. For Gz = 0 the expression collapses to (Gx^2 + Gy^2)z^2 /
-# (2*B0), which is ZERO in a slice at isocentre and grows quadratically with
-# slice offset. Integrated over the 103 ms echo train of tests/data/epi_v142.seq
-# at 1.5 T: 0.000 rad at z = 0, -5.50 rad at z = 50 mm, -22.0 rad at z = 100 mm.
+# The two halves pick out DIFFERENT terms, which is why both matter:
+#
+#   the bipolar Gz here      -> (Gz^2/4)(x^2 + y^2), a bull's-eye IN PLANE,
+#                               maximal at the rim and zero on the axis
+#   an in-plane readout      -> (Gx^2 + Gy^2) z^2,  zero in a slice at
+#                               isocentre and quadratic in SLICE OFFSET
+#
+# So an axial slice at isocentre sees nothing from its readout however long the
+# echo train, and an off-isocentre slab on the same train sees radians.
 
 # Enable fast mode for testing if the environment variable is set
 FAST_MODE = os.getenv("FEELMRI_FAST_TEST", "0") == "1"
@@ -58,6 +64,37 @@ g_flat = 2.0
 # Bc goes as 1/B0, so the comparison is between a clinical field and a
 # low-field system.
 field_strengths = [1.5, 0.55]
+
+# The in-plane echo train used for the readout panel: 67 alternating lobes of
+# 20 mT/m with 0.15 ms ramps and a 0.80 ms plateau, i.e. a 73.7 ms train whose
+# integral(Gx^2) dt is 24120 (mT/m)^2 ms. Sized to match tests/data/epi_v142.seq,
+# so the panel reproduces a real sequence rather than an invented one: -5.38
+# against -5.50 rad at z = 50 mm, -21.51 against -22.0 at z = 100 mm, 1.5 T.
+readout_amp = 20.0
+readout_echoes = 67
+readout_rise = 0.15
+readout_flat = 0.80
+
+
+def _epi_readout_gradients(amplitude, n_echoes):
+  """An alternating train of readout trapezoids on Gx, and nothing on Gz.
+
+  Only the WAVEFORM matters here: the concomitant readout term depends on the
+  time-integrated products of the gradients, not on where k lands, so this
+  needs no ADC and no sequence.
+  """
+  scanner = Scanner()
+  gradients, t = [], 0.0
+  for i in range(n_echoes):
+    a = amplitude.m_as('mT/m') * (-1)**i
+    corners = [t, t + readout_rise, t + readout_rise + readout_flat,
+               t + 2*readout_rise + readout_flat]
+    gradients.append(Gradient(
+        timings=Q_(np.array(corners), 'ms'),
+        amplitudes=Q_(np.array([0.0, a, a, 0.0]), 'mT/m'),
+        scanner=scanner, ref=Q_(0.0, 'ms'), time=Q_(0.0, 'ms'), axis=0))
+    t = corners[-1]
+  return gradients
 
 if __name__ == '__main__':
 
@@ -197,7 +234,7 @@ if __name__ == '__main__':
     levels = [lvl for lvl in np.arange(-np.ceil(span*4)/4, span + 0.25, 0.25)
               if abs(lvl) > 1e-9]
 
-    fig, axes = plt.subplots(2, 2, figsize=(11, 9.5))
+    fig, axes = plt.subplots(2, 3, figsize=(16, 9.5))
     panels = [('Concomitant fields off', control),
               *[('B0 = {} T'.format(B0), measured[B0]) for B0 in field_strengths]]
     for ax, (title, phase) in zip(axes.flat, panels):
@@ -238,5 +275,33 @@ if __name__ == '__main__':
     ax.grid(alpha=0.3)
     ax.legend(loc='lower left', fontsize=8)
 
+    # 7. The READOUT half, which the solver never sees. An in-plane echo train
+    # drives Gz = 0, so Bc collapses to (Gx^2 + Gy^2)z^2/(2*B0): nothing at
+    # isocentre, quadratic in slice offset, and it accumulates for the whole
+    # train. This is the term the assembler applies through `mri_signal`'s
+    # `maxwell=` argument, computed here from the waveform with the same two
+    # helpers that wire it up.
+    ax = axes.flat[4]
+    readout = _epi_readout_gradients(Q_(readout_amp, 'mT/m'), readout_echoes)
+    train = max(float(g.timings.m_as('ms').max()) for g in readout)
+    moments = maxwell_moments(readout, 0.0, np.array([train]))
+    offsets = np.linspace(-0.12, 0.12, 121)
+    for B0 in field_strengths:
+      coeff = maxwell_phase_coefficients(
+          moments, Scanner(field_strength=Q_(B0, 'T')))[0]
+      # z^2 only: with Gz = 0 every other coefficient is zero by construction.
+      ax.plot(1e3*offsets, coeff[2]*offsets**2, linewidth=1.6,
+              label='B0 = {} T'.format(B0))
+      MPI_print('readout, B0 = {:>4} T: {:6.2f} rad at z = 50 mm, '
+                '{:7.2f} rad at z = 100 mm (train {:.1f} ms)'
+                .format(B0, coeff[2]*0.05**2, coeff[2]*0.10**2, train))
+    ax.axvline(0.0, color='k', linewidth=0.8, alpha=0.4)
+    ax.set_xlabel('slice offset z (mm)')
+    ax.set_ylabel('phase over the readout (rad)')
+    ax.set_title('Readout half: zero at isocentre, quadratic in slice offset')
+    ax.grid(alpha=0.3)
+    ax.legend(loc='lower center', fontsize=8)
+
+    axes.flat[5].axis('off')
     fig.tight_layout()
     plt.show()

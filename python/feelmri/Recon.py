@@ -40,6 +40,16 @@ def CartesianRecon(K, trajectory, filter_type='Tukey', filter_width=0.9, filter_
     filter_lift : float, optional
         Filter floor value (minimum attenuation). Default is 0.3.
 
+    Notes
+    -----
+    **This is not channel-aware.** It inverse-transforms whatever axes it is
+    given and never collapses one, so a receive-coil axis passes through
+    untouched and the caller combines it afterwards -- with
+    :func:`reconstruct_nufft`'s ``combine`` machinery, or by applying
+    :func:`_combine_channels`' matched filter by hand. That is deliberate:
+    the assembler's ``nv`` axis carries coils AND velocity encodings AND
+    sub-spins, and only the caller knows which is which.
+
     Returns
     -------
     np.ndarray
@@ -224,7 +234,8 @@ def reconstruct_nufft(
     mode: str = "adjoint",
     maxiter: int = 30,
     tol: float = 1e-6,
-    combine: str | None = None
+    combine: str | None = None,
+    sensitivities: np.ndarray | None = None
 ) -> np.ndarray:
     """Reconstruct an MR image from non-Cartesian k-space data via NUFFT.
 
@@ -264,15 +275,26 @@ def reconstruct_nufft(
     tol : float, optional
         CG convergence tolerance. Default is 1e-6.
     combine : str or None, optional
-        Multi-channel combination: ``'rss'`` (root-sum-of-squares) or
-        None (return all channels). Default is None.
+        Multi-channel combination: ``'rss'`` (root-sum-of-squares),
+        ``'roemer'`` (matched filter against a known map, see
+        ``sensitivities``), or None to return every channel. Default is None.
+
+        **``'rss'`` discards the phase.** Use ``'roemer'`` for phase contrast,
+        off-resonance, or anything else read out of the argument.
+    sensitivities : np.ndarray or None, optional
+        Receive sensitivities on the IMAGE grid, shaped
+        ``(Nchannels, *img_shape)`` -- the same field handed to
+        :meth:`~feelmri.Phantom.FEMPhantom.set_receive_sensitivity`, sampled at
+        the voxels rather than at the mesh nodes. Required by
+        ``combine='roemer'`` and ignored otherwise.
 
     Returns
     -------
     np.ndarray
         Reconstructed image(s). Shape is ``img_shape`` for a single
-        channel or ``(Nchannels, *img_shape)`` when
-        ``combine`` is None and ``Nchannels > 1``.
+        channel, for any ``combine`` that collapses the axis, or
+        ``(Nchannels, *img_shape)`` when ``combine`` is None and
+        ``Nchannels > 1``.
     """
     kx, ky, kz = ktraj
     if kz is None:
@@ -303,16 +325,88 @@ def reconstruct_nufft(
 
     if is_uniform_stack:
         return _recon_hybrid_stack(
-            kdata, kx, ky, img_shape, dcw, auto_dcw, oversamp, kernel_size, mode, maxiter, tol, combine
+            kdata, kx, ky, img_shape, dcw, auto_dcw, oversamp, kernel_size, mode, maxiter, tol,
+            combine, sensitivities
         )
     else:
         return _recon_full_3d(
-            kdata, (kx, ky, kz), img_shape, dcw, auto_dcw, oversamp, kernel_size, mode, maxiter, tol, combine
+            kdata, (kx, ky, kz), img_shape, dcw, auto_dcw, oversamp, kernel_size, mode, maxiter, tol,
+            combine, sensitivities
         )
 
 
+def _combine_channels(img, combine, sensitivities):
+    """Collapse the leading channel axis of ``img`` -- shape ``(C, *img_shape)``.
+
+    ``None`` keeps every channel (and unwraps a single one, for compatibility
+    with callers that never expected a channel axis at all).
+
+    ``'rss'`` is root-sum-of-squares. It needs no map, which is its whole
+    appeal, and it **destroys the phase** -- so it is unusable for phase
+    contrast, off-resonance, or anything else read out of the argument rather
+    than the modulus.
+
+    ``'roemer'`` is the matched filter for a KNOWN map,
+
+        I = sum_c conj(S_c) I_c / sum_c |S_c|^2
+
+    which is the optimal-SNR linear combination and, unlike RSS, **preserves
+    phase**: feed it the true sensitivities and the result is the underlying
+    magnetization, sensitivity shading divided out. It is exact here rather
+    than estimated, because in a simulation the map is known by construction --
+    the same array handed to
+    :meth:`~feelmri.Phantom.FEMPhantom.set_receive_sensitivity`, evaluated on
+    the image grid instead of on the mesh.
+
+    Applied at ANY channel count, including one: with a single coil it still
+    divides the shading out, which `None` and `'rss'` do not. Those two keep
+    their old single-channel behaviour untouched.
+    """
+    if combine is None:
+        return img[0] if img.shape[0] == 1 else img
+
+    key = str(combine).lower()
+    if key == "rss":
+        if img.shape[0] == 1:
+            return img[0]
+        return np.sqrt(np.sum(np.abs(img) ** 2, axis=0)).astype(np.complex64)
+
+    if key == "roemer":
+        if sensitivities is None:
+            raise ValueError(
+                "reconstruct_nufft: combine='roemer' is the matched filter for "
+                "a KNOWN sensitivity map, so it needs `sensitivities`. Pass the "
+                "map on the IMAGE grid, shaped (C, *img_shape) -- the same "
+                "field given to set_receive_sensitivity, sampled at the voxels "
+                "rather than at the mesh nodes. With no map use 'rss', which "
+                "needs none but discards the phase.")
+        S = np.asarray(sensitivities)
+        if S.shape != img.shape:
+            raise ValueError(
+                f"reconstruct_nufft: sensitivities have shape {S.shape} against "
+                f"images {img.shape}; they must agree channel for channel and "
+                f"voxel for voxel.")
+        den = np.sum(np.abs(S) ** 2, axis=0)
+        num = np.sum(np.conj(S) * img, axis=0)
+        # Below this the division is meaningless in the working precision, not
+        # merely noisy -- it is the true background, outside every coil. Where
+        # the denominator is small but real the matched filter amplifies noise
+        # by 1/|S|, which is the physics of the estimator and the caller's
+        # choice of map, so it is left alone.
+        floor = np.finfo(np.float32).eps * float(den.max()) if den.size else 0.0
+        out = np.zeros(num.shape, dtype=np.complex64)
+        live = den > floor
+        out[live] = (num[live] / den[live]).astype(np.complex64)
+        return out
+
+    raise ValueError(
+        f"reconstruct_nufft: unknown combine {combine!r}; use None, 'rss' or "
+        f"'roemer'.")
+
+
 def _recon_hybrid_stack(
-    kdata, kx, ky, img_shape, dcw, auto_dcw, oversamp, kernel_size, mode, maxiter, tol, combine
+    kdata, kx, ky, img_shape, dcw, auto_dcw, oversamp, kernel_size, mode, maxiter, tol,
+    combine, sensitivities=None
 ):
     """Hybrid reconstruction: 1-D Cartesian IFFT along kz, 2-D NUFFT in-plane."""
     R, L, S, C = kdata.shape
@@ -377,14 +471,11 @@ def _recon_hybrid_stack(
                 except Exception:
                     img_3d[c, :, :, z_idx] = nufft.adjoint(y)
 
-    if C == 1:
-        return img_3d[0]
-    elif combine == "rss":
-        return np.sqrt(np.sum(np.abs(img_3d)**2, axis=0)).astype(np.complex64)
-    return img_3d
+    return _combine_channels(img_3d, combine, sensitivities)
 
 
-def _recon_full_3d(kdata, ktraj, img_shape, dcw, auto_dcw, oversamp, kernel_size, mode, maxiter, tol, combine):
+def _recon_full_3d(kdata, ktraj, img_shape, dcw, auto_dcw, oversamp, kernel_size, mode, maxiter,
+                   tol, combine, sensitivities=None):
     """Full 3-D NUFFT reconstruction for arbitrary non-Cartesian trajectories."""
     kx, ky, kz = ktraj
     R, L, S = kx.shape
@@ -439,8 +530,4 @@ def _recon_full_3d(kdata, ktraj, img_shape, dcw, auto_dcw, oversamp, kernel_size
 
     img = np.stack(imgs, axis=0)
 
-    if C == 1:
-        return img[0]
-    elif combine == "rss":
-        return np.sqrt(np.sum(np.abs(img)**2, axis=0)).astype(np.complex64)
-    return img
+    return _combine_channels(img, combine, sensitivities)

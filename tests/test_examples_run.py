@@ -26,6 +26,7 @@ pytestmark = [
 @pytest.mark.parametrize("script", [
     "4dflow.py",
     "b1_inhomogeneity.py",
+    "coil_sensitivity.py",
     "concomitant_fields.py",
     "free_running.py",
     "gradient_orientation.py",
