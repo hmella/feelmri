@@ -46,13 +46,13 @@ resolution = 48 if FAST_MODE else 96
 # differs from coil to coil. Nothing here is fitted or estimated -- it is
 # written down, which is what lets the matched filter be exact.
 coil_radius = 0.16
-# The width matters, and not only for appearances. The reconstruction is
-# band-limited while the map divided out is not, so recon(S*M) is not
-# S*recon(M) and the matched filter cannot be exact for a map that varies on
-# the scale of the point-spread function. Measured residual shading after the
-# combine: 1.08x at 0.13 m, 1.32x at 0.09 m. Real arrays are smooth on the
-# voxel scale, which is what makes the filter -- and every scheme that
-# estimates a map -- work at all.
+# The reconstruction is band-limited while the map divided out is not, so
+# recon(S*M) is not S*recon(M) and the matched filter cannot be exactly right
+# for a map varying on the scale of the point-spread function. The effect is
+# real but SMALL: residual shading 1.04x at a 0.13 m coil width and 1.09x at
+# 0.09 m, while the single-coil shading it removes goes from 8.1x to 155x.
+# Real arrays are smooth on the voxel scale, which is what makes the filter --
+# and every scheme that ESTIMATES a map -- work at all.
 coil_width = 0.13
 
 
@@ -74,10 +74,26 @@ if __name__ == '__main__':
   script_path = Path(__file__).parent
 
   # 1. A wide flat slab, imaged as a projection through its thickness.
+  #
+  # QUADRATURE, not nodal summation. This mesh is GRADED -- 2.5 mm in-plane
+  # inside the vials and up to 10.0 mm in the matrix -- so against a 5 mm voxel
+  # the coarse elements sit at h/dx ~ 2, far outside where a point-mass nodal
+  # sum is usable. Measured against a converged degree-10 reference, the nodal
+  # setting is 82.7% wrong and covers the disc in speckle that reads as holes
+  # in the object; this one agrees to 0.0%.
+  #
+  # `voxel_size` is 2 mm and not the 5 mm voxel on purpose: `set_assembler`
+  # classifies elements by cbrt(VOLUME), which is 1.5-4.5 mm here because the
+  # slab is thin, while what matters for imaging is the IN-PLANE diameter of
+  # 2.5-10 mm. At 5 mm every element counts as small and nothing is promoted to
+  # `horder` -- that spelling still reads 8.8% against the reference.
+  #
+  # horder=4 is converged: 3 / 4 / 6 give a 0.0105 / 0.0096 / 0.0098 rad phase
+  # error in 18 / 27 / 43 s, so 6 costs 63% more for nothing.
   phantom = FEMPhantom(path=script_path/'phantoms/water_fat_P1_prism.xdmf',
                        scale_factor=0.01)
-  phantom.set_assembler(voxel_size=1e3, lorder=1, horder=1,
-                        nodal_approximation=True, lumped=True)
+  phantom.set_assembler(voxel_size=2e-3, lorder=2, horder=4,
+                        nodal_approximation=False, lumped=False)
   nodes = phantom.local_nodes
   n_local = nodes.shape[0]
   phantom.set_static_fields(T2=np.full(n_local, 1e9, dtype=np.float32),
@@ -177,12 +193,13 @@ if __name__ == '__main__':
     err_roemer, err_rss = phase_error(roemer), phase_error(rss)
     MPI_print('phase error against the truth over the object (median): '
               'Roemer {:.4f} rad, RSS {:.4f} rad'.format(err_roemer, err_rss))
-    # The MEDIAN, not the worst voxel. The residual is the forward model, not
-    # the combine: a 48x48 truncated reconstruction of a phantom full of
-    # circular vials rings at every internal edge, which reads 0.45 rad at the
-    # worst voxel while the median sits at 0.05. RSS returns a real magnitude,
-    # so its phase is identically zero and it cannot reproduce a ramp at all.
-    assert err_roemer < 0.15, (
+    # The MEDIAN, not the worst voxel: the disc has a sharp edge in a FOV only
+    # 1.2x its width, so the reconstruction rings there whatever the combine
+    # does -- a uniform disc computed ANALYTICALLY rings identically (ripple
+    # std/mean 0.108 against this simulation's 0.111, agreeing to 1.2% of peak).
+    # RSS returns a real magnitude, so its phase is identically zero and it
+    # cannot reproduce a ramp at all.
+    assert err_roemer < 0.05, (
       f'the matched filter should recover the magnetization phase; got '
       f'{err_roemer:.4f} rad')
     assert err_rss > 0.5, (
@@ -197,7 +214,7 @@ if __name__ == '__main__':
               'over the object, the matched filter {:.2f}x'
               .format(float(ratio_single.max()/ratio_single.min()),
                       float(ratio_roemer.max()/ratio_roemer.min())))
-    assert ratio_roemer.max()/ratio_roemer.min() < 1.25, (
+    assert ratio_roemer.max()/ratio_roemer.min() < 1.10, (
       'the matched filter did not divide the sensitivity shading out')
 
     # 7. Panels: each coil sees a different part of the object, RSS puts them
