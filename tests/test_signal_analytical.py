@@ -957,3 +957,123 @@ def test_an_oblique_orientation_gives_the_same_physics(tmp_path):
   naive = _nodal_phase(maxwell_phase_coefficients(moments, scanner)[1], imaging)
   assert np.abs(naive - direct).max() > 0.1 * np.abs(direct).max(), (
     'this orientation is too close to axial to show the frame matters')
+
+
+# ---------------------------------------------------------------------------
+# Receive coil sensitivity
+# ---------------------------------------------------------------------------
+#
+# `b1_map` is TRANSMIT and reaches k-space through the magnetization, which the
+# test above pins. Receive sensitivity is the other half and had no
+# counterpart: nothing scaled what a coil hears from a magnetization already
+# fixed. It rides the assembler's free `nv` axis, so these pin both the
+# arithmetic and the column ORDER, which is the part a caller has to unpack.
+
+
+def _dc_signal(phantom, mxy):
+  """The full `nv` row at k = 0, t = 0, rather than its first entry."""
+  phantom.update_magnetization(np.ascontiguousarray(mxy, dtype=np.complex64))
+  zero = np.zeros((1, 1, 1), dtype=np.float32)
+  return np.asarray(phantom.mri_signal(
+      (zero.copy(), zero.copy(), zero.copy()), zero.copy(), None)).reshape(-1)
+
+
+def test_a_receive_map_folds_onto_the_coil_axis(tmp_path):
+  """`S[e*n_coils + c] = sum_n m_n C[n,c] Mxy[n,e]`, exactly.
+
+  The nodal weights are measured off the assembler first, so this is a closed
+  form and not a tolerance -- and they differ by 9x across this mesh, so a fold
+  that paired the wrong rows cannot pass.
+
+  It also pins the column ORDER, which is the part a caller has to unpack:
+  coils vary FASTEST, so one C-order reshape to `(n_enc, n_coils)` recovers
+  both. The transposed prediction is asserted to disagree, or this test would
+  pass under either convention.
+  """
+  phantom = _irregular_phantom(tmp_path / 'coils.vtu')
+  weights = _nodal_weights(phantom)
+  n = phantom.local_nodes.shape[0]
+
+  rng = np.random.default_rng(17)
+  C = (rng.normal(size=(n, 3)) + 1j * rng.normal(size=(n, 3))).astype(np.complex64)
+  Mxy = (rng.normal(size=(n, 2)) + 1j * rng.normal(size=(n, 2))).astype(np.complex64)
+
+  phantom.set_receive_sensitivity(C)
+  got = _dc_signal(phantom, Mxy)
+  assert got.size == 6, f'expected nv = 2 encodings x 3 coils, got {got.size}'
+
+  predicted = np.array([(weights * Mxy[:, e] * C[:, c]).sum()
+                        for e in range(2) for c in range(3)])
+  worst = float(np.abs(got - predicted).max() / np.abs(predicted).max())
+  assert worst < 1e-6, f'the folded signal is off by {worst:.2e}'
+
+  transposed = np.array([(weights * Mxy[:, e] * C[:, c]).sum()
+                         for c in range(3) for e in range(2)])
+  assert np.abs(got - transposed).max() > 0.1 * np.abs(predicted).max(), (
+    'encodings-fastest and coils-fastest agree here, so this case cannot '
+    'distinguish the two orderings')
+
+
+def test_a_receive_map_weights_the_node_it_belongs_to(tmp_path):
+  """Permuting the map must permute which node each coil hears, not merely
+  change the answer. A fold that applied the map in the wrong row order, or
+  broadcast one node's value everywhere, satisfies "the signal moved"."""
+  phantom = _irregular_phantom(tmp_path / 'local.vtu')
+  weights = _nodal_weights(phantom)
+  n = phantom.local_nodes.shape[0]
+
+  rng = np.random.default_rng(23)
+  C = (rng.normal(size=(n, 2)) + 1j * rng.normal(size=(n, 2))).astype(np.complex64)
+  Mxy = (rng.normal(size=n) + 1j * rng.normal(size=n)).astype(np.complex64)
+  order = np.array([2, 4, 0, 3, 1])
+
+  phantom.set_receive_sensitivity(C)
+  plain = _dc_signal(phantom, Mxy)
+  phantom.set_receive_sensitivity(C[order])
+  permuted = _dc_signal(phantom, Mxy)
+
+  expect = np.array([(weights * Mxy * C[order][:, c]).sum() for c in range(2)])
+  assert np.abs(permuted - expect).max() < 1e-6 * np.abs(expect).max()
+  assert np.abs(permuted - plain).max() > 0.1 * np.abs(plain).max(), (
+    'this permutation left the signal unchanged, so it pins nothing')
+
+
+def test_clearing_the_receive_map_restores_the_plain_signal(tmp_path):
+  """`None` must leave no trace -- bit-identical, not merely close, since the
+  fold is skipped rather than multiplied by ones."""
+  phantom = _irregular_phantom(tmp_path / 'clear.vtu')
+  n = phantom.local_nodes.shape[0]
+  rng = np.random.default_rng(29)
+  Mxy = (rng.normal(size=n) + 1j * rng.normal(size=n)).astype(np.complex64)
+
+  before = _dc_signal(phantom, Mxy)
+  phantom.set_receive_sensitivity(
+    (rng.normal(size=(n, 4)) + 1j * rng.normal(size=(n, 4))).astype(np.complex64))
+  assert _dc_signal(phantom, Mxy).size == 4
+  phantom.set_receive_sensitivity(None)
+  after = _dc_signal(phantom, Mxy)
+  assert after.size == 1
+  assert after[0] == before[0], (
+    f'clearing the map changed the signal: {before[0]} -> {after[0]}')
+
+
+@pytest.mark.parametrize('bad,match', [
+  ('short', 'rows for'),
+  ('nan', 'not finite'),
+  ('rank3', 'expected'),
+], ids=['short', 'nonfinite', 'three_dimensional'])
+def test_a_bad_receive_map_is_refused(tmp_path, bad, match):
+  """A short map is read out of bounds by the assembler under `-DNDEBUG` and a
+  non-finite one turns every sample that coil touches into NaN, so neither may
+  be accepted. Refused at the setter, before any redistribution."""
+  phantom = _irregular_phantom(tmp_path / f'bad_{bad}.vtu')
+  n = phantom.local_nodes.shape[0]
+  C = np.ones((n, 2), dtype=np.complex64)
+  if bad == 'short':
+    C = C[:-1]
+  elif bad == 'nan':
+    C[2, 1] = np.nan
+  else:
+    C = C.reshape(n, 2, 1)
+  with pytest.raises(ValueError, match=match):
+    phantom.set_receive_sensitivity(C)

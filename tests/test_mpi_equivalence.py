@@ -268,6 +268,84 @@ def test_simulate_pulseq_matches_serial_under_mpi(tmp_path):
 @pytest.mark.requires_mpi
 @pytest.mark.pulseq
 @pytest.mark.timeout(420)
+def test_a_receive_map_survives_mpi_and_dual_partitioning(tmp_path):
+  """A receive map is a per-LOCAL-node array, so under dual partitioning it is
+  redistributed into the signal layout before it is folded in -- and nothing
+  covered that path.
+
+  The map is tied to NODE POSITION rather than being constant, which is the
+  whole point: with a constant map, a redistribution that moved the wrong rows
+  changes k-space by exactly 0.000e+00, and the audit that found this class of
+  hole found it exactly that way. Each coil also gets its own spatial
+  weighting and phase, so a fold that collapsed the coil axis or reused one
+  column is visible.
+  """
+  pytest.importorskip('mpi4py')
+  pytest.importorskip('pymetis')
+  pytest.importorskip('meshio')
+  pytest.importorskip('pypulseq')
+  if shutil.which('mpirun') is None:
+    pytest.skip('mpirun not on PATH')
+
+  from conftest import skip_if_pypulseq_too_old
+  from _phantom_fixtures import make_cube_mesh
+
+  seq_path = Path(__file__).resolve().parent / 'data' / 'gre_an_v15.seq'
+  if not seq_path.exists():
+    pytest.skip('run tests/data/generate_seq_fixtures.py')
+  skip_if_pypulseq_too_old(seq_path)
+
+  mesh_path = tmp_path / 'cube.vtu'
+  make_cube_mesh(mesh_path, 'tetra', n=4, scale=1e-3)
+
+  env = os.environ.copy()
+  env.setdefault('OPENBLAS_NUM_THREADS', '1')
+  env.setdefault('OMP_NUM_THREADS', '1')
+  env.setdefault('MPLBACKEND', 'Agg')
+
+  runs = {}
+  for label, argv in (
+      ('serial', [sys.executable]),
+      ('mpi2', ['mpirun', '-n', '2', sys.executable]),
+      ('mpi2_dual', ['mpirun', '-n', '2', sys.executable])):
+    out = tmp_path / f'k_{label}.npz'
+    cmd = argv + [str(_PULSEQ_RUNNER), '--mesh', str(mesh_path),
+                  '--seq', str(seq_path), '--output', str(out), '--coils', '3']
+    if label.endswith('dual'):
+      cmd.append('--dual')
+    proc = _run(cmd, env)
+    assert proc.returncode == 0, proc.stdout.decode(errors='replace')[-4000:]
+    runs[label] = np.load(out)['kspace']
+
+  reference = runs['serial']
+  assert reference.ndim == 2 and reference.shape[1] == 3, (
+    f'expected one column per coil, got shape {reference.shape}')
+  scale = float(np.abs(reference).max())
+  assert scale > 0, 'the serial run produced no signal'
+
+  # The coils must actually differ, or rank-count agreement below is agreement
+  # about three copies of one number.
+  for c in range(1, 3):
+    apart = float(np.abs(reference[:, c] - reference[:, 0]).max() / scale)
+    assert apart > 0.05, (
+      f'coil {c} is within {apart:.2e} of coil 0; this map does not separate '
+      f'the coil axis')
+
+  for label in ('mpi2', 'mpi2_dual'):
+    got = runs[label]
+    assert got.shape == reference.shape
+    worst = float(np.abs(got - reference).max() / scale)
+    # Same float32 reassociation bound the other rank-count tests use: a
+    # different partition sums the same terms in a different order.
+    assert worst < 1e-4, (
+      f'{label} differs from serial by {worst:.3e} of peak, above float32 '
+      f'reassociation -- the map is following the partition, not the node')
+
+
+@pytest.mark.slow
+@pytest.mark.requires_mpi
+@pytest.mark.pulseq
+@pytest.mark.timeout(420)
 def test_the_bin_readout_survives_mpi_and_dual_partitioning(tmp_path):
   """The per-sub-spin readout must give the same k-space at any rank count and
   under either partitioning scheme.
@@ -410,7 +488,8 @@ def test_a_rank_asymmetric_refusal_does_not_hang(tmp_path):
 @pytest.mark.slow
 @pytest.mark.requires_mpi
 @pytest.mark.timeout(240)
-@pytest.mark.parametrize('case', ['static_fields', 'update_mag', 'b1_map'])
+@pytest.mark.parametrize('case', ['static_fields', 'update_mag', 'b1_map',
+                                  'coil_map'])
 def test_every_per_node_refusal_reaches_every_rank(tmp_path, case):
   """Three more refusals whose condition is true on a SUBSET of ranks, each
   sitting upstream of a collective. All three hung.
@@ -424,6 +503,9 @@ def test_every_per_node_refusal_reaches_every_rank(tmp_path, case):
   - `b1_map`: the one public per-node array left out of the collective row
     check, so the kernel's own length check threw rank-locally and the other
     ranks waited in solve()'s closing Barrier.
+  - `coil_map`: the receive sensitivity, added later and given the collected
+    form from the start rather than after a hang -- one NaN at a single global
+    node lives on one rank, and the setter redistributes.
 
   The timeout is the assertion: before the fix none of these came back.
   """
@@ -447,7 +529,15 @@ def test_every_per_node_refusal_reaches_every_rank(tmp_path, case):
     env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=150)
   out = proc.stdout.decode(errors='replace')
   assert proc.returncode != 0, f'{case} was accepted'
-  assert out.count('Error') >= 2, (
-    f'{case} raised on one rank only, so the rest never reached the '
-    f'collective that reports it:\n{out[-3000:]}')
+  # Count the runner's own per-rank markers, not tracebacks: ONE traceback
+  # contains the word "Error" twice, so the obvious `count('Error') >= 2`
+  # passes on a single-rank raise -- exactly the bug these cases exist for.
+  # Verified by mutation: with the collective replaced by a bare raise, this
+  # reads 1 refusal where the old form read 2 "Error"s and passed.
+  assert out.count('REFUSED') == 2, (
+    f'{case} was refused on {out.count("REFUSED")} of 2 ranks; a rank that '
+    f'neither refused nor accepted is blocked in the collective that reports '
+    f'it:\n{out[-3000:]}')
+  assert 'ACCEPTED' not in out, (
+    f'{case} was accepted on some rank:\n{out[-3000:]}')
 

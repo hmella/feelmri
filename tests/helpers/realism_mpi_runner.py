@@ -69,6 +69,32 @@ def _build_sequence(scanner):
   return seq
 
 
+def _run_refusal_case(case, phantom, scanner, n_local, globals_):
+    """One per-node refusal whose condition is true on a SUBSET of ranks."""
+    if case == 'static_fields':
+        # One global node is "air" at T2 = 0, so it lives on one rank only.
+        T2 = np.full(n_local, 100.0, dtype=np.float32)
+        T2[globals_ == 0] = 0.0
+        phantom.set_static_fields(T2=T2,
+                                  phi_dB0=np.zeros(n_local, dtype=np.float32))
+    elif case == 'update_mag':
+        # One length for every rank, right on some and wrong on others.
+        phantom.update_magnetization(np.ones((80, 1), dtype=np.complex64))
+    elif case == 'coil_map':
+        # One global node's coil value is NaN, so it lives on one rank only --
+        # the same shape as the T2 air node.
+        C = np.ones((n_local, 2), dtype=np.complex64)
+        C[globals_ == 0, 1] = np.nan
+        phantom.set_receive_sensitivity(C)
+    else:
+        solver = BlochSolver(_build_sequence(scanner), phantom, scanner=scanner,
+                             M0=1.0, T1=Quantity(1e9, 'ms'),
+                             T2=Quantity(400.0, 'ms'), perfect_spoiling=False,
+                             dtype='float64')
+        solver.b1_map = np.ones(80, dtype=np.complex128)
+        solver.solve()
+
+
 def main(argv=None):
   ap = argparse.ArgumentParser()
   ap.add_argument('--mesh', required=True)
@@ -78,7 +104,8 @@ def main(argv=None):
                        'must then raise; if only the poisoned rank does, the '
                        'others block in the collective that reports it.')
   ap.add_argument('--refusal-case', default='',
-                  choices=['', 'static_fields', 'update_mag', 'b1_map'],
+                  choices=['', 'static_fields', 'update_mag', 'b1_map',
+                           'coil_map'],
                   help='exercise one per-node refusal whose condition is true '
                        'on a SUBSET of ranks; every rank must raise')
   ap.add_argument('--poison-at-solve', type=int, default=-1,
@@ -91,7 +118,7 @@ def main(argv=None):
 
   phantom = FEMPhantom(path=args.mesh)
   scanner = Scanner()
-  if args.refusal_case in ('static_fields', 'update_mag'):
+  if args.refusal_case in ('static_fields', 'update_mag', 'coil_map'):
     phantom.set_assembler(voxel_size=0.0, lorder=1, horder=1,
                           nodal_approximation=False, lumped=False)
 
@@ -111,25 +138,22 @@ def main(argv=None):
   if args.refusal_case:
     # Each of these inspects local data and sits upstream of a collective, so
     # a bare raise on the rank that notices hangs the rest.
+    #
+    # Every rank reports what happened to IT, and the caller counts the
+    # markers. Counting tracebacks does not work: one traceback contains the
+    # word "Error" twice, so a "at least two ranks raised" assertion passes on
+    # a single-rank raise -- which is precisely the bug under test. A rank that
+    # blocks in a collective prints neither marker and the timeout catches it.
     n_local = phantom.local_nodes.shape[0]
     globals_ = np.asarray(phantom.local_to_global_nodes)
-    if args.refusal_case == 'static_fields':
-      # One global node is "air" at T2 = 0, so it lives on one rank only.
-      T2 = np.full(n_local, 100.0, dtype=np.float32)
-      T2[globals_ == 0] = 0.0
-      phantom.set_static_fields(T2=T2,
-                                phi_dB0=np.zeros(n_local, dtype=np.float32))
-    elif args.refusal_case == 'update_mag':
-      # One length for every rank, so it is right on some and wrong on others.
-      phantom.update_magnetization(np.ones((80, 1), dtype=np.complex64))
-    else:
-      solver = BlochSolver(_build_sequence(scanner), phantom, scanner=scanner,
-                           M0=1.0, T1=Quantity(1e9, 'ms'),
-                           T2=Quantity(400.0, 'ms'), perfect_spoiling=False,
-                           dtype='float64')
-      solver.b1_map = np.ones(80, dtype=np.complex128)
-      solver.solve()
-    return
+    try:
+      _run_refusal_case(args.refusal_case, phantom, scanner, n_local, globals_)
+    except Exception as exc:                       # noqa: BLE001 -- reporting
+      print(f'RANK {MPI_rank} REFUSED {type(exc).__name__}: {exc}', flush=True)
+      return 1
+    print(f'RANK {MPI_rank} ACCEPTED', flush=True)
+    return 1
+
 
   # A per-rank field built against the wrong node count is the realistic way
   # this goes wrong -- under dual partitioning the two layouts have different
@@ -173,4 +197,4 @@ def main(argv=None):
 
 
 if __name__ == '__main__':
-  main()
+  raise SystemExit(main())

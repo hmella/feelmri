@@ -770,3 +770,72 @@ def test_simulate_pulseq_couples_the_readout_term_to_the_solver_flag(cube):
   assert moved > 1e-6, (
     f'turning concomitant_fields on changed the k-space by only {moved:.2e}; '
     f'the readout term is not reaching the assembler')
+
+
+@pytest.mark.parametrize('bins', [False, True], ids=['plain', 'sub_ensemble'])
+def test_simulate_pulseq_carries_a_receive_map_onto_the_coil_axis(cube, bins):
+  """End to end through the adapter: `nv` grows by the coil count, the columns
+  are the single-coil signal scaled by that coil, and the phantom comes back
+  holding whatever map it had before.
+
+  A UNIFORM per-coil scale is what makes the prediction exact -- the whole
+  window is then one complex multiple of the single-coil run, at every sample,
+  which a fold that mixed nodes or reordered columns cannot reproduce. That the
+  map is applied PER NODE is pinned by the analytical tests; what is new here
+  is the plumbing.
+
+  The `sub_ensemble` case is the crossing worth having: with `t2_prime` set,
+  the readout is replayed once per sub-spin and weight-summed, so the map is
+  folded inside a loop rather than once. It needs no special handling because
+  the fold happens in `update_magnetization` and the weighted sum is linear in
+  the map -- which is a claim, and this measures it.
+  """
+  from feelmri.PulseqAdapter import simulate_pulseq
+
+  phantom, _volume = cube
+  path = _require('cpmg_v15.seq' if bins else 'gre_an_v15.seq')
+  common = dict(M0=1.0, T1=Q_(1e9, 'ms'),
+                T2=Q_(60.0 if bins else 1e9, 'ms'), dtype='float64')
+  if bins:
+    common.update(t2_prime=Q_(8.0, 'ms'), spectral_bins=8)
+  n = phantom.local_nodes.shape[0]
+
+  _static(phantom, 60.0 if bins else 1e9)
+  single = np.asarray(simulate_pulseq(path, phantom, **common).kspace[0])
+
+  scale = float(np.abs(single).max())
+  assert scale > 0
+
+  # One coil at unity is the exactness check: the fold must be a no-op, and it
+  # is -- 0.000e+00, not a tolerance. That separates the fold from the
+  # assembler's own arithmetic, which is what the three-coil case then carries.
+  _static(phantom, 60.0 if bins else 1e9)
+  unity = np.asarray(simulate_pulseq(
+      path, phantom, coil_sensitivities=np.ones((n, 1), dtype=np.complex64),
+      **common).kspace[0])
+  assert np.array_equal(unity, single), (
+    'a unity single-coil map is not a no-op, so the fold is not exact')
+
+  scales = np.array([1.0, 0.25, 0.5 + 0.5j], dtype=np.complex64)
+  C = np.broadcast_to(scales, (n, 3)).copy()
+  _static(phantom, 60.0 if bins else 1e9)
+  multi = np.asarray(simulate_pulseq(path, phantom, coil_sensitivities=C,
+                                     **common).kspace[0])
+
+  assert multi.shape[:-1] == single.shape[:-1]
+  assert multi.shape[-1] == 3 * single.shape[-1], (
+    f'expected nv = {single.shape[-1]} x 3, got {multi.shape[-1]}')
+
+  # 1e-5, not 1e-6: at nv = 3 the assembler accumulates the k-point loop over
+  # three columns at once, so `-ffast-math` groups the FMAs differently than at
+  # nv = 1. Measured 2.6e-06 / 6.4e-07 / 1.8e-06 on the three coils here and
+  # 2.9e-06 / 7.3e-07 / 2.2e-06 on the sub-ensemble path, against 0.000e+00 for
+  # the nv = 1 case above -- float32 reassociation, the same class the repo
+  # already carries for k.x alone, and not the fold.
+  for c, s in enumerate(scales):
+    worst = float(np.abs(multi[..., c] - s * single[..., 0]).max() / scale)
+    assert worst < 1e-5, f'coil {c} is off by {worst:.2e} from {s} x the single-coil run'
+
+  assert getattr(phantom, '_receive_sensitivity', None) is None, (
+    'simulate_pulseq left its receive map on the phantom, so anything the '
+    'caller evaluates afterwards silently carries it')

@@ -39,6 +39,11 @@ def main() -> int:
                   help='set the static fields while the SIGNAL layout is live, '
                        'so their row count disagrees with the solver on some '
                        'ranks and not others')
+  ap.add_argument('--coils', type=int, default=0,
+                  help='build this many receive coils, each a smooth function '
+                       'of NODE POSITION, and pass them as coil_sensitivities. '
+                       'Position-tied on purpose: a redistribution that moved '
+                       'the wrong rows is invisible against a constant map.')
   ap.add_argument('--dual', action='store_true',
                   help='build two partitions instead of one, so every static '
                        'field and magnetization handoff is redistributed')
@@ -91,11 +96,23 @@ def main() -> int:
   if args.t2_prime > 0.0:
     extra = dict(t2_prime=Quantity(args.t2_prime, 'ms'),
                  spectral_bins=args.spectral_bins)
+  if args.coils > 0:
+    # Tied to the node's POSITION, so the map follows the node through the
+    # redistribution rather than its index in some rank-local array. Each coil
+    # gets a different spatial weighting AND a different phase, so a fold that
+    # collapsed the coil axis or reused one column is visible.
+    span = nodes / (reach or 1.0)
+    extra['coil_sensitivities'] = np.stack(
+        [(1.0 + 0.5 * np.cos((c + 1) * np.pi * span[:, c % 3]))
+         * np.exp(1j * (0.6 * c + 0.3 * span[:, (c + 1) % 3]))
+         for c in range(args.coils)], axis=1).astype(np.complex64)
 
   sim = simulate_pulseq(args.seq, phantom, M0=1.0,
                         T1=Quantity(1e9, 'ms'), T2=Quantity(60.0, 'ms'),
                         dtype='float64', **extra)
-  gathered = np.asarray(sim.kspace[0]).reshape(-1)
+  gathered = np.asarray(sim.kspace[0])
+  gathered = gathered.reshape(-1, gathered.shape[-1]) if args.coils > 0 \
+      else gathered.reshape(-1)
 
   if rank == 0:
     np.savez(args.output, kspace=gathered, size=np.int64(size))

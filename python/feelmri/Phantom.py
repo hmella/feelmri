@@ -1249,6 +1249,10 @@ class FEMPhantom:
         return self._update_magnetization_local(Mxy)
 
     def _update_magnetization_local(self, Mxy):
+        # The receive map is folded HERE, after any redistribution, so the
+        # Alltoallv above moves the encodings alone rather than
+        # n_enc * n_coils columns of the same data.
+        Mxy = self._apply_receive_sensitivity(Mxy)
         for i, a in enumerate(self.assembler):
             if i == 0 and self.nodal_approximation__:
                 a.update_nodal_magnetization(self.M_, Mxy)
@@ -1368,6 +1372,102 @@ class FEMPhantom:
 
     def _set_static_fields_local(self, T2, phi_dB0):
         [a.set_static_fields(T2, phi_dB0) for a in self.assembler]
+
+    def set_receive_sensitivity(self, C):
+        """Per-node complex RECEIVE sensitivity, one column per coil.
+
+        ``C`` is ``(n_local,)`` or ``(n_local, n_coils)`` in the layout the
+        caller is currently under -- built from ``phantom.local_nodes``, the
+        same contract as :meth:`set_static_fields` -- and is redistributed once
+        into the signal layout, where the assemblers live. ``None`` clears it.
+
+        **This is RECEIVE only, and it is not the transmit map.**
+        ``BlochSolver(b1_map=...)`` scales the RF a spin sees and therefore
+        changes the magnetization itself; this scales what a coil hears from a
+        magnetization that is already fixed. A quadrature body coil transmitting
+        and an eight-channel array receiving is the ordinary case, and the two
+        maps are unrelated.
+
+        **The coil axis is ``nv``, shared with whatever else already uses it.**
+        The assembler's second magnetization dimension is free (it is what
+        ``examples/4dflow.py`` puts velocity encodings on), so coils multiply
+        into it rather than adding an axis: a magnetization of ``n_enc``
+        columns and a map of ``n_coils`` produce ``nv = n_enc * n_coils``, with
+        **coils varying fastest**. The signal comes back the same way, so
+
+            signal.reshape(n_samples, n_enc, n_coils)
+
+        recovers both. With a 1-D magnetization ``nv == n_coils`` and the
+        reshape is unnecessary.
+
+        The fold happens in :meth:`_update_magnetization_local`, i.e. AFTER the
+        magnetization has been redistributed, so the per-handoff ``Alltoallv``
+        still moves ``n_enc`` columns rather than ``n_enc * n_coils``.
+
+        No row check is needed at fold time, and that is by construction rather
+        than by omission: the length is validated here against the CALLER's
+        layout -- which is the thing that can be got wrong -- and the map is
+        then redistributed into the signal layout, so it necessarily has the
+        same number of rows as any magnetization arriving there. Checking it
+        again per handoff would put a collective inside a loop that runs once
+        per sub-spin per readout window.
+        """
+        if C is None:
+            self._receive_sensitivity = None
+            return
+
+        arr = np.asarray(C)
+        n_local = self.local_nodes.shape[0]
+        # COLLECTED, not raised on the spot. Every condition below inspects
+        # LOCAL-node data, so a map that is wrong for one rank's slice fires
+        # there and nowhere else, and the redistribution beneath is an
+        # Alltoallv -- the shape that has hung this code four times.
+        problem = ''
+        if arr.ndim not in (1, 2):
+            problem = (f"set_receive_sensitivity: expected (n_local,) or "
+                       f"(n_local, n_coils), got shape {arr.shape}.")
+        elif arr.shape[0] != n_local:
+            # Same failure mode as a short T2 map: the assembler indexes by
+            # element connectivity under -DNDEBUG, so a short array is an
+            # out-of-bounds read returning adjacent heap.
+            problem = (f"set_receive_sensitivity: got {arr.shape[0]} rows for "
+                       f"{n_local} local nodes. Build the map from "
+                       f"`phantom.local_nodes` under the partition that is "
+                       f"active when you call this.")
+        elif arr.ndim == 2 and arr.shape[1] < 1:
+            problem = (f"set_receive_sensitivity: a map with {arr.shape[1]} "
+                       f"coils has nothing to receive with.")
+        elif not np.all(np.isfinite(arr)):
+            # np.isfinite on a complex array is False when EITHER part is, so
+            # unlike the C++ guards this needs no bit-pattern reading -- the
+            # `-ffinite-math-only` folding that makes `std::isnan` dead code
+            # applies to the kernel, not to numpy.
+            first = int(np.flatnonzero(~np.isfinite(arr).reshape(-1))[0])
+            problem = (f"set_receive_sensitivity: entry {first} is not "
+                       f"finite, which turns every k-space sample that coil "
+                       f"touches into NaN rather than spoiling its own node.")
+        collective_raise(problem)
+
+        arr = np.ascontiguousarray(arr.reshape(arr.shape[0], -1),
+                                   dtype=np.complex64)
+        if getattr(self, '_dual', False) and self._active_partition != 'signal':
+            arr = self.redistribute_nodal(arr, 'bloch', 'signal')
+        self._receive_sensitivity = arr
+
+    def _apply_receive_sensitivity(self, Mxy):
+        """Fold the stored map into ``Mxy``, giving ``nv = n_enc * n_coils``.
+
+        Coils vary fastest, so column ``e * n_coils + c`` is encoding ``e``
+        heard by coil ``c``. That ordering is what lets a caller recover both
+        with one C-order reshape.
+        """
+        C = getattr(self, '_receive_sensitivity', None)
+        if C is None:
+            return Mxy
+        m = np.asarray(Mxy)
+        flat = m.reshape(m.shape[0], -1)
+        return np.ascontiguousarray(
+            (flat[:, :, None] * C[:, None, :]).reshape(flat.shape[0], -1))
 
     def mri_signal(self, kspace_points, kspace_times, pod=None,
                    maxwell=None):

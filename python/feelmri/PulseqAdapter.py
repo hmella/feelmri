@@ -3071,6 +3071,7 @@ def simulate_pulseq(seq_path,
                     scanner: Optional[Scanner] = None,
                     pod=None,
                     gather: bool = True,
+                    coil_sensitivities=None,
                     import_kwargs: Optional[Dict[str, Any]] = None,
                     **solver_kwargs) -> PulseqSimulation:
   """Import a ``.seq``, evolve the magnetization and assemble its k-space.
@@ -3109,6 +3110,19 @@ def simulate_pulseq(seq_path,
       other rank receives ZEROS. Guard reconstruction, plotting and file output
       with ``if MPI_rank == 0``, and do not test a non-root rank's ``kspace``
       for correctness -- it is expected to be empty, not wrong.
+  coil_sensitivities : array, optional
+      Per-node complex RECEIVE sensitivity, ``(n_local,)`` or
+      ``(n_local, n_coils)``, handed to
+      :meth:`~feelmri.Phantom.FEMPhantom.set_receive_sensitivity` and put back
+      to whatever it was when the call RETURNS. Each window's signal then
+      carries ``nv = n_enc * n_coils`` on its last axis with coils varying
+      fastest, so ``signal.reshape(signal.shape[:-1] + (n_enc, n_coils))``
+      recovers both.
+
+      It has to be an explicit parameter rather than arriving through
+      ``**solver_kwargs``: this is a signal-side quantity, so routing it to
+      ``BlochSolver`` would raise. It is also NOT ``b1_map``, which is
+      transmit and changes the magnetization itself.
   import_kwargs : dict, optional
       Forwarded to :func:`import_pulseq` (``readout_set_values``,
       ``placeholder_dt``, ``validate``).
@@ -3128,6 +3142,15 @@ def simulate_pulseq(seq_path,
   if scanner is None:
     scanner = Scanner()
   imp = import_pulseq(seq_path, scanner=scanner, **(import_kwargs or {}))
+
+  # Set while the CALLER's partition is still live, which is the layout
+  # set_receive_sensitivity validates and redistributes from -- the same
+  # contract set_static_fields follows. Restored at the end so the phantom
+  # comes back as it was handed over.
+  previous_sensitivity = getattr(phantom, '_receive_sensitivity', None)
+  sensitivity_set = coil_sensitivities is not None
+  if sensitivity_set:
+    phantom.set_receive_sensitivity(coil_sensitivities)
 
   solver = BlochSolver(sequence=imp.feelmri_seq, phantom=phantom,
                        scanner=scanner, **solver_kwargs)
@@ -3270,6 +3293,13 @@ def simulate_pulseq(seq_path,
     signal = rw.demodulate(signal)
     kspace.append(gather_data(signal) if gather else signal)
     times.append(rw.times)
+
+  if sensitivity_set:
+    # Restored as the ALREADY-REDISTRIBUTED array, not by re-running the
+    # setter: `previous_sensitivity` was read out of the signal layout, and
+    # feeding it back through set_receive_sensitivity would redistribute it a
+    # second time and pair it with the wrong nodes.
+    phantom._receive_sensitivity = previous_sensitivity
 
   return PulseqSimulation(kspace=kspace, times=times, Mxy=Mxy, Mz=Mz, imp=imp)
 
