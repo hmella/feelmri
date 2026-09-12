@@ -102,7 +102,9 @@ if __name__ == '__main__':
       return x[:,0] + x[:,1] + x[:,2]
   delta_B0 = spatial(phantom.local_nodes)
   delta_B0 /= np.abs(spatial(phantom.global_nodes).flatten()).max()
-  delta_B0 *= scanner.field_strength * 1e-6 * 0.0 # 1.5 ppm of the main magnetic field
+  # Off-resonance is DISABLED here (the trailing 0.0), not set to a small
+  # value -- the tagging image is read against a pure gradient encoding.
+  delta_B0 = delta_B0 * scanner.field_strength * 1e-6 * 0.0
 
   # Phase shift in rad/s
   delta_omega0 = (2.0 * np.pi * scanner.gammabar * delta_B0).to('rad/ms')

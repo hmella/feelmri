@@ -72,7 +72,7 @@ if __name__ == '__main__':
                       oversampling=parameters.Imaging.Oversampling, 
                       lines_per_shot=parameters.Imaging.LinesPerShot, 
                       MPS_ori=planning.MPS,
-                      LOC=planning.LOC.m,
+                      LOC=planning.LOC,
                       receiver_bw=parameters.Hardware.r_BW.to('Hz'), 
                       plot_seq=True)
   traj.plot_trajectory()
@@ -84,7 +84,7 @@ if __name__ == '__main__':
                       res=parameters.Imaging.RES, 
                       oversampling=parameters.Imaging.Oversampling, 
                       MPS_ori=planning.MPS,
-                      LOC=planning.LOC.m,
+                      LOC=planning.LOC,
                       receiver_bw=parameters.Hardware.r_BW.to('Hz'), 
                       plot_seq=True)
   traj_radial.plot_trajectory()
@@ -96,7 +96,7 @@ if __name__ == '__main__':
                       res=parameters.Imaging.RES, 
                       oversampling=parameters.Imaging.Oversampling, 
                       MPS_ori=planning.MPS,
-                      LOC=planning.LOC.m,
+                      LOC=planning.LOC,
                       receiver_bw=parameters.Hardware.r_BW.to('Hz'), 
                       plot_seq=True)
   traj_spiral.plot_trajectory()

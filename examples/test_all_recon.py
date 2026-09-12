@@ -87,7 +87,7 @@ if __name__ == '__main__':
     return x[:,0] + x[:,1] + x[:,2]
   delta_B0 = spatial(phantom.local_nodes)
   delta_B0 /= np.abs(spatial(phantom.global_nodes).flatten()).max()
-  delta_B0 *= scanner.field_strength * 1e-6 # 1.5 ppm of the main magnetic field
+  delta_B0 = delta_B0 * scanner.field_strength * 1e-6  # 1.0 ppm of the main field
 
   # Phase shift in rad/s
   delta_omega0 = (2.0 * np.pi * scanner.gammabar * delta_B0).to('rad/ms')
@@ -212,7 +212,16 @@ if __name__ == '__main__':
       phantom.update_magnetization(Mxy_PC[:, fr, :])
 
       # Generate 4D flow image
-      K[:,:,:,:,fr] = phantom.mri_signal(traj.points, traj.times.m_as('ms'), pod_velocity)
+      # Elapsed time since the MAGNETIZATION SNAPSHOT, not since the
+      # trajectory's own origin. `mri_signal` applies exp(-t/T2*) and
+      # exp(-i*phi*t) continuing from the instant the magnetization was
+      # captured, and on a CartesianStack that instant is `t_start` -- the
+      # timeline runs from the RF centre and the readout begins where the
+      # imaging block ends. Feeding absolute times applies a spurious
+      # exp(-t_start/T2*) and, worse, a SPATIALLY VARYING phi*t_start:
+      # measured 1.688 rad peak-to-peak across the object here.
+      K[:,:,:,:,fr] = phantom.mri_signal(
+          traj.points, traj.times.m_as('ms') - traj.t_start.m_as('ms'), pod_velocity)
 
     # Gather results
     K = gather_data(K)

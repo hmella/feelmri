@@ -47,8 +47,15 @@ class Trajectory:
         Default is False.
     MPS_ori : np.ndarray, optional
         3×3 machine-to-patient-space rotation matrix. Default is identity.
-    LOC : np.ndarray, optional
-        3-element slice location (m). Default is ``[0, 0, 0]``.
+    LOC : Quantity or np.ndarray, optional
+        3-element slice location. A ``Quantity`` is converted; a bare array is
+        taken to be METRES. Default is ``[0, 0, 0]``.
+
+        **Recorded for provenance -- the trajectory does not apply it.** No
+        code path in ``feelmri`` reads ``self.LOC`` back. The slice offset
+        reaches the physics through the PHANTOM instead,
+        ``FEMPhantom.orient(MPS_ori, LOC)``, which moves the object into the
+        imaging frame; applying it here as well would double-count it.
     dtype : np.dtype, optional
         Floating-point precision. Default is ``np.float32``.
     """
@@ -102,9 +109,16 @@ class Trajectory:
         self.plot_seq = plot_seq
         self.receiver_bw = receiver_bw          # [Hz]
         MPS_ori = np.eye(3) if MPS_ori is None else np.asarray(MPS_ori)
-        LOC = np.zeros([3, ]) if LOC is None else np.asarray(LOC)
+        # Converted rather than coerced: `np.asarray` on a Quantity DISCARDS
+        # the unit (with a warning nobody reads), so a location written in cm
+        # -- which several PVSM files are -- would have been stored as though
+        # it were metres. It is the only unit-stripping site the example suite
+        # had, and it was invisible because nothing reads the value back.
+        if isinstance(LOC, Quantity):
+            LOC = LOC.m_as('m')
+        LOC = np.zeros([3, ]) if LOC is None else np.asarray(LOC, dtype=float)
         self.MPS_ori = MPS_ori.astype(dtype)   # orientation
-        self.LOC = LOC.astype(dtype)           # location
+        self.LOC = LOC.astype(dtype)           # location, metres
         self.dtype = dtype
 
     def maxwell_coefficients(self, scanner, t0=None):

@@ -101,8 +101,18 @@ if __name__ == '__main__':
       return x[:,0] + x[:,1] + x[:,2]
   delta_B0 = spatial(phantom.local_nodes)
   delta_B0 /= np.abs(spatial(phantom.global_nodes).flatten()).max()
-  delta_B0 *= 1.5 * 1e-6    # 1.5 ppm of the main magnetic field
-  delta_omega0 = 2.0 * np.pi * scanner.gammabar.m_as('1/ms/T') * delta_B0
+  # 1.0 ppm of the main field. The normalisation above leaves the peak at
+  # exactly 1.0, so this factor IS the peak offset -- and it is written against
+  # `field_strength` rather than as a bare number so it tracks the scanner. A
+  # literal `1.5 * 1e-6` is a FIXED field that happens to equal this at
+  # 1.5 T and diverges from it at any other, which is how the comment here came
+  # to claim 1.5 ppm for 1.0 ppm of offset.
+  delta_B0 = delta_B0 * scanner.field_strength * 1.0e-6
+  # Carried as a Quantity from here on. Left as a bare array, the unit lived
+  # only in the two places that re-declared it -- `m_as('1/ms/T')` here and
+  # `Q_(delta_B0, 'T')` at the solver -- which is the shape that produced a
+  # 1000x error in these same two examples once before.
+  delta_omega0 = (2.0 * np.pi * scanner.gammabar * delta_B0).to('rad/ms')
 
   # Slice profile
   # The slice profile prepulse is calculated based on a reference RF pulse with
@@ -170,7 +180,7 @@ if __name__ == '__main__':
                       M0=1e+9, 
                       T1=parameters.Phantom.T1, 
                       T2=parameters.Phantom.T2star, 
-                      delta_B=Q_(delta_B0, 'T').m_as('mT').reshape((-1, 1)),
+                      delta_B=delta_B0.m_as('mT').reshape((-1, 1)),
                       pod_trajectory=pod_sum)
 
   # Solve dummy blocks to reach the steady state
@@ -181,7 +191,7 @@ if __name__ == '__main__':
   phantom.set_assembler(voxel_size=vxsz[0], lorder=1, horder=6, nodal_approximation=False)
 
   # Set static fields
-  phantom.set_static_fields(T2=T2star.m_as('ms'), phi_dB0=delta_omega0)
+  phantom.set_static_fields(T2=T2star.m_as('ms'), phi_dB0=delta_omega0.m_as('rad/ms'))
 
   # Fast mode for CI testing
   if FAST_MODE:

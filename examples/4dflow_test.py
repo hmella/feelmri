@@ -87,7 +87,11 @@ if __name__ == '__main__':
                             interpolation_method='Pchip')
 
   # Create scanner object defining the gradient strength, slew rate and giromagnetic ratio
-  scanner = Scanner(gradient_strength=pars.Hardware.G_max,
+  # B0 is passed, not left to the Scanner default: the YAML declares it, and
+  # without this editing `Hardware.B0` changed nothing at all. It sets the
+  # off-resonance scale below and the concomitant term, which goes as 1/B0.
+  scanner = Scanner(field_strength=pars.Hardware.B0.to('T'),
+                    gradient_strength=pars.Hardware.G_max,
                     gradient_slew_rate=pars.Hardware.G_sr)
 
   # Field inhomogeneity
@@ -96,7 +100,7 @@ if __name__ == '__main__':
   delta_B0 = spatial(phantom.local_nodes)
   global_max = MPI_comm.allreduce(float(np.abs(delta_B0).max()), op=MPI.MAX)
   delta_B0 /= global_max
-  delta_B0 *= scanner.field_strength * 1e-6 # 1.5 ppm of the main magnetic field
+  delta_B0 = delta_B0 * scanner.field_strength * 1e-6  # 1.0 ppm of the main field
 
   # Phase shift in rad/s
   delta_omega0 = (2.0 * np.pi * scanner.gammabar * delta_B0).to('rad/ms')
@@ -250,7 +254,16 @@ if __name__ == '__main__':
       phantom.update_magnetization(Mxy_PC[:, fr, :])
 
       # Generate 4D flow image
-      K[:,:,:,:,fr] = phantom.mri_signal(traj.points, traj.times.m_as('ms'), pod_velocity)
+      # Elapsed time since the MAGNETIZATION SNAPSHOT, not since the
+      # trajectory's own origin. `mri_signal` applies exp(-t/T2*) and
+      # exp(-i*phi*t) continuing from the instant the magnetization was
+      # captured, and on a CartesianStack that instant is `t_start` -- the
+      # timeline runs from the RF centre and the readout begins where the
+      # imaging block ends. Feeding absolute times applies a spurious
+      # exp(-t_start/T2*) and, worse, a SPATIALLY VARYING phi*t_start:
+      # measured 1.688 rad peak-to-peak across the object here.
+      K[:,:,:,:,fr] = phantom.mri_signal(
+          traj.points, traj.times.m_as('ms') - traj.t_start.m_as('ms'), pod_velocity)
 
   # Gather results
   K = gather_data(K)

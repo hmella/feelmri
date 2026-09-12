@@ -81,7 +81,7 @@ if __name__ == '__main__':
       return x[:,0] + x[:,1] + x[:,2]
   delta_B0 = spatial(phantom.local_nodes)
   delta_B0 /= np.abs(spatial(phantom.global_nodes).flatten()).max()
-  delta_B0 *= scanner.field_strength * 1e-6 # 1.5 ppm of the main magnetic field
+  delta_B0 = delta_B0 * scanner.field_strength * 1e-6  # 1.0 ppm of the main field
 
   # Phase shift in rad/s
   delta_omega0 = (2.0 * np.pi * scanner.gammabar * delta_B0).to('rad/ms')

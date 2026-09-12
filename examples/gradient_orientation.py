@@ -21,7 +21,11 @@ if __name__ == '__main__':
   enc = VelocityEncoding(parameters.VelocityEncoding.VENC, np.array(venc_dirs))
 
   # Create scanner object defining the gradient strength, slew rate and giromagnetic ratio
-  scanner = Scanner(gradient_strength=parameters.Hardware.G_max,
+  # B0 is passed, not left to the Scanner default: the YAML declares it, and
+  # without this editing `Hardware.B0` changed nothing at all. It sets the
+  # off-resonance scale below and the concomitant term, which goes as 1/B0.
+  scanner = Scanner(field_strength=parameters.Hardware.B0.to('T'),
+                    gradient_strength=parameters.Hardware.G_max,
                     gradient_slew_rate=parameters.Hardware.G_sr)
 
   # Create sequence object to show original and rotated gradients
