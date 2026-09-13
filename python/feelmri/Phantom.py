@@ -447,13 +447,8 @@ class FEMPhantom:
         # `local_to_global_nodes` or `local_nodes` must set this, so a later
         # repartition can refuse rather than silently invalidate it.
         self._partition_bound = False
-        # A receive map is indexed by LOCAL node and the layout just changed,
-        # so keeping it would pair every coil with the wrong nodes. It cannot
-        # be repaired here -- the map was built against a partition that no
-        # longer exists -- so it is dropped and said so. Left in place, the
-        # failure was a bare numpy broadcast error raised from inside
-        # `_update_magnetization_local`, i.e. AFTER an Alltoallv, and only on
-        # the ranks whose node counts happened to differ.
+        # A receive map is indexed by local node, so the new layout would pair
+        # every coil with the wrong nodes. Drop it rather than keep it.
         if getattr(self, '_receive_sensitivity', None) is not None:
             self._receive_sensitivity = None
             MPI_print("[FEMPhantom] WARNING: the receive sensitivity map was "
@@ -1077,39 +1072,22 @@ class FEMPhantom:
 
         Notes
         -----
-        **The matrix is remembered on the phantom** as ``_orientation``,
-        because after this call the stored coordinates are IMAGING-frame and
-        anything evaluating a field that is not frame-invariant needs to know
-        it. The linear encoding `x . G` is a dot product and does not care;
-        the concomitant term does -- `Bc = (Bx^2 + By^2)/(2 B0)` singles out
-        B0's axis, so evaluating it on imaging-frame coordinates treats the
-        SLICE NORMAL as B0. `BlochSolver` reads this attribute so that cannot
-        be forgotten; measured on a 20 deg tilt, forgetting it is a 31.6%
-        error on the concomitant phase.
+        The matrix is stored as ``_orientation``: the node coordinates are in
+        the imaging frame after this call, and a field that is not
+        frame-invariant needs the rotation back to the physical frame.
+        ``BlochSolver`` reads it for the concomitant term.
         """
-        # The assembler CAPTURES the node coordinates in its constructor --
-        # positions, element sizes, the quadrature cache, the mass matrix and
-        # the ownership mask all come from them -- so moving the mesh
-        # afterwards leaves every one of those describing a phantom that no
-        # longer exists. Nothing downstream notices; the signal is simply
-        # computed at the old positions. Measured on a 23 deg tilt, the
-        # solver-to-assembler handoff came apart by 1.46 relative.
-        #
-        # The predicate is the presence of the assembler list, which every
-        # rank builds together, so this cannot fire on some ranks only.
+        # The assembler stores the node coordinates, the element sizes, the
+        # quadrature cache and the mass matrix, so moving the mesh afterwards
+        # leaves all of them describing the previous geometry.
         collective_raise(
             f"orient: set_assembler has already been called, and the assembler "
             f"holds the node coordinates this would move. Orient the phantom "
             f"BEFORE building the assembler."
             if getattr(self, 'assembler', None) else '', RuntimeError)
 
-        # Kept in float64 whatever the mesh dtype, and taken BEFORE the cast
-        # below: it is used to rotate gradients, so its ORTHOGONALITY is what
-        # matters, not its agreement with the stored nodes. Rounded to float32
-        # first, `R^T R` departs from the identity by 2.7e-8, which on a
-        # readout carrying several thousand radians of `G . x` shows up as
-        # 2.4e-4 rad of spurious LINEAR phase -- measured, and four orders
-        # above the concomitant agreement it was hiding.
+        # Kept in float64 whatever the mesh dtype, and taken before the cast
+        # below: it rotates gradients, so it has to stay orthogonal.
         self._orientation = np.array(MPS_ori, dtype=np.float64)
 
         # Get orientation
@@ -1130,16 +1108,9 @@ class FEMPhantom:
         LOC : pint.Quantity
             3-element location vector previously passed to :meth:`orient`.
         """
-        # The assembler CAPTURES the node coordinates in its constructor --
-        # positions, element sizes, the quadrature cache, the mass matrix and
-        # the ownership mask all come from them -- so moving the mesh
-        # afterwards leaves every one of those describing a phantom that no
-        # longer exists. Nothing downstream notices; the signal is simply
-        # computed at the old positions. Measured on a 23 deg tilt, the
-        # solver-to-assembler handoff came apart by 1.46 relative.
-        #
-        # The predicate is the presence of the assembler list, which every
-        # rank builds together, so this cannot fire on some ranks only.
+        # The assembler stores the node coordinates, the element sizes, the
+        # quadrature cache and the mass matrix, so moving the mesh afterwards
+        # leaves all of them describing the previous geometry.
         collective_raise(
             f"reorient: set_assembler has already been called, and the assembler "
             f"holds the node coordinates this would move. Reorient the phantom "
@@ -1522,10 +1493,8 @@ class FEMPhantom:
         if getattr(self, '_dual', False) and self._active_partition != 'signal':
             arr = self.redistribute_nodal(arr, 'bloch', 'signal')
         self._receive_sensitivity = arr
-        # The map is one value per LOCAL node, so it is bound to this partition
-        # exactly as a POD trajectory is. Saying so is what lets
-        # `enable_dual_partition` refuse the wrong call order up front, instead
-        # of the map surviving into a layout it does not describe.
+        # One value per local node, so the map is bound to this partition and
+        # `enable_dual_partition` must refuse to repartition after it.
         self._partition_bound = True
 
     def _apply_receive_sensitivity(self, Mxy):

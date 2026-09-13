@@ -153,28 +153,19 @@ class Trajectory:
         That is warned about rather than guessed at: the trajectory does not
         know where the excitation was.
 
-        ``carried`` closes the one hole this split otherwise has. `Bc` is
-        QUADRATIC in G, so `Bc(G_a + G_b) != Bc(G_a) + Bc(G_b)`: wherever the
-        gradients the solver already integrated still overlap this
-        trajectory's own, computing the two contributions separately drops
-        their cross term. Pass the solver's gradients -- expressed in THIS
-        trajectory's time frame, i.e. measured from the same origin as
-        :attr:`times` -- and the whole field is integrated once and what the
-        solver already applied, `integral` up to ``t_snapshot`` (default
-        :attr:`t_start`) of the carried gradients alone, is subtracted back
-        off. Measured on ``examples/phase_contrast.py``, where the readout
-        prephasers overlap the VENC bipolar by 0.45 ms: the cross term is
-        **15.8%** of the velocity-encoding direction's concomitant readout
-        phase and **0%** of the reference direction's, so it does not cancel in
-        the velocity map -- it lands directly on the quantity the example
-        measures.
+        ``carried`` are gradients the solver has already integrated, given in
+        this trajectory's own time frame. ``Bc`` is quadratic in G, so
+        ``Bc(G_a + G_b) != Bc(G_a) + Bc(G_b)``: a carried set that overlaps
+        this trajectory's gradients in time contributes a cross term that
+        neither half computes alone. Passing them integrates the whole field
+        once and subtracts what the solver already applied, the integral up to
+        ``t_snapshot`` (default :attr:`t_start`) of the carried gradients
+        alone.
 
         **Caveat specific to CartesianStack.** Both encoding axes are modelled
-        by their LARGEST prephaser rather than one waveform per line and per
-        partition -- the y and z products are the outermost line's and the
-        outermost partition's everywhere, an upper bound that is tight at the
-        edges of k-space and loose at the centre. The readout axis, which
-        dominates, is exact.
+        by their largest prephaser rather than one waveform per line and per
+        partition, so the y and z products are an upper bound. The readout
+        axis, which dominates, is exact.
         """
         from feelmri.PulseqAdapter import (maxwell_moments as _moments,
                                            maxwell_phase_coefficients as _coef)
@@ -204,11 +195,8 @@ class Trajectory:
         if carried:
             t_snap = (float(self.t_start.m_as('ms')) if t_snapshot is None
                       else float(t_snapshot))
-            # ONE integration of the summed field, so the cross terms between
-            # the two gradient sets are present; then the constant the solver
-            # has already put on the magnetization is taken back off. After
-            # `t_snap` the carried gradients are over, so this leaves exactly
-            # the readout's own share plus the overlap.
+            # One integration of the summed field, so the cross terms are
+            # present, minus what the solver already applied up to t_snap
             moments = (_moments(list(gradients) + carried, t0, times,
                                 rotation=R)
                        - _moments(carried, t0, np.array([t_snap]),
@@ -303,21 +291,10 @@ class CartesianStack(Trajectory):
         ph_grad.change_time(enc_time)
         ro_grad0.change_time(enc_time)
 
-        # Partition encode. It exists as a k-space OFFSET further down and had
-        # no waveform at all, so the concomitant moments saw a stack of slices
-        # as though nothing were played along z -- and `Bc` weights `Gz` most
-        # heavily of the three, through `(Gz^2/4)(x^2 + y^2)` and both cross
-        # terms.
-        #
-        # Built at the largest |kz| the stack reaches, which is the same
-        # maximum-prephaser approximation the in-plane phase encode already
-        # makes, and placed to END at `t_start`. Ending rather than starting
-        # with the others is what keeps it out of the readout: its area is set
-        # by the SLAB thickness, so on a thin-slab stack it is comfortably the
-        # longest of the three prephasers and start-aligning it would run it
-        # into the first echo, where the k-space model says nothing is playing.
-        # `enc_time` is untouched either way, so no echo time and no sample
-        # time moves: a single-partition acquisition is bit-identical.
+        # Partition-encode gradient, at the largest |kz| the stack reaches. It
+        # ends at `t_start` rather than starting with the in-plane prephasers,
+        # which keeps it out of the first echo; `enc_time` is unchanged, so no
+        # echo time and no sample time moves.
         enc_gradients = []
         if self.slices > 1:
             kz_max = np.max(np.abs(self.kz_extent.m_as('1/m')))

@@ -1245,22 +1245,13 @@ class BlochSolver:
         self._B0_mT = (float(scanner.field_strength.m_as('mT'))
                        if self.concomitant_fields else 0.0)
 
-        # WHICH FRAME THE STORED COORDINATES ARE IN. `FEMPhantom.orient` leaves
-        # nodes in the IMAGING frame, and `Bc = (Bx^2 + By^2)/(2 B0)` singles
-        # out B0's axis -- so evaluated on those coordinates it treats the
-        # SLICE NORMAL as B0. The linear term `x . G` is a dot product and is
-        # frame-invariant, which is exactly why this went unnoticed: everything
-        # else in the kernel gives the same answer either way.
-        #
-        # Picked up from the phantom by default rather than demanded from the
-        # caller, because forgetting it is how the defect arose: measured on a
-        # 20 deg tilt, the same physical experiment described in the two frames
-        # disagreed by 1.559 rad, 31.6% of the phase.
+        # Rotation from the phantom's imaging frame to the physical frame the
+        # concomitant field is defined in. Read off the phantom when not given.
         if orientation is None:
             orientation = getattr(phantom, '_orientation', None)
-        # The message is COMPUTED behind the predicate; the collective is
-        # called outside it. This repo has hit the other arrangement four
-        # times, most recently in a guard written to fix it.
+
+        # Build the message here and call the collective unconditionally below,
+        # so every rank raises together.
         problem = ''
         R = None
         if orientation is not None:
@@ -1269,10 +1260,6 @@ class BlochSolver:
                 problem = (f"BlochSolver: orientation must be a 3x3 rotation, "
                            f"got shape {R.shape}.")
             elif not np.allclose(R @ R.T, np.eye(3), atol=1e-5):
-                # Checked here and not in `maxwell_phase_coefficients`, where
-                # the congruence R^T M R is algebraically fine for any
-                # invertible R: it is the PHYSICS that needs a rotation, since
-                # `G_physical = R G_logical` assumes lengths are preserved.
                 problem = (f"BlochSolver: orientation is not orthogonal; "
                            f"R @ R.T departs from the identity by "
                            f"{np.abs(R @ R.T - np.eye(3)).max():.2e}. A frame "
@@ -1417,9 +1404,8 @@ class BlochSolver:
         faster on the free-running block. Handing pybind11 the layout it
         declares also avoids a 23 MB transpose on every kernel call.
         """
-        # The rotation is part of the key: `concomitant_fields` is a
-        # constructor knob but a plain attribute, so a caller who flips it
-        # between solves would otherwise be handed modes in the other frame.
+        # The rotation belongs in the key: `concomitant_fields` is a plain
+        # attribute and may differ between solves.
         rotate = bool(self.concomitant_fields and self._orientation is not None)
         cache = self._modes_cache
         if cache is not None:
@@ -1430,10 +1416,8 @@ class BlochSolver:
 
         modes = self.pod_trajectory.get_modes(nb_nodes)
         if rotate:
-            # Displacements are vectors and rotate with the positions they are
-            # added to, or the deformed mesh would be a mixture of the two
-            # frames. Done before the (N, 3, M) -> (3N, M) flatten, while the
-            # component axis is still addressable.
+            # Rotate the displacements with the positions, before the
+            # (N, 3, M) -> (3N, M) flatten
             modes = np.einsum('ij,njm->nim', self._orientation,
                               np.asarray(modes, dtype=np.float64))
         mat = np.asfortranarray(
@@ -1648,24 +1632,16 @@ class BlochSolver:
         # Current machine time
         t0 = time.perf_counter()
 
-        # Phantom position.
-        #
-        # ROTATED INTO THE PHYSICAL FRAME when the phantom is oriented and the
-        # concomitant term is on. `Bc = (Bx^2 + By^2)/(2 B0)` singles out B0's
-        # axis, so it has to be evaluated on coordinates whose z IS B0; the
-        # linear term `x . G` is a dot product and does not notice, which is
-        # why nothing else moves. Gradients and POD modes are rotated with it
-        # (below and in `_trajectory_modes`), so `G . x` is preserved exactly
-        # and a caller who never asks for the term gets a bit-identical path.
-        #
-        # This is a ROTATION only. `orient` also SUBTRACTS a slice location,
-        # and `Bc` is quadratic about the magnet isocentre rather than about
-        # the slab, so an off-isocentre acquisition carries a further term this
-        # does not model -- the same limitation the readout half has.
+        # Phantom position, rotated into the physical frame when the phantom
+        # is oriented and the concomitant term is on: Bc = (Bx^2 + By^2)/(2 B0)
+        # is defined on B0's axis, while the linear term x . G is
+        # frame-invariant. The gradients and the POD modes are rotated with it,
+        # so x . G is unchanged. The slice location `orient` subtracts is not
+        # restored, so an off-isocentre slab keeps a residual quadratic term.
         R_phys = self._orientation if self.concomitant_fields else None
         x = self.phantom.local_nodes
         if R_phys is not None:
-            # Rows are positions, so `R x` is `x @ R.T`.
+            # Rows are positions, so R x is x @ R.T
             x = np.asarray(x, dtype=np.float64) @ R_phys.T
         x = np.ascontiguousarray(x, dtype=self._np_real)
 
@@ -1884,8 +1860,7 @@ class BlochSolver:
             gradients[:, 1] = G[1]
             gradients[:, 2] = G[2]
             if R_phys is not None:
-                # `G_physical = R G_logical`, the same rotation the scanner
-                # applies to the logical axes.
+                # G_physical = R G_logical
                 gradients = np.ascontiguousarray(
                     gradients.astype(np.float64) @ R_phys.T,
                     dtype=self._np_real)

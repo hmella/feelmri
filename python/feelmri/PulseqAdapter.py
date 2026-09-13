@@ -3152,9 +3152,8 @@ def simulate_pulseq(seq_path,
   if sensitivity_set:
     phantom.set_receive_sensitivity(coil_sensitivities)
 
-  # The temporary sensitivity map has to come off even when a readout
-  # raises: leaving it on hands the caller back a phantom that silently
-  # multiplies every later signal by a map they never set.
+  # The temporary sensitivity map is removed in the finally below, so a
+  # readout that raises does not leave it on the caller's phantom.
   try:
     solver = BlochSolver(sequence=imp.feelmri_seq, phantom=phantom,
                          scanner=scanner, **solver_kwargs)
@@ -3248,19 +3247,14 @@ def simulate_pulseq(seq_path,
       # deformation disagreed with the one the solver used at the same
       # instant. Restored afterwards so the caller's object comes back
       # unchanged.
-      # The phantom's orientation, or `Bc` is evaluated in the imaging frame
-      # and treats the SLICE NORMAL as B0. Read off the phantom for the same
-      # reason `BlochSolver` does -- passing it is the step that gets
-      # forgotten, and the two halves must agree or the readout contradicts
-      # the evolution that produced its snapshot.
+      # The phantom's orientation, so the readout evaluates Bc in the same
+      # frame the solver did.
       maxwell = (maxwell_phase_coefficients(
                      rw.maxwell, scanner,
                      rotation=getattr(phantom, '_orientation', None))
                  if concomitant_readout and rw.maxwell is not None else None)
-      # COMPOSED, not overwritten. `get_weights` folds `timeshift` in to reach
-      # the cardiac phase, so a caller who set their own shift must keep it;
-      # overwriting it discarded that for every window. Same defect, and the
-      # same fix, as the block-start shift in `BlochSolver.solve`.
+      # Composed with the caller's own shift, which `get_weights` folds in to
+      # reach the cardiac phase, and restored in the finally below.
       shift = getattr(pod, 'timeshift', None) if pod is not None else None
       if shift is not None:
         pod.update_timeshift(float(shift) + float(rw.t_anchor))

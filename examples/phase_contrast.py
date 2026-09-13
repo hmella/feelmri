@@ -236,19 +236,10 @@ if __name__ == '__main__':
   # the gradients are along logical axes while Bc is B0-aligned, and the nodes
   # are in the imaging frame.
   #
-  # `carried` is what makes the split exact. `Bc` is QUADRATIC in G, so
-  # `Bc(G_a + G_b) != Bc(G_a) + Bc(G_b)`, and the readout prephasers overlap
-  # the tail of the VENC bipolar by 0.45 ms here -- computing the two halves
-  # independently drops their cross term. Handing the solver's own gradients
-  # over integrates the whole field once and subtracts back what the solver
-  # already applied. Measured: the cross term is 15.8% of the concomitant
-  # readout phase on the encoding direction and exactly 0% on the reference,
-  # so it does NOT cancel in phi_v -- it lands on the quantity this example is
-  # about. It is also constant across the readout (to 2.8e-13), because the
-  # overlap ends at the snapshot.
-  #
-  # The gradients are shifted into the trajectory's own time frame, which runs
-  # from the RF centre.
+  # `carried` are the imaging block's gradients, shifted into the trajectory's
+  # own time frame (which runs from the RF centre). Bc is quadratic in G, so
+  # the readout prephasers overlapping the VENC bipolar contribute a cross
+  # term that neither half computes on its own.
   maxwell = []
   for d in range(enc.nb_directions):
       carried = []
@@ -257,8 +248,8 @@ if __name__ == '__main__':
           g_shifted.change_time(g.time - sp.rf.time)
           carried.append(g_shifted)
       maxwell.append(traj.maxwell_coefficients(scanner, carried=carried))
-  # The part that does not cancel between the two encodings, as a constant
-  # quadratic form: what the panel below has to include alongside the solver's.
+  # The readout term that does not cancel between the two encodings, for the
+  # panel below.
   readout_bias = [m[0] - traj.maxwell_coefficients(scanner)[0]
                   for m in maxwell]
 
@@ -271,9 +262,8 @@ if __name__ == '__main__':
       # Update timeshift in the POD velocity
       pod_velocity.update_timeshift(fr * parameters.Imaging.TimeSpacing.m_as('ms'))
 
-      # One readout per encoding direction, because `maxwell` now differs
-      # between them: the overlap cross term above is a property of the VENC
-      # bipolar, which is what the two directions differ by.
+      # One readout per encoding direction, since `maxwell` differs between
+      # them through the VENC bipolar.
 
       # Generate 4D flow image
       # Elapsed time since the MAGNETIZATION SNAPSHOT, not since the

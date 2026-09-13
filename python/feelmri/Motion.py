@@ -125,20 +125,12 @@ def _frame_errors(eigen_values: np.ndarray, eigen_vectors: np.ndarray,
 
 
 def _cycle_period(times: np.ndarray) -> float:
-    """The period of a cine sampled at ``times``, which is ``N*dt``, not
-    ``times[-1]``.
+    """Cycle length of a cine sampled at ``times``: the span plus one more
+    sampling interval, since frame ``N`` is frame 0.
 
-    A cine of ``N`` frames covers one cycle, so frame ``N`` IS frame 0 and the
-    cycle length is the span plus one more sampling interval. Taking
-    ``times[-1]`` instead replays the cycle ``1/N`` short: measured on a
-    30-frame cine the fold ran **3.3% fast**, left a **20.8% jump** in the
-    displacement at every wrap, and drifted a full ten frames after ten
-    cycles. `is_periodic=True` is also exactly the setting that suppresses the
-    out-of-range guard, so nothing could report it.
-
-    The extra interval is taken as the MEAN spacing, which is exact for the
-    uniform sampling every cine has; a non-uniform record does not say how long
-    the gap back to frame 0 is, so this warns rather than guess silently.
+    The extra interval is the mean spacing, exact for a uniformly sampled
+    record. A non-uniform record does not define the gap back to frame 0, so
+    it warns.
     """
     t = np.asarray(times, dtype=float).reshape(-1)
     if t.size < 2:
@@ -157,13 +149,9 @@ def _cycle_period(times: np.ndarray) -> float:
 
 
 def _close_the_cycle(times: np.ndarray, values: np.ndarray):
-    """Append frame 0 at ``times[0] + period`` so an interpolator covers the
-    whole cycle and is continuous across the wrap.
-
-    Without this the knots stop at ``times[-1]`` and the last sampling interval
-    -- the one joining the last frame back to the first -- is not represented
-    at all: folding into it lands outside the spline, which answers NaN.
-    ``values`` is indexed along axis 0.
+    """Append frame 0 at ``times[0] + period``, so the interpolator covers the
+    interval joining the last frame back to the first and is continuous across
+    the wrap. ``values`` is indexed along axis 0.
     """
     t = np.asarray(times, dtype=float).reshape(-1)
     period = _cycle_period(t)
@@ -174,12 +162,7 @@ def _close_the_cycle(times: np.ndarray, values: np.ndarray):
 
 
 def _folder(times: np.ndarray, period):
-    """Map any time onto ``[times[0], times[0] + period)``.
-
-    Anchored on ``times[0]`` rather than on zero: the previous form assumed the
-    record began at t = 0, which is true of every shipped example and is not a
-    property of the class.
-    """
+    """Map any time onto ``[times[0], times[0] + period)``."""
     if period is None:
         return lambda x: x
     t0 = float(np.asarray(times).reshape(-1)[0])
@@ -238,8 +221,8 @@ class RespiratoryMotion:
         self.remove_mean = remove_mean
         self.direction = (direction.reshape((1, 3)) / np.linalg.norm(direction)).astype(np.float32)
         self.interpolation_method = interpolation_method
-        # The period is settled BEFORE the interpolator is built, because a
-        # periodic record has its wrap sample appended to the knots.
+        # Settled before the interpolator is built, which appends the wrap
+        # sample to the knots
         self._period = _cycle_period(self.times) if self.is_periodic else None
         self.interpolator = self.calculate_interpolator()
         self._fold_time = _folder(self.times, self._period)
@@ -305,10 +288,8 @@ class RespiratoryMotion:
             data_mean = np.mean(self.data, axis=0, dtype=np.float32)
             data -= data_mean
 
-        # A periodic record is closed back onto its first frame, so the last
-        # sampling interval -- the one joining frame N-1 to frame 0 -- is
-        # actually represented. Without it the knots stop at times[-1] and
-        # folding into that interval leaves the spline's support.
+        # Close a periodic record onto its first frame, so the interval
+        # joining frame N-1 to frame 0 is inside the knots
         if self._period is not None:
             times, data, _ = _close_the_cycle(times, data)
 
@@ -324,10 +305,8 @@ class RespiratoryMotion:
                 f"Interpolation method '{self.interpolation_method}' not recognized. "
                 "Choose from 'AkimaSpline', 'CubicSpline', or 'Pchip'.")
 
-        # The three methods disagree outside their support -- Pchip and
-        # CubicSpline extrapolate silently, Akima answers NaN -- so a
-        # non-periodic record ran past its data in three different ways, none
-        # of them reported. Pinned to the one the POD class already refuses.
+        # The three methods extrapolate differently, so refuse it outright and
+        # let _amplitude_at report the out-of-range time
         interpolator.extrapolate = False
 
         return interpolator
@@ -353,10 +332,7 @@ class RespiratoryMotion:
     def _amplitude_at(self, t_eff):
         """Evaluate the interpolator, refusing a time it does not cover.
 
-        The twin of :meth:`POD._weights_at`, and it was missing: this class is
-        not a `POD` subclass, so the guard added there never reached it. It is
-        the respiratory half of the `PODSum` in `free_running.py`, i.e. the
-        trajectory most likely to be asked for a time past its record.
+        The counterpart of :meth:`POD._weights_at`.
         """
         out = np.asarray(self.interpolator(t_eff))
         bad = ~np.isfinite(out)
@@ -450,9 +426,8 @@ class POD:
         self.is_periodic = is_periodic
         self.interpolation_method = interpolation_method
         self.modes, self.weights = self.calculate_pod(remove_mean=False)
-        # Settled before the splines are fitted: a periodic record has its wrap
-        # sample appended to the knots, so the interpolator covers the whole
-        # cycle rather than stopping one interval short of it.
+        # Settled before the splines are fitted, which append the wrap sample
+        # to the knots
         self._period = _cycle_period(self.times) if self.is_periodic else None
         self.spline_coeffs = self.spline_fit()
         pps = []
@@ -613,10 +588,8 @@ class POD:
                 f"Interpolation method '{self.interpolation_method}' not recognized. "
                 "Choose from 'AkimaSpline', 'CubicSpline', or 'Pchip'.")
 
-        # Fit spline to each mode's weights. A periodic record is closed back
-        # onto frame 0 first, so the wrap interval is interpolated instead of
-        # being a hole in the support -- and the weights are continuous across
-        # it, where before the fold jumped straight from frame N-1 to frame 0.
+        # Fit spline to each mode's weights, closing a periodic record onto
+        # frame 0 first so the wrap interval is interpolated
         times, weights = self.times, self.weights
         if self._period is not None:
             times, weights, _ = _close_the_cycle(times, weights)
@@ -830,20 +803,11 @@ class PODVelocity(POD):
     def _evaluate_trajectory(self, t: float, t_ro: float = None):
         """Evaluate the displacement at time ``t`` under the Taylor model.
 
-        The argument plays two roles, and they are NOT the same quantity:
-
-            fold(t + timeshift)   picks the CARDIAC PHASE -- absolute time
-            t_ro                  is the Taylor time of `x = x0 + v * t_ro`,
-                                  measured from the EXCITATION
-
-        ``t_ro`` defaults to ``t``, which is only right when the caller's clock
-        already starts at the excitation. That default is what
-        :meth:`get_weights` was corrected away from: on
-        ``examples/phase_contrast.py`` the imaging block sits at 1305 ms, so
-        absolute time made the displacement ~450x too large -- a median 195 mm
-        against a 10.4 mm slab, which emptied the fast core of the vessel.
-        This path (``pod(t)``, for mesh warping and plotting) kept the old
-        spelling and now says so, and lets the caller separate the two.
+        The two times are different quantities: ``fold(t + timeshift)`` picks
+        the cardiac phase from absolute time, while ``t_ro`` is the Taylor
+        time of ``x = x0 + v * t_ro``, measured from the excitation. ``t_ro``
+        defaults to ``t``, which holds only when the caller's clock already
+        starts at the excitation.
 
         Parameters
         ----------
@@ -933,15 +897,8 @@ class PODSum:
     def update_timeshift(self, timeshift: np.float32):
         """Shift both constituent trajectories to a combined offset.
 
-        The children are moved by the DIFFERENCE, not overwritten. Two
-        trajectories summed here can legitimately carry different shifts --
-        cardiac and respiratory phases are independent -- and this object's own
-        ``timeshift`` starts at zero and knows nothing about them. Assigning
-        the new value to both therefore destroyed that relationship, and it did
-        so on every block: ``BlochSolver.solve`` reads ``timeshift`` (0.0),
-        writes ``0.0 + block_start`` into both children, and then "restores"
-        0.0 -- so after one solve both children sat at zero whatever the
-        caller had set.
+        The children are moved by the difference, so each keeps its own shift:
+        a cardiac and a respiratory trajectory carry independent phases.
 
         Parameters
         ----------
