@@ -140,7 +140,7 @@ if __name__ == '__main__':
                + planning.LOC.m_as('m'))
   peak = np.abs(spatial(lab_nodes).flatten()).max()
   b0_field = B0Field.on_phantom(
-      lambda x: Q_(1.5e-6 * spatial(x) / peak, 'T'), phantoms[-1])
+      lambda x: Q_(1.5e-6 * spatial(x)**2 / peak, 'T'), phantoms[-1])
 
   # Create sequence object
   seq = Sequence()
@@ -191,14 +191,19 @@ if __name__ == '__main__':
   # Field inhomogeneities. The uniform part of the scanner field is spatially
   # constant, so it rides here; the rest of it reaches the readout as the shift
   # of the sample's k computed below.
-  delta_phi = [scanner.gammabar.to('1/mT/ms') * delta_B0[cs].to('mT') for cs in range(Nb_species)]
-  delta_omega = [2 * np.pi * delta_phi[cs].m_as('1/ms')
-                 + b0_field.phi_offset(scanner, location=traj.LOC)
-                 for cs in range(Nb_species)]
+  # One call for the whole scanner field, because a field split across three
+  # channels is a field that can be half-applied: the uniform part rides
+  # `phi_dB0`, the linear part is a shift of the sample's k, and the quadratic
+  # part rides the six `maxwell` coefficients the assembler already takes. The
+  # nominal trajectory is left alone -- the difference between it and the
+  # shifted one is the geometric distortion.
+  b0_points, b0_phi, b0_maxwell = traj.b0_terms(b0_field, scanner)
+  if b0_maxwell is not None:
+    b0_maxwell = b0_maxwell.reshape(traj.times.shape + (6,))
 
-  # The nominal trajectory is what the reconstruction grids on, so the shift is
-  # kept separate: the difference between the two is the geometric distortion.
-  b0_points = traj.b0_shifted_points(b0_field, scanner)
+  delta_phi = [scanner.gammabar.to('1/mT/ms') * delta_B0[cs].to('mT') for cs in range(Nb_species)]
+  delta_omega = [2 * np.pi * delta_phi[cs].m_as('1/ms') + b0_phi
+                 for cs in range(Nb_species)]
 
   # Set assembler for MRI signal evaluation using FEM
   vxsz = planning.FOV.m_as('m')/np.array(parameters.Imaging.RES)
@@ -223,6 +228,8 @@ if __name__ == '__main__':
                       b0_points[1][:,sh,s,np.newaxis], 
                       b0_points[2][:,sh,s,np.newaxis])
       kspace_times = (traj.times.m_as('ms')[:,sh,s,np.newaxis] - traj.t_start.m_as('ms'))
+      kspace_maxwell = (None if b0_maxwell is None
+                        else b0_maxwell[:,sh,s,:].reshape(-1, 6))
 
       # Add imaging and delay blocks to the sequence
       seq.add_block(imaging)
@@ -237,7 +244,8 @@ if __name__ == '__main__':
         phantoms[cs].update_magnetization(Mxy)
 
         # Generate 4D flow image
-        tmp = phantoms[cs].mri_signal(kspace_points, kspace_times)
+        tmp = phantoms[cs].mri_signal(kspace_points, kspace_times,
+                                      maxwell=kspace_maxwell)
         K[:,sh,s,:,0] += tmp.swapaxes(0, 1)[:,:,0]
 
   END_TIME = time.time()

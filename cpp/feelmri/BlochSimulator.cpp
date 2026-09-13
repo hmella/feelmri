@@ -71,7 +71,8 @@ MagnetizationState<T> solve_mri_impl(
   const T &B0,
   Eigen::Ref<const Matrix<std::complex<T>, Dynamic, 1>> b1_map,
   Eigen::Ref<const Matrix<T, Dynamic, 3>> static_lin,
-  Eigen::Ref<const Matrix<T, Dynamic, 1>> conc_offset
+  Eigen::Ref<const Matrix<T, Dynamic, 1>> conc_offset,
+  Eigen::Ref<const Matrix<T, Dynamic, 1>> field_quad
 ){
   // The caller's rf!=0 mask is redundant: the kernel derives the rf-free
   // condition from rf_all itself, so a stale or wrong mask cannot corrupt
@@ -116,6 +117,23 @@ MagnetizationState<T> solve_mri_impl(
     throw std::invalid_argument(
         "solve_mri: conc_offset must have 0, 1 or n_time entries");
   }
+
+  // A static lab-frame field that is quadratic in position: six coefficients
+  // over x^2, y^2, z^2, xy, xz and yz, in the frame `curr` lives in. They do
+  // not follow the gradient, so unlike the concomitant form they are
+  // solve-invariant and cost no memory at all -- which is why a polynomial
+  // field is carried exactly rather than expanded per node.
+  const bool has_field_quad = (field_quad.size() != 0);
+  if (has_field_quad && field_quad.size() != 6) {
+    throw std::invalid_argument(
+        "solve_mri: field_quad must be empty or have 6 entries");
+  }
+  const T qxx = has_field_quad ? field_quad(0) : T(0);
+  const T qyy = has_field_quad ? field_quad(1) : T(0);
+  const T qzz = has_field_quad ? field_quad(2) : T(0);
+  const T qxy = has_field_quad ? field_quad(3) : T(0);
+  const T qxz = has_field_quad ? field_quad(4) : T(0);
+  const T qyz = has_field_quad ? field_quad(5) : T(0);
 
   const bool has_b1 = (b1_map.size() != 0);
   if (has_b1 && b1_map.size() != n_pos) {
@@ -292,14 +310,46 @@ MagnetizationState<T> solve_mri_impl(
         // -ffast-math a `+=` regroups the FMAs and the feature-off build stops
         // being bit-identical to the build that predates this term.
         T Bz_new;
+        // The quadratic field gets its OWN complete expression rather than
+        // being appended to the two below: under -ffast-math an extra term
+        // regroups the FMAs of whatever it is added to, and the concomitant
+        // line has published numbers riding on it.
+        //
+        // The `else` branches are textually unchanged but NOT bit-identical,
+        // and unlike `static_lin` they cannot be: a position-dependent term
+        // cannot be hoisted out of the node loop, so the loop itself is
+        // recompiled and -ffast-math contracts its FMAs differently. Measured
+        // against the build that predates this term, 6 of the 24 A/B cases
+        // move, worst 1.521e-06, ALL of them float32 -- float64 is unchanged at
+        // 3.366e-15, which is what identifies it as reassociation rather than a
+        // change in the algebra. It also sits an order below the solver's own
+        // float32-vs-float64 gap of 1.2e-05. A compile-time branch was tried
+        // and is worse on both counts (3.175e-06, and 96 node-loop
+        // instantiations instead of 48), so the runtime branch stays.
         if constexpr (Conc) {
-          Bz_new = px*Gx_lin + py*Gy_lin + pz*Gz_lin + delta_B(p) + Bc_off
-                 + ((Gx*Gx + Gy*Gy) * pz*pz
-                    + T(0.25) * Gz*Gz * (px*px + py*py)
-                    - Gx*Gz*px*pz - Gy*Gz*py*pz) * inv_2B0;
+          if (has_field_quad) {
+            Bz_new = px*Gx_lin + py*Gy_lin + pz*Gz_lin + delta_B(p) + Bc_off
+                   + ((Gx*Gx + Gy*Gy) * pz*pz
+                      + T(0.25) * Gz*Gz * (px*px + py*py)
+                      - Gx*Gz*px*pz - Gy*Gz*py*pz) * inv_2B0
+                   + qxx*px*px + qyy*py*py + qzz*pz*pz
+                   + qxy*px*py + qxz*px*pz + qyz*py*pz;
+          } else {
+            Bz_new = px*Gx_lin + py*Gy_lin + pz*Gz_lin + delta_B(p) + Bc_off
+                   + ((Gx*Gx + Gy*Gy) * pz*pz
+                      + T(0.25) * Gz*Gz * (px*px + py*py)
+                      - Gx*Gz*px*pz - Gy*Gz*py*pz) * inv_2B0;
+          }
         } else {
-          Bz_new = curr(p, 0)*Gx_lin + curr(p, 1)*Gy_lin + curr(p, 2)*Gz_lin
-                 + delta_B(p);
+          if (has_field_quad) {
+            Bz_new = curr(p, 0)*Gx_lin + curr(p, 1)*Gy_lin + curr(p, 2)*Gz_lin
+                   + delta_B(p)
+                   + qxx*px*px + qyy*py*py + qzz*pz*pz
+                   + qxy*px*py + qxz*px*pz + qyz*py*pz;
+          } else {
+            Bz_new = curr(p, 0)*Gx_lin + curr(p, 1)*Gy_lin + curr(p, 2)*Gz_lin
+                   + delta_B(p);
+          }
         }
 
         C alpha_p, beta_p;
@@ -480,7 +530,8 @@ MagnetizationState<T> solve_mri_dispatch(
   const T &B0,
   Eigen::Ref<const Matrix<std::complex<T>, Dynamic, 1>> b1_map,
   Eigen::Ref<const Matrix<T, Dynamic, 3>> static_lin,
-  Eigen::Ref<const Matrix<T, Dynamic, 1>> conc_offset
+  Eigen::Ref<const Matrix<T, Dynamic, 1>> conc_offset,
+  Eigen::Ref<const Matrix<T, Dynamic, 1>> field_quad
 ){
   // Constant T1/T2 across nodes is the common case (phantoms built from scalar
   // relaxation times); it lets the relaxation exponentials stay in registers.
@@ -494,7 +545,7 @@ MagnetizationState<T> solve_mri_dispatch(
         r0, T1, T2, delta_B, M0, gamma, rf_all, G_all, dt, regime_idx,         \
         Mxy_initial, Mz_initial, modes, weights,                               \
         has_traj, Bz_old_init, rf_old_init, store_history, B0, b1_map,         \
-        static_lin, conc_offset)
+        static_lin, conc_offset, field_quad)
 
   switch (order) {
     case 0:
@@ -540,13 +591,14 @@ PYBIND11_MODULE(BlochSimulator, m) {
        Modes_f32 modes, MatDyn_f32 weights, bool has_traj,
        int order, Vec_f32 Bz_old_init, std::complex<f32> rf_old_init,
        bool store_history, const f32 &B0, CVec_f32 b1_map,
-       Mat3_f32 static_lin, Vec_f32 conc_offset) {
+       Mat3_f32 static_lin, Vec_f32 conc_offset, Vec_f32 field_quad) {
       return solve_mri_dispatch<f32>(order, r0, T1, T2, delta_B, M0, gamma,
                                      rf_all, G_all, dt, regime_idx,
                                      Mxy_initial, Mz_initial,
                                      modes, weights, has_traj,
                                      Bz_old_init, rf_old_init, store_history, B0,
-                                     b1_map, static_lin, conc_offset);
+                                     b1_map, static_lin, conc_offset,
+                                     field_quad);
     },
     py::arg("r0"), py::arg("T1"), py::arg("T2"), py::arg("delta_B"),
     py::arg("M0"), py::arg("gamma"), py::arg("rf_all"), py::arg("G_all"),
@@ -560,7 +612,9 @@ PYBIND11_MODULE(BlochSimulator, m) {
     py::arg("b1_map") = Matrix<std::complex<f32>, Dynamic, 1>(),
     // Empty by default: no lab-frame static field.
     py::arg("static_lin") = Matrix<f32, Dynamic, 3>(),
-    py::arg("conc_offset") = Matrix<f32, Dynamic, 1>());
+    py::arg("conc_offset") = Matrix<f32, Dynamic, 1>(),
+    // Empty by default: no quadratic lab-frame field.
+    py::arg("field_quad") = Matrix<f32, Dynamic, 1>());
 
   m.def("solve_mri_f64",
     [](R0_f64 r0, Vec_f64 T1, Vec_f64 T2, Vec_f64 delta_B,
@@ -570,13 +624,14 @@ PYBIND11_MODULE(BlochSimulator, m) {
        Modes_f64 modes, MatDyn_f64 weights, bool has_traj,
        int order, Vec_f64 Bz_old_init, std::complex<f64> rf_old_init,
        bool store_history, const f64 &B0, CVec_f64 b1_map,
-       Mat3_f64 static_lin, Vec_f64 conc_offset) {
+       Mat3_f64 static_lin, Vec_f64 conc_offset, Vec_f64 field_quad) {
       return solve_mri_dispatch<f64>(order, r0, T1, T2, delta_B, M0, gamma,
                                      rf_all, G_all, dt, regime_idx,
                                      Mxy_initial, Mz_initial,
                                      modes, weights, has_traj,
                                      Bz_old_init, rf_old_init, store_history, B0,
-                                     b1_map, static_lin, conc_offset);
+                                     b1_map, static_lin, conc_offset,
+                                     field_quad);
     },
     py::arg("r0"), py::arg("T1"), py::arg("T2"), py::arg("delta_B"),
     py::arg("M0"), py::arg("gamma"), py::arg("rf_all"), py::arg("G_all"),
@@ -590,5 +645,7 @@ PYBIND11_MODULE(BlochSimulator, m) {
     py::arg("b1_map") = Matrix<std::complex<f64>, Dynamic, 1>(),
     // Empty by default: no lab-frame static field.
     py::arg("static_lin") = Matrix<f64, Dynamic, 3>(),
-    py::arg("conc_offset") = Matrix<f64, Dynamic, 1>());
+    py::arg("conc_offset") = Matrix<f64, Dynamic, 1>(),
+    // Empty by default: no quadratic lab-frame field.
+    py::arg("field_quad") = Matrix<f64, Dynamic, 1>());
 }

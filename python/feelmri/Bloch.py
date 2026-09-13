@@ -240,6 +240,21 @@ def _concomitant_recentre(G, L, B0_mT):
     return lin, off
 
 
+def _field_quad_mT(pos, q):
+    """A static quadratic lab-frame field at `pos` (m), in mT.
+
+    `q` is ``(xx, yy, zz, xy, xz, yz)`` in mT/m^2, in the frame `pos` is in.
+    **Must stay identical to the kernel's own expression** -- the two Magnus
+    seeds recompute the field in Python, and a seed that disagrees puts an
+    O(dt) error at every block boundary, silently.
+    """
+    if q is None:
+        return 0.0
+    x, y, z = pos[:, 0], pos[:, 1], pos[:, 2]
+    return (q[0] * x * x + q[1] * y * y + q[2] * z * z
+            + q[3] * x * y + q[4] * x * z + q[5] * y * z)
+
+
 def _rf_waveform_mT(rf):
     """An RF pulse's B1 waveform in mT, on either construction path.
 
@@ -1639,13 +1654,19 @@ class BlochSolver:
         # because `concomitant_fields` decides the frame and is a plain
         # attribute.
         b0_offset_mT, b0_gradient = 0.0, None
+        b0_delta_B, b0_quad = None, None
         if self.b0_field is not None and not self.b0_field.is_zero:
-            b0_offset_mT, g_lab = self.b0_field.in_frame(
-                rotation=self._orientation,
-                location=getattr(self.phantom, '_location', None),
-                physical=R_phys is not None)
-            if np.any(g_lab):
-                b0_gradient = g_lab
+            # `moving` is the SOLVER's, not the field's: the readout decides
+            # separately whether it was given a trajectory, and the two may
+            # legitimately disagree. A phantom that does not move samples the
+            # field at x0 for the whole solve, so anything above degree 1 folds
+            # into `delta_B` there and needs no kernel channel.
+            b0_offset_mT, b0_delta_B, b0_gradient, b0_quad = (
+                self.b0_field.solver_terms(
+                    self.phantom, self.pod_trajectory is not None,
+                    rotation=self._orientation,
+                    location=getattr(self.phantom, '_location', None),
+                    physical=R_phys is not None))
 
         # `orient` measures the nodes from the slice centre, so `Bc` -- which is
         # centred on isocentre -- is evaluated at the wrong origin. Only when
@@ -1668,6 +1689,12 @@ class BlochSolver:
         # term only; the concomitant quadratic form keeps the bare G, because
         # that field comes from the gradient coil and not from the shim. One
         # row means constant over the whole solve.
+        # Six solve-invariant scalars for a quadratic lab-frame field, in the
+        # frame `curr` lives in. Empty when the field has no quadratic part or
+        # the phantom is static, where it has already folded into `delta_B`.
+        field_quad = (np.empty(0, dtype=self._np_real) if b0_quad is None
+                      else np.ascontiguousarray(b0_quad, dtype=self._np_real))
+
         # Empty means "absent"; the kernel branches on size, not on content.
         conc_offset_none = np.empty(0, dtype=self._np_real)
         static_lin = (np.empty((0, 3), dtype=self._np_real) if b0_gradient is None
@@ -1744,6 +1771,13 @@ class BlochSolver:
         T1 = np.ascontiguousarray(self.T1.m_as('ms'), dtype=self._np_real)
         T2 = np.ascontiguousarray(self.T2.m_as('ms'), dtype=self._np_real)
         delta_B = np.ascontiguousarray(self.delta_B, dtype=self._np_real)
+        if b0_delta_B is not None:
+            # Per node, so it is added before the reshape and the sub-ensemble
+            # repeat below, exactly like the scalar.
+            delta_B = np.ascontiguousarray(
+                delta_B + np.asarray(b0_delta_B, dtype=self._np_real).reshape(
+                    delta_B.shape),
+                dtype=self._np_real)
         if b0_offset_mT:
             # Spatially uniform, so it needs no frame and no kernel channel.
             # Added before the reshape and the sub-ensemble repeat below, so
@@ -1956,6 +1990,7 @@ class BlochSolver:
                 G0_lin = G0 if b0_gradient is None else G0 + b0_gradient
                 c0_conc = c0 if conc_location is None else c0 + conc_location
                 Bz_old = (c0 @ G0_lin + delta_B.reshape(-1)
+                          + _field_quad_mT(c0, b0_quad)
                           + _concomitant_mT(c0_conc, G0, self._B0_mT)).astype(
                     self._np_real, copy=False)
                 rf_old = self._py_cplx(rf_pulses[0, 0])
@@ -2021,6 +2056,7 @@ class BlochSolver:
                                 else c0b + conc_location)
                     Bz_old_big = np.ascontiguousarray(
                         c0b @ G0b_lin + deltaB_big.reshape(-1)
+                        + _field_quad_mT(c0b, b0_quad)
                         + _concomitant_mT(c0b_conc, G0b, self._B0_mT),
                         dtype=self._np_real)
                 else:
@@ -2041,6 +2077,7 @@ class BlochSolver:
                     modes_big, weights, has_traj,
                     self._order, Bz_old_big, rf_old,
                     False, self._B0_mT, b1_big, step_lin, conc_offset,
+                    field_quad,
                 )
                 self.bloch_elapsed += time.perf_counter() - t_call
 
@@ -2073,6 +2110,7 @@ class BlochSolver:
                     modes, weights, has_traj,
                     self._order, Bz_old, rf_old,
                     False, self._B0_mT, b1_map, step_lin, conc_offset,
+                    field_quad,
                 )
                 self.bloch_elapsed += time.perf_counter() - t_call
 

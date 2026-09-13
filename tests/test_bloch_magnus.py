@@ -2283,3 +2283,67 @@ def test_bc_is_centred_on_isocentre_and_not_on_the_slice(wide_phantom):
   assert seed_gap < 1e-6, (
       f'the Magnus seed disagrees with the kernel by {seed_gap:.3e}, so it is '
       f'not re-centring Bc the same way')
+
+
+def test_a_moving_spin_samples_a_quadratic_field_where_it_moves_to(wide_phantom):
+  """A degree-2 lab-frame field must be evaluated at the CURRENT position.
+
+  The quadratic part rides six solve-invariant scalars -- it does not follow
+  the gradient the way the concomitant term does -- so it costs no memory and
+  the kernel evaluates it at `curr`, which is where the spin actually is. The
+  closed form below needs no second solve to compare against.
+
+  The `frozen` assert is the guard: it is what a per-node `delta_B` would give,
+  and it has to differ by far more than the tolerance or the test cannot tell
+  the Eulerian answer from the Lagrangian one.
+  """
+  dur_ms = 5.0
+  scanner = Scanner()
+  gamma = scanner.gamma.m_as('rad/ms/mT')
+
+  P = wide_phantom.local_nodes.astype(np.float64)
+  cells = np.asarray(wide_phantom.local_elements)
+  shift = np.array([0.021, -0.014, 0.018])          # 31 mm rigid translation
+  # Sized so the FROZEN answer differs from the Eulerian one by ~0.8 rad:
+  # at a tenth of that the two are indistinguishable and the test proves
+  # nothing.
+  q = np.array([1.0e-1, -6.0e-2, 8.0e-2, 4.0e-2, -5.0e-2, 3.0e-2])  # mT/m^2
+
+  def quad(pos):
+    x, y, z = pos[:, 0], pos[:, 1], pos[:, 2]
+    return (q[0] * x * x + q[1] * y * y + q[2] * z * z
+            + q[3] * x * y + q[4] * x * z + q[5] * y * z)
+
+  field = B0Field(gradient=Quantity(np.zeros(3), 'mT/m'), order=2,
+                  coefficients=np.concatenate(([0.0], np.zeros(3), q)))
+  assert field.kind == 'polynomial'
+
+  blk = _gradient_block((0.0, 0.0, 0.0), dur_ms)
+
+  def solve(tag, moving):
+    phantom = _phantom_from_points(P, cells, tag)
+    pod = (_constant_displacement_pod(phantom.local_nodes.shape[0], shift,
+                                      dur_ms=dur_ms) if moving else None)
+    return _precess(phantom, blk, b0_field=field, pod_trajectory=pod)
+
+  still = solve('quad_still', False)
+  moved = solve('quad_moved', True)
+
+  nodes = np.asarray(_phantom_from_points(P, cells, 'quad_ref').local_nodes,
+                     dtype=np.float64)
+  want_still = -gamma * quad(nodes) * dur_ms
+  want_moved = -gamma * quad(nodes + shift) * dur_ms
+
+  for label, got, want in (('at rest', still, want_still),
+                           ('moved', moved, want_moved)):
+    gap = float(np.abs(np.exp(1j * np.angle(got)) - np.exp(1j * want)).max())
+    assert gap < 1e-6, (
+        f'the quadratic field {label} disagrees with its closed form by {gap:.3e}')
+
+  # Freezing the field to the node -- what `delta_B` does -- gives the at-rest
+  # answer wherever the spin has gone, which is the error being removed.
+  frozen = float(np.abs(np.exp(1j * want_moved)
+                        - np.exp(1j * want_still)).max())
+  assert frozen > 0.5, (
+      f'this geometry only moves the phase by {frozen:.3f}, so it cannot tell '
+      f'the Eulerian answer from the Lagrangian one')
