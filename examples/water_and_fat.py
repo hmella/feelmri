@@ -11,7 +11,7 @@ from feelmri.Bloch import BlochSolver, Sequence, SequenceBlock
 from feelmri.KSpaceTraj import CartesianStack
 from feelmri.MPIUtilities import MPI_print, gather_data
 from feelmri.MRImaging import SliceProfile
-from feelmri.MRObjects import RF, Scanner
+from feelmri.MRObjects import RF, B0Field, Scanner
 from feelmri.Noise import add_cpx_noise
 from feelmri.Parameters import ParameterHandler, PVSMParser
 from feelmri.Phantom import FEMPhantom
@@ -114,7 +114,6 @@ if __name__ == '__main__':
   df = []   # Frequency offset
   T1 = []   # Longitudinal relaxation time
   T2 = []   # Transverse relaxation time
-  inhomogeneity = []  # Field inhomogeneity
   for cs in range(Nb_species):
 
     # Fat frequency offset
@@ -131,10 +130,17 @@ if __name__ == '__main__':
       T1.append(parameters.Phantom.T1_water * np.ones(rho[cs].shape, dtype=np.float32))
       T2.append(parameters.Phantom.T2_water * np.ones(rho[cs].shape, dtype=np.float32))
 
-    # Field inhomogeneity (e.g., due to susceptibility effects)
-    inhomogeneity.append(spatial(phantoms[cs].local_nodes))
-    inhomogeneity[cs] /= np.abs(spatial(phantoms[cs].global_nodes).flatten()).max()
-    inhomogeneity[cs] *= Q_(1.5 * 1e-6, 'T')  # Scale to a reasonable value (e.g., 1.5 ppm)
+  # Main-field inhomogeneity, written in SCANNER coordinates because it belongs
+  # to the bore and not to the tissue: a spin that moves samples it wherever it
+  # has moved to, which is what B0Field gives both the solver and the readout.
+  # The chemical shift below stays on delta_B, frozen onto the node as a tissue
+  # property is. One field for every species -- normalised over the whole imaged
+  # slab, not per submesh, or each species would see a different bore.
+  lab_nodes = (phantoms[-1].global_nodes @ planning.MPS.T
+               + planning.LOC.m_as('m'))
+  peak = np.abs(spatial(lab_nodes).flatten()).max()
+  b0_field = B0Field.on_phantom(
+      lambda x: Q_(1.5e-6 * spatial(x) / peak, 'T'), phantoms[-1])
 
   # Create sequence object
   seq = Sequence()
@@ -151,13 +157,14 @@ if __name__ == '__main__':
   solvers  = []
   delta_B0 = []
   for cs in range(Nb_species):
-    # Define field inhomogeneity for this chemical specie (including chemical shift)
-    delta_B0.append(inhomogeneity[cs].to('mT') + (df[cs].to('1/ms')/scanner.gammabar.to('1/ms/mT')).reshape((-1,)))
+    # Chemical shift only: this one really is a property of the material point.
+    delta_B0.append((df[cs].to('1/ms')/scanner.gammabar.to('1/ms/mT')).reshape((-1,)))
 
     solvers.append(BlochSolver(seq, phantoms[cs], 
                         scanner=scanner, 
                         T1=T1[cs].reshape((-1, 1)),
                         T2=T2[cs].reshape((-1, 1)), 
+                        b0_field=b0_field,
                         initial_Mz=1e+10*rho[cs].reshape((-1, 1)), delta_B=delta_B0[cs].m_as('mT').reshape((-1, 1))))
 
   # Generate kspace trajectory
@@ -181,9 +188,17 @@ if __name__ == '__main__':
   slices = traj.slices
   K = np.zeros([ro_samples, ph_samples, slices, 1, 1], dtype=np.complex64)
 
-  # Field inhomogeneities
+  # Field inhomogeneities. The uniform part of the scanner field is spatially
+  # constant, so it rides here; the rest of it reaches the readout as the shift
+  # of the sample's k computed below.
   delta_phi = [scanner.gammabar.to('1/mT/ms') * delta_B0[cs].to('mT') for cs in range(Nb_species)]
-  delta_omega = [2 * np.pi * delta_phi[cs].m_as('1/ms') for cs in range(Nb_species)]
+  delta_omega = [2 * np.pi * delta_phi[cs].m_as('1/ms')
+                 + b0_field.phi_offset(scanner, location=traj.LOC)
+                 for cs in range(Nb_species)]
+
+  # The nominal trajectory is what the reconstruction grids on, so the shift is
+  # kept separate: the difference between the two is the geometric distortion.
+  b0_points = traj.b0_shifted_points(b0_field, scanner)
 
   # Set assembler for MRI signal evaluation using FEM
   vxsz = planning.FOV.m_as('m')/np.array(parameters.Imaging.RES)
@@ -204,9 +219,9 @@ if __name__ == '__main__':
     for i, sh in enumerate(traj.shots):     
 
       # k-space points per shot
-      kspace_points = (traj.points[0][:,sh,s,np.newaxis], 
-                      traj.points[1][:,sh,s,np.newaxis], 
-                      traj.points[2][:,sh,s,np.newaxis])
+      kspace_points = (b0_points[0][:,sh,s,np.newaxis], 
+                      b0_points[1][:,sh,s,np.newaxis], 
+                      b0_points[2][:,sh,s,np.newaxis])
       kspace_times = (traj.times.m_as('ms')[:,sh,s,np.newaxis] - traj.t_start.m_as('ms'))
 
       # Add imaging and delay blocks to the sequence

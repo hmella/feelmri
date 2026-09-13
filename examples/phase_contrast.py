@@ -15,7 +15,7 @@ from feelmri.KSpaceTraj import CartesianStack
 from feelmri.Motion import PODVelocity
 from feelmri.MPIUtilities import MPI_print, gather_data
 from feelmri.MRImaging import SliceProfile, VelocityEncoding
-from feelmri.MRObjects import RF, Gradient, Scanner
+from feelmri.MRObjects import RF, B0Field, Gradient, Scanner
 from feelmri.Noise import add_cpx_noise
 from feelmri.Parameters import ParameterHandler, PVSMParser
 from feelmri.PulseqAdapter import maxwell_moments, maxwell_phase_coefficients
@@ -91,15 +91,17 @@ if __name__ == '__main__':
                     gradient_strength=parameters.Hardware.G_max,
                     gradient_slew_rate=parameters.Hardware.G_sr)
 
-  # Field inhomogeneity
+  # Main-field inhomogeneity, written in SCANNER coordinates: it belongs to the
+  # bore, so a spin that moves samples it wherever it has moved to rather than
+  # keeping the value it had where it started. B0Field carries it to the solver
+  # and to the readout, which are the two places the tissue can move under it.
   def spatial(x):
       return x[:,0] + x[:,1] + x[:,2]
-  delta_B0 = spatial(phantom.local_nodes)
-  delta_B0 /= np.abs(spatial(phantom.global_nodes).flatten()).max()
-  delta_B0 = delta_B0 * scanner.field_strength * 1e-6  # 1.0 ppm of the main field
-
-  # Phase shift in rad/s
-  delta_omega0 = (2.0 * np.pi * scanner.gammabar * delta_B0).to('rad/ms')
+  lab_nodes = phantom.global_nodes @ planning.MPS.T + planning.LOC.m_as('m')
+  peak = np.abs(spatial(lab_nodes).flatten()).max()
+  b0_field = B0Field.on_phantom(
+      lambda x: spatial(x) / peak * scanner.field_strength * 1e-6,  # 1.0 ppm
+      phantom)
 
   # Slice profile
   # The slice profile prepulse is calculated based on a reference RF pulse with
@@ -141,7 +143,7 @@ if __name__ == '__main__':
                          M0=1e+9, 
                          T1=parameters.Phantom.T1.to('ms'),
                          T2=parameters.Phantom.T2star.to('ms'), 
-                         delta_B=delta_B0.m_as('mT').reshape((-1, 1)),
+                         b0_field=b0_field,
                          concomitant_fields=True,
                          pod_trajectory=pod_velocity)
 
@@ -216,8 +218,18 @@ if __name__ == '__main__':
   vxsz = planning.FOV.m_as('m')/np.array(parameters.Imaging.RES)
   phantom.set_assembler(voxel_size=vxsz[0], lorder=1, horder=6, nodal_approximation=True, lumped=False)
 
-  # Set static fields
-  phantom.set_static_fields(T2=T2star.m_as('ms'), phi_dB0=delta_omega0.m_as('rad/ms'))
+  # Set static fields. Only the uniform part of the scanner field rides on the
+  # off-resonance channel -- it is spatially constant, so no k-space offset can
+  # carry it; the rest of it becomes the shift below.
+  phantom.set_static_fields(
+      T2=T2star.m_as('ms'),
+      phi_dB0=np.full(T2star.m_as('ms').shape,
+                      b0_field.phi_offset(scanner, location=traj.LOC),
+                      dtype=np.float32))
+
+  # The reconstruction grids on the NOMINAL trajectory, so the shift is kept
+  # apart from it: the difference between the two is the geometric distortion.
+  b0_points = traj.b0_shifted_points(b0_field, scanner)
 
   # Concomitant fields during the readout. The solver carries the term up to
   # the magnetization snapshot -- the slice select and, crucially here, the
@@ -240,7 +252,12 @@ if __name__ == '__main__':
   # own time frame (which runs from the RF centre). Bc is quadratic in G, so
   # the readout prephasers overlapping the VENC bipolar contribute a cross
   # term that neither half computes on its own.
-  maxwell = []
+  #
+  # `Bc` is a quadratic form about ISOCENTRE while the assembler's nodes are
+  # measured from the slice centre, so `maxwell_recentre` carries the rest of
+  # the expansion -- a k-space shift and a uniform phase. This slab is
+  # off-isocentre, so the correction is not small.
+  maxwell, maxwell_points, maxwell_phase = [], [], []
   for d in range(enc.nb_directions):
       carried = []
       for g in imaging_blocks[d].gradients:
@@ -248,6 +265,11 @@ if __name__ == '__main__':
           g_shifted.change_time(g.time - sp.rf.time)
           carried.append(g_shifted)
       maxwell.append(traj.maxwell_coefficients(scanner, carried=carried))
+      dk, ph = traj.maxwell_recentre(scanner, carried=carried)
+      maxwell_points.append(tuple(
+          np.ascontiguousarray(b0_points[i] + dk[:, i].reshape(traj.times.shape),
+                               dtype=b0_points[i].dtype) for i in range(3)))
+      maxwell_phase.append(ph.reshape(traj.times.shape + (1,)))
   # The readout term that does not cancel between the two encodings, for the
   # panel below.
   readout_bias = [m[0] - traj.maxwell_coefficients(scanner)[0]
@@ -277,10 +299,10 @@ if __name__ == '__main__':
       for d in range(enc.nb_directions):
           phantom.update_magnetization(Mxy_PC[:, fr, d])
           K[:,:,:,d:d+1,fr] = phantom.mri_signal(
-              traj.points,
+              maxwell_points[d],
               traj.times.m_as('ms') - traj.t_start.m_as('ms'),
               pod_velocity,
-              maxwell=maxwell[d])
+              maxwell=maxwell[d]) * np.exp(-1j*maxwell_phase[d])
 
   # Gather results
   K = gather_data(K)

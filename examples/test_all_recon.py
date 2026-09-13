@@ -11,7 +11,7 @@ from feelmri.KSpaceTraj import CartesianStack, RadialStack, SpiralStack
 from feelmri.Motion import PODVelocity
 from feelmri.MPIUtilities import MPI_print, gather_data
 from feelmri.MRImaging import SliceProfile, VelocityEncoding
-from feelmri.MRObjects import RF, Gradient, Scanner
+from feelmri.MRObjects import RF, B0Field, Gradient, Scanner
 from feelmri.Noise import add_cpx_noise
 from feelmri.Parameters import ParameterHandler, PVSMParser
 from feelmri.Phantom import FEMPhantom
@@ -82,15 +82,17 @@ if __name__ == '__main__':
   scanner = Scanner(gradient_strength=parameters.Hardware.G_max,
                     gradient_slew_rate=parameters.Hardware.G_sr)
 
-  # Field inhomogeneity
+  # Main-field inhomogeneity, written in SCANNER coordinates: it belongs to the
+  # bore, so a spin that moves samples it wherever it has moved to rather than
+  # keeping the value it had where it started. B0Field carries it to the solver
+  # and to the readout, which are the two places the tissue can move under it.
   def spatial(x):
     return x[:,0] + x[:,1] + x[:,2]
-  delta_B0 = spatial(phantom.local_nodes)
-  delta_B0 /= np.abs(spatial(phantom.global_nodes).flatten()).max()
-  delta_B0 = delta_B0 * scanner.field_strength * 1e-6  # 1.0 ppm of the main field
-
-  # Phase shift in rad/s
-  delta_omega0 = (2.0 * np.pi * scanner.gammabar * delta_B0).to('rad/ms')
+  lab_nodes = phantom.global_nodes @ planning.MPS.T + planning.LOC.m_as('m')
+  peak = np.abs(spatial(lab_nodes).flatten()).max()
+  b0_field = B0Field.on_phantom(
+      lambda x: spatial(x) / peak * scanner.field_strength * 1e-6,  # 1.0 ppm
+      phantom)
 
   # Slice profile
   rf = RF(scanner=scanner, 
@@ -131,7 +133,7 @@ if __name__ == '__main__':
                          M0=1e+9, 
                          T1=parameters.Phantom.T1.to('ms'),
                          T2=parameters.Phantom.T2star.to('ms'), 
-                         delta_B=delta_B0.m_as('mT').reshape((-1, 1)),
+                         b0_field=b0_field,
                          pod_trajectory=pod_velocity)
 
     # Update reference time for second lobe
@@ -171,9 +173,16 @@ if __name__ == '__main__':
   vxsz = planning.FOV.m_as('m')/np.array(parameters.Imaging.RES)
   phantom.set_assembler(voxel_size=vxsz[0], lorder=1, horder=6, nodal_approximation=True, lumped=False)
 
-  # Set static fields
+  # Set static fields. Only the uniform part of the scanner field rides on the
+  # off-resonance channel -- it is spatially constant, so no k-space offset can
+  # carry it; the rest of it becomes the per-trajectory shift below.
   T2star = (parameters.Phantom.T2star * np.ones([phantom.local_nodes.shape[0]])).astype(np.float32)
-  phantom.set_static_fields(T2=T2star.m_as('ms'), phi_dB0=delta_omega0.m_as('rad/ms'))
+  phantom.set_static_fields(
+      T2=T2star.m_as('ms'),
+      phi_dB0=np.full(T2star.shape,
+                      b0_field.phi_offset(scanner,
+                                          location=planning.LOC.m_as('m')),
+                      dtype=np.float32))
 
   # Define the trajectory types to test
   trajectories = {
@@ -222,8 +231,11 @@ if __name__ == '__main__':
       # imaging block ends. Feeding absolute times applies a spurious
       # exp(-t_start/T2*) and, worse, a SPATIALLY VARYING phi*t_start:
       # measured 1.688 rad peak-to-peak across the object here.
+      # The reconstruction grids on the NOMINAL trajectory, so the shift is
+      # kept apart from it: the difference between the two is the distortion.
       K[:,:,:,:,fr] = phantom.mri_signal(
-          traj.points, traj.times.m_as('ms') - traj.t_start.m_as('ms'), pod_velocity)
+          traj.b0_shifted_points(b0_field, scanner),
+          traj.times.m_as('ms') - traj.t_start.m_as('ms'), pod_velocity)
 
     # Gather results
     K = gather_data(K)

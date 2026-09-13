@@ -10,7 +10,7 @@ from feelmri.Bloch import BlochSolver, Sequence, SequenceBlock
 from feelmri.KSpaceTraj import CartesianStack
 from feelmri.MPIUtilities import MPI_print, gather_data
 from feelmri.MRImaging import SliceProfile
-from feelmri.MRObjects import RF, Gradient, Scanner
+from feelmri.MRObjects import RF, B0Field, Gradient, Scanner
 from feelmri.Parameters import ParameterHandler, PVSMParser
 from feelmri.Phantom import FEMPhantom
 from feelmri.Plotter import MRIPlotter
@@ -63,23 +63,22 @@ if __name__ == '__main__':
   scanner = Scanner(gradient_strength=parameters.Hardware.G_max,
                     gradient_slew_rate=parameters.Hardware.G_sr)
 
-  # Field inhomogeneity
+  # Main-field inhomogeneity, written in SCANNER coordinates: it belongs to the
+  # bore rather than to the tissue, so a spin that moves samples it wherever it
+  # has moved to. Nothing moves in this example, but the two descriptions are
+  # only interchangeable while that stays true.
   def spatial(x):
       return x[:,0] + x[:,1] + x[:,2]
-  delta_B0 = spatial(phantom.local_nodes)
-  delta_B0 /= np.abs(spatial(phantom.global_nodes).flatten()).max()
-  # 7.0 ppm of the main field. The normalisation above leaves the peak at
-  # exactly 1.0, so this factor IS the peak offset -- and it is written against
+  lab_nodes = phantom.global_nodes @ planning.MPS.T + planning.LOC.m_as('m')
+  peak = np.abs(spatial(lab_nodes).flatten()).max()
+  # 7.0 ppm of the main field. The normalisation leaves the peak at exactly
+  # 1.0, so this factor IS the peak offset -- and it is written against
   # `field_strength` rather than as a bare number so it tracks the scanner. A
   # literal `10.5 * 1e-6` is a FIXED field that happens to equal this at
   # 1.5 T and diverges from it at any other, which is how the comment here came
   # to claim 1.5 ppm for 7.0 ppm of offset.
-  delta_B0 = delta_B0 * scanner.field_strength * 7.0e-6
-  # Carried as a Quantity from here on. Left as a bare array, the unit lived
-  # only in the two places that re-declared it -- `m_as('1/ms/T')` here and
-  # `Q_(delta_B0, 'T')` at the solver -- which is the shape that produced a
-  # 1000x error in these same two examples once before.
-  delta_omega0 = (2.0 * np.pi * scanner.gammabar * delta_B0).to('rad/ms')
+  b0_field = B0Field.on_phantom(
+      lambda x: spatial(x) / peak * scanner.field_strength * 7.0e-6, phantom)
 
   # Slice profile
   # The slice profile prepulse is calculated based on a reference RF pulse with
@@ -152,7 +151,7 @@ if __name__ == '__main__':
                       M0=1e+9, 
                       T1=parameters.Phantom.T1, 
                       T2=parameters.Phantom.T2star, 
-                      delta_B=delta_B0.m_as('mT').reshape((-1, 1)),
+                      b0_field=b0_field,
                       pod_trajectory=None,
                       perfect_spoiling=False)
 
@@ -163,8 +162,18 @@ if __name__ == '__main__':
   vxsz = planning.FOV.m_as('m')/np.array(parameters.Imaging.RES)
   phantom.set_assembler(voxel_size=vxsz[0], lorder=1, horder=6, nodal_approximation=True, lumped=False)
 
-  # Set static fields
-  phantom.set_static_fields(T2=T2, phi_dB0=delta_omega0.m_as('rad/ms'))
+  # Set static fields. Only the uniform part of the scanner field rides on the
+  # off-resonance channel -- it is spatially constant, so no k-space offset can
+  # carry it; the rest of it becomes the shift below.
+  phantom.set_static_fields(
+      T2=T2,
+      phi_dB0=np.full(T2.shape,
+                      b0_field.phi_offset(scanner, location=traj.LOC),
+                      dtype=np.float32))
+
+  # The reconstruction grids on the NOMINAL trajectory, so the shift is kept
+  # apart from it: the difference between the two is the geometric distortion.
+  b0_points = traj.b0_shifted_points(b0_field, scanner)
 
   # Fast mode for CI testing
   if FAST_MODE:
@@ -191,9 +200,9 @@ if __name__ == '__main__':
       phantom.update_magnetization(Mxy)
 
       # k-space points per shot
-      kspace_points = (traj.points[0][:,sh,s,np.newaxis], 
-                      traj.points[1][:,sh,s,np.newaxis], 
-                      traj.points[2][:,sh,s,np.newaxis])
+      kspace_points = (b0_points[0][:,sh,s,np.newaxis], 
+                      b0_points[1][:,sh,s,np.newaxis], 
+                      b0_points[2][:,sh,s,np.newaxis])
       kspace_times = traj.times.m_as('ms')[:,sh,s,np.newaxis] - traj.t_start.m_as('ms')
 
       # Generate 4D flow image
