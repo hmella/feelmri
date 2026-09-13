@@ -233,3 +233,39 @@ def test_a_per_node_field_refuses_a_node_set_it_was_not_built_on(tmp_path):
     assert field.nodal_mT(one).size == one.local_nodes.shape[0]
     with pytest.raises(ValueError, match='different node set'):
         field.nodal_mT(other)
+
+
+def test_a_per_node_field_refuses_the_coefficient_accessors(tmp_path):
+    """A per-node field has no constant, gradient or quadratic form.
+
+    It is built with a zero coefficient vector, so `in_frame_full` and
+    everything downstream of it would happily return those zeros -- dropping
+    the entire field with no symptom, which is exactly what `spamm.py` would
+    have done through `phi_offset`. Each one names `readout_terms` /
+    `solver_terms` instead.
+    """
+    pytest.importorskip('meshio')
+    from feelmri.Phantom import FEMPhantom
+    from feelmri.MRObjects import Scanner
+    import meshio
+
+    pts = np.array([[0.11, -0.03, 0.07], [-0.05, 0.12, 0.02],
+                    [0.04, 0.06, -0.10], [-0.09, -0.08, 0.05],
+                    [0.02, -0.11, -0.06]])
+    path = tmp_path / 'coeff_refusal.vtu'
+    meshio.write(str(path), meshio.Mesh(
+        pts, [('tetra', np.array([[0, 1, 2, 3], [1, 2, 4, 3]]))]))
+    phantom = FEMPhantom(path=str(path))
+
+    rough = lambda p: 1e-3 * np.sin(2 * np.pi * p[:, 0] / 0.03)
+    field = B0Field.on_phantom(rough, phantom, collective=False)
+    assert field.kind == 'nodal'
+    # The zeros are really there -- this is what would have been returned.
+    assert field.offset_mT == 0.0 and not np.any(field.gradient_mT_per_m)
+    assert not field.is_zero, 'the field itself is not zero, only its coefficients'
+
+    for call in (lambda: field.in_frame_full(),
+                 lambda: field.in_frame(),
+                 lambda: field.phi_offset(Scanner())):
+        with pytest.raises(TypeError, match='readout_terms'):
+            call()

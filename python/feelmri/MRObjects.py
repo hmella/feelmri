@@ -166,7 +166,12 @@ class B0Field:
         self._nodal_grad = None
         self._nodal_stamp = None
         self._expression = None
-        self._mesh_residual_mT = 0.0
+        # How much of the field varies WITHIN one element, in mT. A per-node
+        # field reaches the readout through the shape functions, so whatever it
+        # does between nodes is not represented at all -- a separate limit from
+        # the Taylor one, and the only error left on the static-exact path.
+        # Set by `on_phantom`; compare it against the field's own amplitude.
+        self.mesh_residual_mT = 0.0
 
     @property
     def kind(self):
@@ -303,6 +308,13 @@ class B0Field:
         Returns ``(offset_mT, gradient_mT_per_m, quadratic_mT_per_m2)`` with the
         quadratic as ``(xx, yy, zz, xy, xz, yz)``, all zeros below degree 2.
         """
+        if self.kind == 'nodal':
+            raise TypeError(
+                "B0Field.in_frame_full: this field is a per-node expansion, "
+                "which has no constant, gradient or quadratic form -- "
+                "returning the zeros it was constructed with would drop the "
+                "whole field with no symptom. Use `solver_terms` / "
+                "`readout_terms`, which hand each consumer what it can carry.")
         if self.order >= 3:
             raise NotImplementedError(
                 f"B0Field.in_frame_full: this field is degree {self.order}, and "
@@ -532,7 +544,7 @@ class B0Field:
             collective=kwargs.get('collective', True))
         field._nodal_stamp = cls._node_stamp(phantom)
         field._expression = expression
-        field._mesh_residual_mT = cls._mesh_residual(expression, phantom, nodes)
+        field.mesh_residual_mT = cls._mesh_residual(expression, phantom, nodes)
         return field
 
     @staticmethod

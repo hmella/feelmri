@@ -80,13 +80,36 @@ if __name__ == '__main__':
   # bore, so a spin that moves samples it wherever it has moved to rather than
   # keeping the value it had where it started. B0Field carries it to the solver
   # and to the readout, which are the two places the tissue can move under it.
+  #
+  # NON-POLYNOMIAL, which is the case this phantom exercises: a residual no
+  # second-order shim can null, curving on the scale of the chest rather than
+  # of the heart. `on_phantom` tries a global polynomial first and falls back
+  # to sampling the expression per node when none represents it, so what the
+  # expression is decides which channel carries it -- there is nothing to
+  # select by hand.
+  #
+  # The per-node expansion is first order in the displacement, so the curvature
+  # scales above are a modelling choice and not decoration. Measured against the
+  # exact field over this phantom's own motion, peak 1.0 ppm = 63.9 Hz:
+  #
+  #   displacement   per-node gradient   frozen onto the node
+  #   20.4 mm        2.86 Hz             21.9 Hz
+  #   24.0 mm        3.91 Hz             25.5 Hz
+  #
+  # Shorten the wavelengths and that first column grows as (|u|/L)^2; the
+  # reported `mesh_residual_mT` is the separate limit, how much of the field
+  # varies inside one element and so cannot be represented at all.
   def spatial(x):
-      return x[:,0] + x[:,1] + x[:,2]
+      return (np.sin(2*np.pi*x[:,0]/0.22) * np.cos(2*np.pi*x[:,1]/0.26)
+              + 0.6*np.sin(2*np.pi*x[:,2]/0.30))
   lab_nodes = phantom.global_nodes @ planning.MPS.T + planning.LOC.m_as('m')
   peak = np.abs(spatial(lab_nodes).flatten()).max()
   b0_field = B0Field.on_phantom(
       lambda x: spatial(x) / peak * scanner.field_strength * 1e-6,  # 1.0 ppm
       phantom)
+  MPI_print('B0 field: {:s} expansion, within-element residual {:.2e} mT'.format(
+      b0_field.kind, b0_field.mesh_residual_mT))
+
 
   # Slice profile
   # The slice profile prepulse is calculated based on a reference RF pulse with
@@ -193,18 +216,28 @@ if __name__ == '__main__':
   vxsz = planning.FOV.m_as('m')/np.array(parameters.Imaging.RES)
   phantom.set_assembler(voxel_size=vxsz[0], lorder=3, nodal_approximation=True, lumped=False)
 
-  # Set static fields. Only the uniform part of the scanner field rides here --
-  # it is spatially constant, so no k-space offset can carry it; the rest of it
-  # reaches the readout as the shift below.
-  phantom.set_static_fields(
-      T2=T2.m_as('ms'),
-      phi_dB0=np.full(T2.shape, b0_field.phi_offset(scanner, location=traj.LOC),
-                      dtype=np.float32))
+  # The readout half of the same field. A per-node expansion cannot ride a
+  # k-space shift (that carries a field linear in position) nor the six
+  # `maxwell` coefficients (quadratic), so it rides the PHANTOM instead: the
+  # field value on `phi_dB0` and its gradient on its own channel, which is what
+  # lets the assembler evaluate it where the tissue has moved to. A field a
+  # polynomial can carry goes through `traj.b0_terms` instead, and both
+  # `b0_terms` and `b0_shifted_points` refuse this one by name.
+  #
+  # `moving=True` because a trajectory is handed to `mri_signal` below. On a
+  # phantom that does not move the nodal value IS the Eulerian answer, and the
+  # gradient comes back None.
+  b0_read = b0_field.readout_terms(phantom, scanner, moving=True,
+                                   rotation=planning.MPS)
+  phantom.set_static_fields(T2=T2.m_as('ms'),
+                            phi_dB0=b0_read.phi_nodal.astype(np.float32))
+  phantom.set_b0_gradient(b0_read.node_gradient)
 
   # Iterate over cardiac phases
-  # The reconstruction grids on the NOMINAL trajectory, so the shift is kept
-  # apart from it: the difference between the two is the geometric distortion.
-  kspace_points = traj.b0_shifted_points(b0_field, scanner)
+  # The reconstruction grids on the NOMINAL trajectory, and it stays nominal:
+  # this field displaces the signal through the phase above rather than through
+  # k, and the difference between the two is the geometric distortion.
+  kspace_points = traj.points
   kspace_times = traj.times.m_as('ms') - traj.t_start.m_as('ms')
   for fr in range(Nb_frames):
 
