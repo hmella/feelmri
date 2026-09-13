@@ -80,6 +80,13 @@ def _run_refusal_case(case, phantom, scanner, n_local, globals_):
     elif case == 'update_mag':
         # One length for every rank, right on some and wrong on others.
         phantom.update_magnetization(np.ones((80, 1), dtype=np.complex64))
+    elif case == 'b0_gradient':
+        # One global node's B0 gradient is NaN, so it lives on one rank only.
+        # The setter redistributes, so a bare raise there leaves the rest of
+        # the ranks in the Alltoallv.
+        g = np.zeros((n_local, 3), dtype=np.float64)
+        g[globals_ == 0, 1] = np.nan
+        phantom.set_b0_gradient(g)
     elif case == 'coil_map':
         # One global node's coil value is NaN, so it lives on one rank only --
         # the same shape as the T2 air node.
@@ -105,7 +112,7 @@ def main(argv=None):
                        'others block in the collective that reports it.')
   ap.add_argument('--refusal-case', default='',
                   choices=['', 'static_fields', 'update_mag', 'b1_map',
-                           'coil_map'],
+                           'coil_map', 'b0_gradient'],
                   help='exercise one per-node refusal whose condition is true '
                        'on a SUBSET of ranks; every rank must raise')
   ap.add_argument('--poison-at-solve', type=int, default=-1,
@@ -118,7 +125,8 @@ def main(argv=None):
 
   phantom = FEMPhantom(path=args.mesh)
   scanner = Scanner()
-  if args.refusal_case in ('static_fields', 'update_mag', 'coil_map'):
+  if args.refusal_case in ('static_fields', 'update_mag', 'coil_map',
+                           'b0_gradient'):
     phantom.set_assembler(voxel_size=0.0, lorder=1, horder=1,
                           nodal_approximation=False, lumped=False)
 

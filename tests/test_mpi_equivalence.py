@@ -489,7 +489,7 @@ def test_a_rank_asymmetric_refusal_does_not_hang(tmp_path):
 @pytest.mark.requires_mpi
 @pytest.mark.timeout(240)
 @pytest.mark.parametrize('case', ['static_fields', 'update_mag', 'b1_map',
-                                  'coil_map'])
+                                  'coil_map', 'b0_gradient'])
 def test_every_per_node_refusal_reaches_every_rank(tmp_path, case):
   """Three more refusals whose condition is true on a SUBSET of ranks, each
   sitting upstream of a collective. All three hung.
@@ -506,6 +506,8 @@ def test_every_per_node_refusal_reaches_every_rank(tmp_path, case):
   - `coil_map`: the receive sensitivity, added later and given the collected
     form from the start rather than after a hang -- one NaN at a single global
     node lives on one rank, and the setter redistributes.
+  - `b0_gradient`: the scanner field's per-node Eulerian channel, the same
+    shape as `coil_map` and upstream of the same Alltoallv.
 
   The timeout is the assertion: before the fix none of these came back.
   """
