@@ -700,7 +700,8 @@ class B0Field:
             expression, nodes, gradient=gradient, fd_step=fd_step,
             collective=kwargs.get('collective', True))
         field._nodal_stamp = cls._node_stamp(phantom)
-        field.mesh_residual_mT = cls._mesh_residual(expression, phantom, nodes)
+        field.mesh_residual_mT = cls._mesh_residual(
+            expression, phantom, nodes, collective=kwargs.get('collective', True))
         return field
 
     @staticmethod
@@ -859,14 +860,20 @@ class B0Field:
         """
         from feelmri.MPIUtilities import MPI_comm
 
+        # The local values are computed first and the reduction is
+        # UNCONDITIONAL. A rank that owns no elements returning early here
+        # would skip the allreduce its peers are already inside -- the
+        # collective-behind-a-rank-local-predicate hang this module has been
+        # bitten by in every audit, including, as it turns out, in this guard.
         elems = getattr(phantom, 'local_elements', None)
-        if elems is None or len(elems) == 0:
-            return 0.0, 0.0
-        centroids = nodes[np.asarray(elems)].mean(axis=1)
-        truth = cls._sample(expression, centroids)
-        gap = float(np.abs(truth - np.asarray(fitted(centroids)).reshape(-1)).max())
-        lo = float(truth.min()) if truth.size else 0.0
-        hi = float(truth.max()) if truth.size else 0.0
+        gap, lo, hi = 0.0, 0.0, 0.0
+        if elems is not None and len(elems) > 0:
+            centroids = nodes[np.asarray(elems)].mean(axis=1)
+            truth = cls._sample(expression, centroids)
+            gap = float(np.abs(
+                truth - np.asarray(fitted(centroids)).reshape(-1)).max())
+            lo = float(truth.min()) if truth.size else 0.0
+            hi = float(truth.max()) if truth.size else 0.0
         if collective:
             gap = MPI_comm.allreduce(gap, op=MPI.MAX)
             lo = MPI_comm.allreduce(lo, op=MPI.MIN)
@@ -874,7 +881,7 @@ class B0Field:
         return gap, hi - lo
 
     @classmethod
-    def _mesh_residual(cls, expression, phantom, nodes):
+    def _mesh_residual(cls, expression, phantom, nodes, collective=True):
         """How much of the field varies WITHIN one element, in mT.
 
         A per-node field reaches the readout through the shape functions, so
@@ -883,15 +890,23 @@ class B0Field:
         nodal values measures exactly that -- and unlike an interpolant it needs
         no per-cell-type basis, so it is valid for every element the mesh may
         hold. Returns 0.0 when the connectivity is not available.
+
+        REDUCED across ranks, like every other error metric on this class. A
+        per-rank figure is worse than none: it is reported once, from rank 0,
+        whose slice may be the smoothest part of the field.
         """
+        from feelmri.MPIUtilities import MPI_comm
+
         elems = getattr(phantom, 'local_elements', None)
-        if elems is None or len(elems) == 0:
-            return 0.0
-        elems = np.asarray(elems)
-        centroids = nodes[elems].mean(axis=1)
-        nodal = cls._sample(expression, nodes)
-        return float(np.abs(cls._sample(expression, centroids)
-                            - nodal[elems].mean(axis=1)).max())
+        worst = 0.0
+        if elems is not None and len(elems) > 0:
+            elems = np.asarray(elems)
+            centroids = nodes[elems].mean(axis=1)
+            nodal = cls._sample(expression, nodes)
+            worst = float(np.abs(cls._sample(expression, centroids)
+                                 - nodal[elems].mean(axis=1)).max())
+        # Unconditional, for the reason `_holdout_residual` gives.
+        return MPI_comm.allreduce(worst, op=MPI.MAX) if collective else worst
 
     @staticmethod
     def _monomial_exponents(order):

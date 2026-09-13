@@ -49,6 +49,16 @@ def main() -> int:
                        'represent, so it rides the per-node channel: the '
                        'values on phi_dB0 and the gradient on '
                        'set_b0_gradient, both redistributed under --dual')
+  ap.add_argument('--pod', action='store_true',
+                  help='hand simulate_pulseq a rigid-translation trajectory. '
+                       'Without it `moving` is False, `readout_terms` returns '
+                       'no gradient at all, and --b0-nodal exercises only the '
+                       'phi_dB0 half.')
+  ap.add_argument('--b0-frozen', action='store_true',
+                  help='with --b0-nodal, install the field VALUES but not the '
+                       'gradient, i.e. the Lagrangian description. The two '
+                       'must differ, or a rank-count comparison passes with '
+                       'the gradient channel disabled on every rank.')
   ap.add_argument('--dual', action='store_true',
                   help='build two partitions instead of one, so every static '
                        'field and magnetization handoff is redistributed')
@@ -109,7 +119,25 @@ def main() -> int:
     if field.kind != 'nodal':
       raise SystemExit(f'the fixture must need the per-node rung, '
                        f'got {field.kind}')
-    extra['b0_field'] = field
+    if args.b0_frozen:
+      # The field frozen onto the node: its values on phi_dB0 and no gradient
+      # at all. `simulate_pulseq` is given no b0_field, so nothing installs one.
+      from feelmri.MRObjects import Scanner as _Scanner
+      gamma = _Scanner().gamma.m_as('rad/ms/mT')
+      nodal = field.nodal_mT(phantom)
+      phantom.set_static_fields(
+          T2=np.full(n, 60.0, dtype=np.float32),
+          phi_dB0=((2.0 * nodes[:, 0] / reach) + gamma * nodal).astype(np.float32))
+    else:
+      extra['b0_field'] = field
+  if args.pod:
+    from feelmri.Motion import POD
+    n_frames = 4
+    disp = np.zeros((n, 3, n_frames), dtype=np.float32)
+    for axis, amp in enumerate((0.30, -0.20, 0.25)):
+      disp[:, axis, :] = amp * reach
+    extra['pod'] = POD(data=disp, times=np.linspace(0.0, 400.0, n_frames),
+                       n_modes=1, is_periodic=True)
   if args.t2_prime > 0.0:
     extra = dict(t2_prime=Quantity(args.t2_prime, 'ms'),
                  spectral_bins=args.spectral_bins)
