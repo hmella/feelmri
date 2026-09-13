@@ -1417,14 +1417,19 @@ class BlochSolver:
         faster on the free-running block. Handing pybind11 the layout it
         declares also avoids a 23 MB transpose on every kernel call.
         """
+        # The rotation is part of the key: `concomitant_fields` is a
+        # constructor knob but a plain attribute, so a caller who flips it
+        # between solves would otherwise be handed modes in the other frame.
+        rotate = bool(self.concomitant_fields and self._orientation is not None)
         cache = self._modes_cache
         if cache is not None:
-            pod_ref, n_ref, mat = cache
-            if pod_ref is self.pod_trajectory and n_ref == nb_nodes:
+            pod_ref, n_ref, rot_ref, mat = cache
+            if (pod_ref is self.pod_trajectory and n_ref == nb_nodes
+                    and rot_ref == rotate):
                 return mat
 
         modes = self.pod_trajectory.get_modes(nb_nodes)
-        if self.concomitant_fields and self._orientation is not None:
+        if rotate:
             # Displacements are vectors and rotate with the positions they are
             # added to, or the deformed mesh would be a mixture of the two
             # frames. Done before the (N, 3, M) -> (3N, M) flatten, while the
@@ -1434,7 +1439,7 @@ class BlochSolver:
         mat = np.asfortranarray(
             modes.reshape(3 * nb_nodes, -1), dtype=self._np_real
         )
-        self._modes_cache = (self.pod_trajectory, nb_nodes, mat)
+        self._modes_cache = (self.pod_trajectory, nb_nodes, rotate, mat)
         return mat
 
     # The sub-ensemble is built once, in __init__. Exposing these read-only

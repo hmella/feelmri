@@ -194,3 +194,42 @@ def test_raster_spans_every_block(seq_path, pulseq_import):
     assert abs(integrated - total) < 1e-6 * max(total, 1.0), (
         f'{integrated:.4f} of {total:.4f} ms integrated '
         f'({100 * integrated / total:.2f}%)')
+
+
+@pytest.mark.parametrize('seq_path', SEQ_FILES, ids=seq_ids(SEQ_FILES))
+def test_no_rf_plays_inside_a_readout_window(seq_path, pulseq_import):
+    """The dual path solves the sequence ONCE and then synthesizes each readout
+    from its trajectory. That is equivalent to evolving through the readout only
+    while no RF plays between the magnetization snapshot and the last sample:
+    the equivalence rests on `2*pi k.r = gamma integral(G.r dt)`, which is a
+    statement about precession under a longitudinal field alone.
+
+    An RF pulse inside a window would break it silently -- the assembler has no
+    B1 channel at all, so the signal would simply be computed as though the
+    pulse had not happened. Nothing checked this, on any fixture.
+
+    `_identify_readout_groups` is what keeps it true: a window ends at the last
+    ADC attributed to one coherence anchor, and the next RF starts a new one.
+    This asserts the property the grouping is supposed to deliver.
+    """
+    skip_if_pypulseq_too_old(seq_path)
+    imp = pulseq_import(seq_path)
+    if not imp.readouts:
+        pytest.skip('no ADC in this sequence')
+
+    blocks = imp.feelmri_seq.blocks
+    checked = 0
+    for rw in imp.readouts:
+        if rw.m_storage_idx < 0:
+            continue
+        # Strictly after the anchor block, up to and including the last block
+        # the window covers.
+        for i in range(rw.m_storage_block + 1, rw.last_block + 1):
+            pulses = getattr(blocks[i], 'rf_pulses', None) or []
+            assert not pulses, (
+                f'block {i} carries RF inside the readout window '
+                f'{rw.first_block}-{rw.last_block}, whose snapshot is at block '
+                f'{rw.m_storage_block}; the assembler has no B1 channel and '
+                f'would ignore it')
+        checked += 1
+    assert checked > 0, 'no window had a usable anchor, so nothing was checked'
