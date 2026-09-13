@@ -2464,3 +2464,82 @@ def test_the_per_node_field_reaches_both_magnus_seeds(wide_phantom, spoiler):
       f'the {"spoiler" if spoiler else "plain"} Magnus seed disagrees with the '
       f'kernel by {gap:.3e}: under a field constant in time the trapezoidal '
       f'rule is exact, so magnus2 must reproduce cayley_klein')
+
+
+def test_the_shim_channels_survive_the_concomitant_branch():
+  """Switching the concomitant term on must not change a field it cannot touch.
+
+  With `G = 0` the Maxwell field `Bc = (Bx^2 + By^2)/(2 B0)` is IDENTICALLY
+  zero -- both components are linear in the gradient -- so
+  `concomitant_fields=True` is required to be bit-identical to False, whatever
+  else the solver is carrying. That makes it an exact identity rather than a
+  tolerance, and it needs no closed form.
+
+  It is the only shape of test that can see a dropped kernel cell. The node
+  loop branches on `Conc` at compile time and on the two shim channels at run
+  time, and an `else if` hanging off the concomitant arm covered two of the
+  four combinations while reading as though it covered all four: `node_lin`
+  was dropped from `Bz_new` while both Python Magnus seeds kept it, so the
+  opening trapezoidal step of every block carried the shim and no other step
+  did. Measured before the fix, on this geometry: **2.32 rad** between the two
+  flags, leaving the answer **1.83** from the Eulerian truth and **1.86** from
+  the frozen one -- neither of the two things it could legitimately have been.
+  """
+  pytest.importorskip('meshio')
+  import meshio
+  import tempfile
+  from feelmri import B0Field
+  from _phantom_fixtures import make_cube_mesh
+
+  scanner = Scanner()
+  gamma = scanner.gamma.m_as('rad/ms/mT')
+  dur_ms, shift = 5.0, np.array([0.021, -0.014, 0.018])
+
+  path, _v = make_cube_mesh(Path(tempfile.mkdtemp()) / 'conc_shim.vtu',
+                            'tetra', n=3, scale=0.18)
+  mesh = meshio.read(str(path))
+  P = np.asarray(mesh.points, dtype=np.float64)
+  cells = mesh.cells_dict['tetra']
+
+  # Curved on the scale of the object, so no polynomial up to the cap fits and
+  # `on_phantom` falls back to the per-node rung -- the channel under test.
+  # Gentle enough that the first-order expansion is still valid over 31 mm.
+  rough = lambda q: 1.0e-3 * np.sin(q[:, 0] / 0.25) * np.cos(q[:, 1] / 0.30)
+
+  blk = _gradient_block((0.0, 0.0, 0.0), dur_ms)
+
+  def solve(tag, conc):
+    phantom = _phantom_from_points(P, cells, tag)
+    field = B0Field.on_phantom(rough, phantom, collective=False)
+    assert field.kind == 'nodal', f'the fixture must be per-node, got {field.kind}'
+    pod = _constant_displacement_pod(phantom.local_nodes.shape[0], shift,
+                                     dur_ms=dur_ms)
+    return _precess(phantom, blk, b0_field=field, pod_trajectory=pod,
+                    scanner=scanner, concomitant_fields=conc)
+
+  off = solve('conc_shim_off', False)
+  on = solve('conc_shim_on', True)
+
+  gap = float(np.abs(np.angle(on) - np.angle(off)).max())
+  assert gap == 0.0, (
+      f'at G = 0 the concomitant field is identically zero, so the flag must '
+      f'change nothing; it moved the phase by {gap:.3e} rad')
+
+  # Both arms must be the EULERIAN answer, not the frozen one -- otherwise the
+  # identity above is satisfied by dropping the channel on both sides.
+  nodes = np.asarray(_phantom_from_points(P, cells, 'conc_shim_ref').local_nodes,
+                     dtype=np.float64)
+  want_moved = -gamma * rough(nodes + shift) * dur_ms
+  want_frozen = -gamma * rough(nodes) * dur_ms
+
+  def err(got, want):
+    return float(np.abs(np.exp(1j * np.angle(got)) - np.exp(1j * want)).max())
+
+  for tag, got in (('off', off), ('on', on)):
+    assert err(got, want_moved) < 2e-2, (
+        f'[{tag}] the per-node field disagrees with the Eulerian truth by '
+        f'{err(got, want_moved):.3e}')
+  frozen_gap = err(off, want_frozen)
+  assert frozen_gap > 10.0 * err(off, want_moved), (
+      f'this geometry only separates the Eulerian answer from the frozen one '
+      f'by {frozen_gap:.3e}, so it cannot tell them apart')

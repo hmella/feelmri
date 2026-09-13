@@ -338,8 +338,40 @@ MagnetizationState<T> solve_mri_impl(
         // float32-vs-float64 gap of 1.2e-05. A compile-time branch was tried
         // and is worse on both counts (3.175e-06, and 96 node-loop
         // instantiations instead of 48), so the runtime branch stays.
+        //
+        // Every combination of the two shim channels is spelled out against
+        // BOTH sides of `Conc`. An `else if (has_node_lin)` hanging off the
+        // concomitant branch reads as though it covered all four cells and
+        // does not: with the concomitant term on it dropped `node_lin`
+        // entirely while both Python Magnus seeds kept it, so the first step
+        // of every block carried the shim and the rest did not. Measured on a
+        // G = 0 block, where the concomitant field is identically zero and the
+        // flag must therefore change nothing at all, switching it on moved the
+        // phase by 2.32 rad and left the answer 1.83 from the Eulerian truth
+        // and 1.86 from the frozen one -- neither of the two things it could
+        // legitimately have been.
         if constexpr (Conc) {
-          if (has_field_quad) {
+          if (has_node_lin) {
+            if (has_field_quad) {
+              Bz_new = curr(p, 0)*(Gx_lin + node_lin(p, 0))
+                     + curr(p, 1)*(Gy_lin + node_lin(p, 1))
+                     + curr(p, 2)*(Gz_lin + node_lin(p, 2))
+                     + delta_B(p) + Bc_off
+                     + ((Gx*Gx + Gy*Gy) * pz*pz
+                        + T(0.25) * Gz*Gz * (px*px + py*py)
+                        - Gx*Gz*px*pz - Gy*Gz*py*pz) * inv_2B0
+                     + qxx*px*px + qyy*py*py + qzz*pz*pz
+                     + qxy*px*py + qxz*px*pz + qyz*py*pz;
+            } else {
+              Bz_new = curr(p, 0)*(Gx_lin + node_lin(p, 0))
+                     + curr(p, 1)*(Gy_lin + node_lin(p, 1))
+                     + curr(p, 2)*(Gz_lin + node_lin(p, 2))
+                     + delta_B(p) + Bc_off
+                     + ((Gx*Gx + Gy*Gy) * pz*pz
+                        + T(0.25) * Gz*Gz * (px*px + py*py)
+                        - Gx*Gz*px*pz - Gy*Gz*py*pz) * inv_2B0;
+            }
+          } else if (has_field_quad) {
             Bz_new = px*Gx_lin + py*Gy_lin + pz*Gz_lin + delta_B(p) + Bc_off
                    + ((Gx*Gx + Gy*Gy) * pz*pz
                       + T(0.25) * Gz*Gz * (px*px + py*py)
@@ -354,10 +386,19 @@ MagnetizationState<T> solve_mri_impl(
           }
         } else if (has_node_lin) {
           // Grouped as curr*(G + g), 3 mul + 3 add rather than 6 mul + 5 add.
-          Bz_new = curr(p, 0)*(Gx_lin + node_lin(p, 0))
-                 + curr(p, 1)*(Gy_lin + node_lin(p, 1))
-                 + curr(p, 2)*(Gz_lin + node_lin(p, 2))
-                 + delta_B(p);
+          if (has_field_quad) {
+            Bz_new = curr(p, 0)*(Gx_lin + node_lin(p, 0))
+                   + curr(p, 1)*(Gy_lin + node_lin(p, 1))
+                   + curr(p, 2)*(Gz_lin + node_lin(p, 2))
+                   + delta_B(p)
+                   + qxx*px*px + qyy*py*py + qzz*pz*pz
+                   + qxy*px*py + qxz*px*pz + qyz*py*pz;
+          } else {
+            Bz_new = curr(p, 0)*(Gx_lin + node_lin(p, 0))
+                   + curr(p, 1)*(Gy_lin + node_lin(p, 1))
+                   + curr(p, 2)*(Gz_lin + node_lin(p, 2))
+                   + delta_B(p);
+          }
         } else {
           if (has_field_quad) {
             Bz_new = curr(p, 0)*Gx_lin + curr(p, 1)*Gy_lin + curr(p, 2)*Gz_lin
