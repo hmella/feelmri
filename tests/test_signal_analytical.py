@@ -1476,3 +1476,69 @@ def test_orienting_after_set_assembler_is_refused(tmp_path):
   # and the readout helpers both look for it.
   ok, _points = _maxwell_fixture(tmp_path, 'orient_early.vtu', orientation=R)
   assert np.allclose(ok._orientation, R)
+
+
+def test_coils_motion_and_the_maxwell_term_compose_in_one_readout(tmp_path):
+  """The three signal-side features at once, against the closed form.
+
+  Each had been tested alone. Together they share one loop and one `nv` axis:
+  the quadratic phase is evaluated at the DEFORMED position (it has to follow
+  the material point, exactly as `-k.x` does), the coil map multiplies into the
+  same axis the encodings use, and the whole thing is one `signal_sum`.
+
+  `signal_sum` is an unweighted nodal sum, so
+  `S[e*n_coils+c] = sum_n Mxy[n,e] C[n,c] exp(i phi(x_n + u_n))` is exact.
+  """
+  from feelmri.Motion import POD
+
+  phantom, points = _maxwell_phantom(tmp_path, 'coil_pod_maxwell.vtu',
+                                     nodal=False)
+  n = points.shape[0]
+  rng = np.random.default_rng(53)
+
+  # A two-mode POD whose displacement is large enough to matter against a
+  # phase that is quadratic in position.
+  snap_times = np.array([0.0, 1.0, 2.0, 3.0], dtype=np.float32)
+  data = (0.02 * rng.normal(size=(n, 3, snap_times.size))).astype(np.float32)
+  pod = POD(times=snap_times, data=data, n_modes=2, is_periodic=False)
+
+  coef = np.vstack([_six_coefficients()[0],
+                    -0.7 * _six_coefficients()[0]])
+  sample_times = np.array([0.4, 2.6], dtype=np.float32)
+
+  C = (rng.normal(size=(n, 3)) + 1j * rng.normal(size=(n, 3))).astype(np.complex64)
+  Mxy = (rng.normal(size=(n, 2))
+         + 1j * rng.normal(size=(n, 2))).astype(np.complex64)
+  phantom.set_receive_sensitivity(C)
+  phantom.update_magnetization(Mxy)
+
+  zero = np.zeros((2, 1, 1), dtype=np.float32)
+  pts = (zero.copy(), zero.copy(), zero.copy())
+  got = np.asarray(phantom.signal_sum(pts, sample_times.reshape(2, 1, 1),
+                                      pod, maxwell=coef)).reshape(-1)
+  assert got.size == 2 * 2 * 3
+
+  # The deformed node positions, from the same modes and weights the kernel is
+  # handed: x(t) = x0 + Phi w(t).
+  modes = pod.get_modes(n).astype(np.float64)
+  weights = pod.get_weights(sample_times).astype(np.float64)
+  expected = []
+  for s in range(sample_times.size):
+    deformed = points + np.einsum('ncm,m->nc', modes, weights[s])
+    phase = np.exp(1j * _monomial_phase(coef[s], deformed))
+    for e in range(2):
+      for c in range(3):
+        expected.append((Mxy[:, e] * C[:, c] * phase).sum())
+  expected = np.array(expected)
+
+  scale = float(np.abs(expected).max())
+  assert float(np.abs(got - expected).max()) < 3e-6 * scale
+
+  # Not vacuous on any of the three: dropping each in turn must change it.
+  still = np.asarray(phantom.signal_sum(pts, sample_times.reshape(2, 1, 1),
+                                        None, maxwell=coef)).reshape(-1)
+  assert float(np.abs(still - got).max()) > 1e-3 * scale, 'the motion does nothing'
+  flat = np.asarray(phantom.signal_sum(pts, sample_times.reshape(2, 1, 1),
+                                       pod)).reshape(-1)
+  assert float(np.abs(flat - got).max()) > 1e-3 * scale, 'the maxwell term does nothing'
+  assert float(np.abs(np.abs(C) - 1.0).max()) > 0.1, 'the coil map is trivial'

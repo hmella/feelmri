@@ -113,3 +113,95 @@ def test_a_mismatched_map_is_refused():
     S, m = _fields(3)
     with pytest.raises(ValueError, match='against images'):
         _combine_channels(S * m[None], 'roemer', S[:2])
+
+
+def _radial_traj(n_ro=16, n_spokes=9, n_slices=1, kmax=0.4):
+    """Golden-ish radial spokes, tiny. `n_slices > 1` repeats the same in-plane
+    spokes at Cartesian kz, which is what makes `reconstruct_nufft` take the
+    hybrid branch instead of the full 3-D one."""
+    r = np.linspace(-kmax, kmax, n_ro)
+    ang = np.pi * np.arange(n_spokes) / n_spokes
+    kx = np.outer(r, np.cos(ang))
+    ky = np.outer(r, np.sin(ang))
+    kx = np.repeat(kx[:, :, None], n_slices, axis=2)
+    ky = np.repeat(ky[:, :, None], n_slices, axis=2)
+    if n_slices == 1:
+        kz = np.zeros_like(kx)
+    else:
+        kzv = (np.arange(n_slices) - n_slices // 2) / float(n_slices)
+        kz = np.broadcast_to(kzv[None, None, :], kx.shape).copy()
+    return kx, ky, kz
+
+
+@pytest.mark.parametrize('n_slices,branch', [(1, 'full_3d'), (4, 'hybrid')])
+def test_the_combine_arguments_reach_both_dispatch_branches(monkeypatch,
+                                                            n_slices, branch):
+    """`reconstruct_nufft` picks between a hybrid stack-of-X path and a full
+    3-D one, and `combine` / `sensitivities` are threaded separately through
+    each. Neither had a test.
+
+    What is checked is the plumbing: the channel axis must arrive LEADING, the
+    map must arrive unchanged, and the image shape must match it -- which is
+    what `_combine_channels` then requires of them.
+    """
+    from feelmri import Recon
+
+    img_shape = (8, 8, 4) if n_slices > 1 else (8, 8)
+    kx, ky, kz = _radial_traj(n_slices=n_slices)
+    n_ch = 3
+    rng = np.random.default_rng(3)
+    kdata = (rng.normal(size=(*kx.shape, n_ch))
+             + 1j * rng.normal(size=(*kx.shape, n_ch))).astype(np.complex64)
+    S = (rng.normal(size=(n_ch, *img_shape))
+         + 1j * rng.normal(size=(n_ch, *img_shape))).astype(np.complex64)
+
+    seen = {}
+    real = Recon._combine_channels
+
+    def spy(img, combine, sensitivities):
+        seen['shape'] = img.shape
+        seen['combine'] = combine
+        seen['map_is'] = sensitivities is S
+        return real(img, combine, sensitivities)
+
+    monkeypatch.setattr(Recon, '_combine_channels', spy)
+    out = Recon.reconstruct_nufft(kdata, (kx, ky, kz), img_shape,
+                                  auto_dcw=None, combine='roemer',
+                                  sensitivities=S)
+
+    assert seen['combine'] == 'roemer'
+    assert seen['map_is'], 'the map did not reach the combine unchanged'
+    assert seen['shape'] == (n_ch, *img_shape), (
+        f'{branch}: the channel axis arrived as {seen["shape"]} against a map '
+        f'of {S.shape}')
+    assert out.shape == img_shape
+
+
+@pytest.mark.parametrize('n_slices', [1, 4])
+def test_combining_inside_the_recon_equals_combining_after_it(n_slices):
+    """The reconstruction is linear per channel, so collapsing the channels
+    inside it must give exactly what collapsing its `combine=None` output
+    gives. That pins the ORDER of the two operations, which is the only thing
+    the caller cannot check for themselves."""
+    from feelmri import Recon
+
+    img_shape = (8, 8, 4) if n_slices > 1 else (8, 8)
+    kx, ky, kz = _radial_traj(n_slices=n_slices)
+    n_ch = 2
+    rng = np.random.default_rng(11)
+    kdata = (rng.normal(size=(*kx.shape, n_ch))
+             + 1j * rng.normal(size=(*kx.shape, n_ch))).astype(np.complex64)
+    S = (rng.normal(size=(n_ch, *img_shape))
+         + 1j * rng.normal(size=(n_ch, *img_shape))).astype(np.complex64)
+
+    channels = Recon.reconstruct_nufft(kdata, (kx, ky, kz), img_shape,
+                                       auto_dcw=None, combine=None)
+    assert channels.shape == (n_ch, *img_shape)
+    inside = Recon.reconstruct_nufft(kdata, (kx, ky, kz), img_shape,
+                                     auto_dcw=None, combine='roemer',
+                                     sensitivities=S)
+    after = _combine_channels(channels, 'roemer', S)
+    scale = float(np.abs(after).max())
+    assert float(np.abs(inside - after).max()) < 1e-5 * scale
+    # Not vacuous: the combine has to be doing something to the channels.
+    assert float(np.abs(channels[0] - after).max()) > 1e-3 * scale
