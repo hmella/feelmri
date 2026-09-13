@@ -244,6 +244,15 @@ class RespiratoryMotion:
         self.interpolator = self.calculate_interpolator()
         self._fold_time = _folder(self.times, self._period)
 
+    @property
+    def period(self):
+        """Cycle length ``N*dt``, or ``None`` when not periodic.
+
+        One sampling interval longer than ``times[-1]``, since frame ``N`` is
+        frame 0. Use it to pad a sequence onto a cardiac-cycle boundary.
+        """
+        return self._period
+
     def __add__(self, other):
         """Return a :class:`PODSum` combining this motion with another trajectory.
 
@@ -458,6 +467,15 @@ class POD:
         self._modes = np.asarray(self.modes, dtype=np.float32, order='C')
         self._weights = np.zeros([self.n_modes, ], dtype=np.float32, order='C')
         self._fold_time = _folder(self.times, self._period)
+
+    @property
+    def period(self):
+        """Cycle length ``N*dt``, or ``None`` when not periodic.
+
+        One sampling interval longer than ``times[-1]``, since frame ``N`` is
+        frame 0. Use it to pad a sequence onto a cardiac-cycle boundary.
+        """
+        return self._period
 
     def __repr__(self):
         return f"POD(n_modes={self.n_modes}, interpolation_method='{self.interpolation_method}', is_periodic={self.is_periodic})"
@@ -881,6 +899,20 @@ class PODSum:
         # An OFFSET on top of whatever each child already carries, not a value
         # that replaces them -- see update_timeshift.
         self.timeshift = 0.0
+
+    @property
+    def period(self):
+        """Cycle shared by both children, or ``None`` when they differ.
+
+        A cardiac and a respiratory trajectory need not share a period.
+        """
+        periods = [getattr(c, 'period', None) for c in (self.pod1, self.pod2)]
+        live = [p for p in periods if p is not None]
+        if not live:
+            return None
+        if len(live) == 2 and not np.isclose(live[0], live[1]):
+            return None
+        return float(live[0])
 
     def __call__(self, t: np.float32):
         """Evaluate the combined trajectory at time ``t``.

@@ -180,7 +180,9 @@ if __name__ == '__main__':
     seq.add_block(time_spacing, dt=Q_(1, 'ms'))
 
   # Sync the sequence to the cardiac-cycle boundary.
-  seq.add_block(u_times[-1] - seq.blocks[-1].time_extent[1] % u_times[-1], dt=Q_(1, 'ms'))
+  # (the cycle is N*dt, one sampling interval longer than u_times[-1])
+  cycle = Q_(pod_trajectory.period, 'ms')
+  seq.add_block(cycle - seq.blocks[-1].time_extent[1] % cycle, dt=Q_(1, 'ms'))
 
   # Tagging preparation: one SPAMM module along x, then one along y, each
   # followed by a spoiler. Together they give a tag grid. Prep blocks come

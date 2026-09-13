@@ -48,6 +48,24 @@ def test_the_period_is_n_times_dt_not_the_last_timestamp():
     # The old spelling, as a control: it is a different number, and by exactly
     # one sampling interval.
     assert float(TIMES[-1]) == pytest.approx((N_FRAMES - 1) * DT_MS)
+    assert pod.period - float(TIMES[-1]) == pytest.approx(DT_MS)
+
+
+def test_the_period_is_exposed_for_cycle_synchronisation():
+    """`period` is the cycle the examples pad their sequences by. `PODSum`
+    has one only when both children agree, and a non-periodic trajectory has
+    none."""
+    pod = _cine_pod()
+    signal = np.cos(2.0 * np.pi * np.arange(N_FRAMES) / N_FRAMES)
+    resp = RespiratoryMotion(TIMES, signal.astype(np.float32), is_periodic=True)
+    assert pod.period == pytest.approx(N_FRAMES * DT_MS)
+    assert resp.period == pytest.approx(N_FRAMES * DT_MS)
+    assert PODSum(pod, resp).period == pytest.approx(N_FRAMES * DT_MS)
+    assert POD(TIMES, _cine_snapshots(), n_modes=2,
+               is_periodic=False).period is None
+    other = RespiratoryMotion((TIMES * 1.7).astype(np.float32),
+                              signal.astype(np.float32), is_periodic=True)
+    assert PODSum(pod, other).period is None
 
 
 def test_the_weights_are_continuous_across_the_wrap():

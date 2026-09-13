@@ -137,7 +137,9 @@ if __name__ == '__main__':
       seq.add_block(time_spacing, dt=Q_(1, 'ms'))
 
     # Add and additional block to synchronize the sequence with the cardiac cycle
-    seq.add_block(u_times[-1] - seq.blocks[-1].time_extent[1] % u_times[-1], dt=Q_(1, 'ms'))
+    # (the cycle is N*dt, one sampling interval longer than u_times[-1])
+    cycle = Q_(pod_trajectory.period, 'ms')
+    seq.add_block(cycle - seq.blocks[-1].time_extent[1] % cycle, dt=Q_(1, 'ms'))
 
     # Add blocks to the sequence
     seq.add_block(prep)

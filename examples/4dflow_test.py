@@ -171,7 +171,9 @@ if __name__ == '__main__':
     seq.add_block(CP_spacing, dt=Q_(1, 'ms'))
 
   # Add and additional block to synchronize the sequence with the cardiac cycle
-  seq.add_block(times[-1] - seq.blocks[-1].time_extent[1] % times[-1], dt=Q_(1, 'ms'))
+  # (the cycle is N*dt, one sampling interval longer than times[-1])
+  cycle = Q_(pod_velocity.period, 'ms')
+  seq.add_block(cycle - seq.blocks[-1].time_extent[1] % cycle, dt=Q_(1, 'ms'))
 
   # Add imaging blocks
   for fr in range(Nb_frames):
