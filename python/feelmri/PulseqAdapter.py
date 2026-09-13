@@ -3244,12 +3244,40 @@ def simulate_pulseq(seq_path,
   if sensitivity_set:
     phantom.set_receive_sensitivity(coil_sensitivities)
 
+  # Bound before the try so the finally can read them however early a readout
+  # fails -- an unbound name there would mask the real exception.
+  b0_phi_nodal = None
+  b0_static_set = False
+  remembered = None
+
   # The temporary sensitivity map is removed in the finally below, so a
   # readout that raises does not leave it on the caller's phantom.
   try:
     solver = BlochSolver(sequence=imp.feelmri_seq, phantom=phantom,
                          scanner=scanner, **solver_kwargs)
     Mxy, Mz = solver.solve()
+
+    # The scanner field belongs to the bore, so a spin sees it wherever it has
+    # moved to rather than where it started. A field a polynomial can carry
+    # reaches the readout as a shift of the sample's k, below; one that needs a
+    # per-node expansion rides the PHANTOM instead -- the bracket
+    # `dB0(x0) - g.x0` on `phi_dB0` and the gradient on its own channel, which
+    # is what lets the assembler evaluate it at the deformed position.
+    b0_field = solver_kwargs.get('b0_field', None)
+    if b0_field is not None and b0_field.is_zero:
+      b0_field = None
+    b0_nodal = b0_field is not None and b0_field.kind == 'nodal'
+    b0_phi_nodal = None
+    if b0_nodal:
+      b0_read = b0_field.readout_terms(
+          phantom, scanner, moving=pod is not None,
+          rotation=getattr(phantom, '_orientation', None),
+          location=getattr(phantom, '_location', None))
+      b0_phi_nodal = np.asarray(b0_read.phi_nodal,
+                                dtype=np.float64).reshape(-1)
+      # None on a static phantom, where the nodal value IS the Eulerian answer
+      # and the channel would be pure cost. Cleared in the finally either way.
+      phantom.set_b0_gradient(b0_read.node_gradient)
 
     # When the solver carried a spectral sub-ensemble, reproduce the readout from
     # it rather than from the collapsed magnetization. Needs the static fields the
@@ -3304,12 +3332,35 @@ def simulate_pulseq(seq_path,
     # it is the same coupling rule the off-resonance handoff follows.
     concomitant_readout = bool(solver_kwargs.get('concomitant_fields', False))
 
-    # The scanner field is a property of the bore, so a spin sees it at wherever
-    # it has moved to, not at where it started. The solver already evolves it
-    # that way; the readout gets it as a shift of the sample's k.
-    b0_field = solver_kwargs.get('b0_field', None)
-    if b0_field is not None and b0_field.is_zero:
-      b0_field = None
+    # A per-node field is added to the off-resonance the caller set, once,
+    # rather than per window: it is window independent, and under dual
+    # partitioning every set_static_fields is an Alltoallv. Restored below.
+    b0_static_set = False
+    if b0_phi_nodal is not None:
+      remembered = getattr(phantom, '_static_fields', None)
+      _collective_raise(
+          '' if remembered is not None else
+          "simulate_pulseq: this b0_field needs a per-node expansion, which "
+          "rides `phi_dB0`, but set_static_fields was never called -- there is "
+          "nothing to add it to and the field would be silently dropped.")
+      if bins is None:
+        T2_prev, phi_prev = remembered
+        phantom.set_static_fields(
+            T2_prev,
+            np.asarray(phi_prev, dtype=np.float64)
+            + b0_phi_nodal.reshape(np.shape(phi_prev)))
+        b0_static_set = True
+      else:
+        # The bin loop sets the fields itself, once per sub-spin, so the field
+        # joins `phi_read` there instead. `bins` keeps the caller's own values,
+        # because that is what the finally hands back.
+        _e, _o, _w, _t2, _phi = readout_bins
+        add = (phantom.redistribute_nodal(
+                   np.ascontiguousarray(b0_phi_nodal), 'bloch', 'signal')
+               if dual else b0_phi_nodal)
+        readout_bins = (_e, _o, _w, _t2,
+                        np.asarray(_phi, dtype=np.float64)
+                        + add.reshape(np.shape(_phi)))
 
     kspace: List[np.ndarray] = []
     times: List[np.ndarray] = []
@@ -3336,7 +3387,7 @@ def simulate_pulseq(seq_path,
       # trajectory the reconstruction grids on, and the difference between the
       # two is the distortion the field produces.
       b0_phase = None
-      if b0_field is not None:
+      if b0_field is not None and not b0_nodal:
         dk, b0_phase = b0_kspace_shift(
             b0_field, t, scanner,
             rotation=getattr(phantom, '_orientation', None),
@@ -3415,6 +3466,12 @@ def simulate_pulseq(seq_path,
       kspace.append(gather_data(signal) if gather else signal)
       times.append(rw.times)
   finally:
+    if b0_phi_nodal is not None:
+      # Cleared unconditionally: a stale per-node gradient left on the phantom
+      # is a wrong image with no symptom.
+      phantom.set_b0_gradient(None)
+      if b0_static_set:
+        phantom.set_static_fields(*remembered)
     if sensitivity_set:
       # Restored as the ALREADY-REDISTRIBUTED array, not by re-running the
       # setter: `previous_sensitivity` was read out of the signal layout, and

@@ -1424,6 +1424,58 @@ class FEMPhantom:
     def _set_static_fields_local(self, T2, phi_dB0):
         [a.set_static_fields(T2, phi_dB0) for a in self.assembler]
 
+    def set_b0_gradient(self, gradient):
+        """Per-node gradient of a SCANNER-FIXED B0 field, ``(n_local, 3)`` in rad/ms/m.
+
+        The Eulerian half of off-resonance. ``phi_dB0`` is frozen onto the node
+        and travels with the tissue -- right for chemical shift and local
+        susceptibility -- while a main-field imperfection belongs to the bore,
+        so a spin that moves must sample it where it has moved to. This gradient
+        is what lets the readout do that: the phase becomes
+        ``-(phi_dB0 + g . x(t)) * t``, with ``phi_dB0`` carrying the bracket
+        ``dB0(x0) - g . x0`` so the sum is the field at the current position.
+
+        ``B0Field.solver_terms`` / ``readout_terms`` build both halves together;
+        do not assemble one of them by hand. ``None`` clears it, and clearing
+        matters -- a stale gradient left behind is a wrong image with no
+        symptom.
+
+        Same layout contract as :meth:`set_static_fields`: the array is built
+        from ``phantom.local_nodes`` and redistributed once into the signal
+        layout, where the assemblers live.
+        """
+        if gradient is None:
+            empty = np.zeros((0, 3), dtype=np.float64)
+            return self._set_b0_gradient_local(empty)
+
+        g = np.asarray(gradient, dtype=np.float64)
+        n_local = self.local_nodes.shape[0]
+        problem = ''
+        # COLLECTED, not raised here: every test below reads LOCAL-node data,
+        # and the redistribution underneath is an Alltoallv. A rank that raises
+        # on the spot leaves the others blocked in it for ever.
+        if g.ndim != 2 or g.shape[1] != 3:
+            problem = (f"set_b0_gradient: expected an (n, 3) array, got "
+                       f"shape {g.shape}.")
+        elif g.shape[0] != n_local:
+            problem = (f"set_b0_gradient: got {g.shape[0]} rows for "
+                       f"{n_local} local nodes. A short map is read out of "
+                       f"bounds and returns whatever is next in memory.")
+        elif not np.all(np.isfinite(g)):
+            first = int(np.flatnonzero(~np.isfinite(g).all(axis=1))[0])
+            problem = (f"set_b0_gradient: row {first} is not finite, which "
+                       f"turns every k-space sample into NaN.")
+        collective_raise(problem)
+
+        if getattr(self, '_dual', False) and self._active_partition != 'signal':
+            g = self.redistribute_nodal(np.ascontiguousarray(g), 'bloch', 'signal')
+            with self._using('signal'):
+                return self._set_b0_gradient_local(g)
+        return self._set_b0_gradient_local(g)
+
+    def _set_b0_gradient_local(self, gradient):
+        [a.set_b0_gradient(gradient) for a in self.assembler]
+
     def set_receive_sensitivity(self, C):
         """Per-node complex RECEIVE sensitivity, one column per coil.
 

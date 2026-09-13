@@ -1891,3 +1891,191 @@ def test_a_quadratic_b0_field_reaches_the_readout_exactly(tmp_path, frame):
       f'[{frame}] omitting the quadratic coefficients changes the signal by '
       f'only {bare:.3e} against {gap:.3e} with them')
 
+
+
+@pytest.mark.parametrize('path_name', ['signal_sum', 'signal_nodal', 'signal'])
+def test_a_rough_field_follows_a_moving_spin_through_the_readout(tmp_path,
+                                                                 path_name):
+  """A field no polynomial can carry still has to be sampled where the spin is.
+
+  The readout's Eulerian channel is a per-node gradient: `phi_dB0` carries the
+  bracket `dB0(x0) - g.x0` and `set_b0_gradient` carries `g`, so the kernel
+  forms `phi + g.x(t)` at the DEFORMED position. That is the field at `x(t)` to
+  first order in the displacement, against the frozen value the Lagrangian
+  channel would keep.
+
+  Scored against the exact answer -- the same mesh built at the displaced
+  position with the field written there per node -- because the model is an
+  approximation and the claim is that it is a far better one than freezing.
+  Run on all three signal paths: each has its own copy of the phase line.
+
+  Measured on this fixture, relative to the exact Eulerian signal:
+
+  | displacement | per-node gradient | frozen |
+  |---|---|---|
+  | 0 mm | 0.0 / 4.2e-08 / 0.0 | 0.0 |
+  | 20 mm | 2.8e-03 / 2.7e-03 / 2.5e-03 | 1.75e-01 / 1.79e-01 / 1.79e-01 |
+
+  in `signal_sum` / `signal_nodal` / `signal` order -- a factor of 65, uniform
+  across the three, and exactly zero at rest.
+  """
+  pytest.importorskip('meshio')
+  pytest.importorskip('mpi4py')
+  import meshio  # noqa: F401
+  from feelmri import B0Field
+  from feelmri.Motion import POD
+  from feelmri.MRObjects import Scanner
+  from _phantom_fixtures import make_cube_mesh
+
+  scanner = Scanner()
+  gamma = scanner.gamma.m_as('rad/ms/mT')
+
+  # A cube of 27 nodes over 12 cm, and a 2 cm rigid translation -- the scale
+  # `spamm.py` actually produces.
+  seed_path, _v = make_cube_mesh(tmp_path / f'seed_{path_name}.vtu', 'tetra',
+                                 n=2, scale=0.12)
+  seed = meshio.read(str(seed_path))
+  points = np.asarray(seed.points, dtype=np.float64)
+  cells = seed.cells_dict['tetra']
+  shift = np.array([0.02, -0.012, 0.016])
+
+  # Non-polynomial and curved on the scale of the object, so `on_phantom` has
+  # to fall back to the per-node expansion rather than fitting it.
+  L = 0.30
+  expr = lambda p: 1.0e-3 * (np.sin(p[:, 0] / L) * np.cos(p[:, 1] / (1.3 * L))
+                             + np.sin(p[:, 2] / (0.8 * L)))
+
+  def build(node_positions, name, nodal):
+    path = tmp_path / name
+    meshio.write(str(path), meshio.Mesh(node_positions, [('tetra', cells)]))
+    ph = FEMPhantom(path=str(path))
+    ph.set_assembler(voxel_size=1e3 if nodal else 0.0, lorder=2, horder=4,
+                     nodal_approximation=nodal, lumped=nodal)
+    return ph
+
+  nodal_path = path_name == 'signal_nodal'
+  n = points.shape[0]
+  T2 = np.full(n, 1e9, dtype=np.float32)
+  Mxy = np.ones(n, dtype=np.complex64)
+
+  # k = 0 and a 6 ms readout, so the only thing separating the arms is the
+  # off-resonance phase.
+  pts = (np.zeros((1, 1, 1), dtype=np.float32),) * 3
+  t = np.full((1, 1, 1), 6.0, dtype=np.float32)
+
+  data = np.zeros((n, 3, 4), dtype=np.float32)
+  for axis in range(3):
+    data[:, axis, :] = shift[axis]
+  pod = POD(data=data, times=np.linspace(0.0, 6.0, 4), n_modes=1)
+
+  def signal_of(ph):
+    ph.update_magnetization(Mxy)
+    return np.asarray(getattr(ph, path_name)(list(pts), t, None)).reshape(-1)[0]
+
+  # The exact Eulerian answer: the mesh built where the spins end up, with the
+  # field evaluated there.
+  truth_ph = build(points + shift, f'truth_{path_name}.vtu', nodal_path)
+  truth_ph.set_static_fields(
+      T2=T2, phi_dB0=(gamma * B0Field._sample(expr, points + shift)
+                      ).astype(np.float32))
+  truth = signal_of(truth_ph)
+
+  # Under test: the original mesh, moved by the POD, with the per-node channel.
+  ph = build(points, f'taylor_{path_name}.vtu', nodal_path)
+  field = B0Field.on_phantom(expr, ph, collective=False)
+  assert field.kind == 'nodal', (
+      f'the fixture must need a per-node expansion, got {field.kind}')
+  terms = field.readout_terms(ph, scanner, moving=True)
+  assert terms.node_gradient is not None
+  ph.set_static_fields(T2=T2, phi_dB0=terms.phi_nodal.astype(np.float32))
+  ph.set_b0_gradient(terms.node_gradient)
+  ph.update_magnetization(Mxy)
+  taylor = np.asarray(
+      getattr(ph, path_name)(list(pts), t, pod)).reshape(-1)[0]
+
+  # The mutation: the same run with the gradient channel cleared, which is what
+  # freezing the field onto the node gives.
+  ph.set_b0_gradient(None)
+  ph.set_static_fields(
+      T2=T2, phi_dB0=(gamma * B0Field._sample(expr, points)).astype(np.float32))
+  ph.update_magnetization(Mxy)
+  frozen = np.asarray(
+      getattr(ph, path_name)(list(pts), t, pod)).reshape(-1)[0]
+
+  scale = abs(truth)
+  err_taylor = abs(taylor - truth) / scale
+  err_frozen = abs(frozen - truth) / scale
+  assert err_frozen > 0.1, (
+      f'[{path_name}] freezing the field costs only {err_frozen:.3e}, so this '
+      f'case cannot tell the two descriptions apart')
+  assert err_taylor < 0.1 * err_frozen, (
+      f'[{path_name}] the per-node gradient leaves {err_taylor:.3e} against '
+      f'{err_frozen:.3e} for the frozen field; the channel is not reaching '
+      f'the deformed position')
+
+
+def test_the_readout_refuses_a_per_node_field_on_the_channels_that_cannot_carry_it(
+        tmp_path):
+  """A k-space shift is linear in position and the six `maxwell` coefficients
+  are quadratic, so neither can carry a per-node expansion. Returning the
+  nominal points would be a wrong image with no symptom, which is the failure
+  this whole channel exists to avoid -- so both refuse and name the setter.
+  """
+  pytest.importorskip('meshio')
+  pytest.importorskip('mpi4py')
+  from pint import Quantity as Q_
+  from feelmri import B0Field, CartesianStack
+  from feelmri.MRObjects import Scanner
+  from feelmri.PulseqAdapter import b0_kspace_shift
+  from _phantom_fixtures import make_cube_mesh
+
+  path, _v = make_cube_mesh(tmp_path / 'refuse.vtu', 'tetra', n=2, scale=0.12)
+  phantom = FEMPhantom(path=str(path))
+  phantom.set_assembler(voxel_size=1e3, lorder=2,
+                        nodal_approximation=True, lumped=True)
+  expr = lambda p: 1.0e-3 * np.sin(p[:, 0] / 0.08) * np.cos(p[:, 1] / 0.09)
+  field = B0Field.on_phantom(expr, phantom, collective=False)
+  assert field.kind == 'nodal'
+
+  scanner = Scanner()
+  traj = CartesianStack(FOV=Q_(np.array([0.2, 0.2, 0.01]), 'm'),
+                        res=np.array([4, 2, 1]), oversampling=1,
+                        lines_per_shot=1, scanner=scanner,
+                        t_start=Q_(1.0, 'ms'))
+  with pytest.raises(TypeError, match='set_b0_gradient'):
+    traj.b0_terms(field, scanner)
+  with pytest.raises(TypeError, match='readout_terms'):
+    traj.b0_shifted_points(field, scanner)
+  with pytest.raises(TypeError, match='readout_terms'):
+    b0_kspace_shift(field, np.array([0.0, 1.0]), scanner)
+
+
+def test_a_bad_b0_gradient_is_refused_rather_than_read_out_of_bounds(tmp_path):
+  """The assembler indexes the gradient by element connectivity under
+  `-DNDEBUG`, so a short array is an out-of-bounds read that returns adjacent
+  heap, and a non-finite entry turns every k-space sample into NaN. Both are
+  checked in Python, before any redistribution, and again in the assembler.
+  """
+  pytest.importorskip('meshio')
+  pytest.importorskip('mpi4py')
+  from _phantom_fixtures import make_cube_mesh
+
+  path, _v = make_cube_mesh(tmp_path / 'grad_guard.vtu', 'tetra', n=2,
+                            scale=0.1)
+  phantom = FEMPhantom(path=str(path))
+  phantom.set_assembler(voxel_size=1e3, lorder=2,
+                        nodal_approximation=True, lumped=True)
+  n = phantom.local_nodes.shape[0]
+
+  with pytest.raises(ValueError, match='local nodes'):
+    phantom.set_b0_gradient(np.zeros((n - 1, 3)))
+  with pytest.raises(ValueError, match=r'\(n, 3\)'):
+    phantom.set_b0_gradient(np.zeros((n, 2)))
+  bad = np.zeros((n, 3))
+  bad[2, 1] = np.nan
+  with pytest.raises(ValueError, match='not finite'):
+    phantom.set_b0_gradient(bad)
+
+  # Clearing is legal and is what the readout does on its way out.
+  phantom.set_b0_gradient(np.zeros((n, 3)))
+  phantom.set_b0_gradient(None)

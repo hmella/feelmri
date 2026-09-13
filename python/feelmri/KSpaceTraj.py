@@ -301,6 +301,14 @@ class Trajectory:
         if not isinstance(field, _B0Field):
             raise TypeError(
                 f"b0_terms: expected a B0Field, got {type(field).__name__}.")
+        if field.kind == 'nodal':
+            raise TypeError(
+                "b0_terms: this field needs a per-node expansion, and none of "
+                "the three channels here can carry one -- a k-space shift is "
+                "linear in position and the six maxwell coefficients are "
+                "quadratic. It rides the phantom instead: add "
+                "`field.readout_terms(...).phi_nodal` to `phi_dB0` and pass "
+                "`.node_gradient` to `FEMPhantom.set_b0_gradient`.")
         t0 = (float(self.t_start.m_as('ms')) if t_snapshot is None
               else float(t_snapshot))
         t = np.asarray(self.times.m_as('ms'), dtype=float) - t0

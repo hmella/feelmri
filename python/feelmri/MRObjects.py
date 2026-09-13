@@ -391,12 +391,18 @@ class B0Field:
         nodal = self.nodal_mT(phantom)
         if not moving:
             return ReadoutTerms(0.0, gamma * nodal, None, None, None)
-        # The assembler's nodes are always the imaging ones, so `physical` has
-        # no meaning here and the gradient always takes R^T.
+        # Unlike the solver's, this expansion is written against the
+        # DISPLACEMENT rather than the absolute position:
+        #   dB0(x0 + u) ~= dB0(x0) + g . u
+        # so `phi_nodal` is the field itself and the gradient rides its own
+        # channel. The solver's kernel has no choice -- its gradient scalars
+        # multiply the absolute `curr` -- but the assembler interpolates both
+        # arrays through the element shape functions, and interpolating
+        # `g . x0` separately from `g` leaves an artifact that does not vanish
+        # at rest. The assembler's nodes are always the imaging ones, so
+        # `physical` has no meaning here and the gradient always takes R^T.
         g = self.node_gradient(phantom, rotation=rotation, physical=False)
-        x = np.asarray(phantom.local_nodes, dtype=np.float64)
-        bracket = nodal - np.einsum('ij,ij->i', x, g)
-        return ReadoutTerms(0.0, gamma * bracket, None, None, gamma * g)
+        return ReadoutTerms(0.0, gamma * nodal, None, None, gamma * g)
 
     def phi_offset(self, scanner, location=None):
         """The uniform part as an off-resonance rate in rad/ms, to add to

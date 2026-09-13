@@ -963,3 +963,125 @@ def test_a_lab_frame_b0_field_shifts_the_readout_but_not_the_trajectory(
   assert gap > 1e-2 * scale, (
       f'the field moves the readout by only {gap / scale:.3e} of peak, so this '
       f'sequence cannot show whether the shift was applied')
+
+
+def test_a_per_node_b0_field_reaches_the_readout_and_leaves_the_phantom_clean(
+        adapter, tmp_path):
+  """A field no polynomial can carry rides the PHANTOM, not the trajectory.
+
+  `simulate_pulseq` adds the per-node field to whatever `phi_dB0` the caller
+  set and hands the gradient to `FEMPhantom.set_b0_gradient`, so the assembler
+  evaluates it at the deformed position. Both are temporary: a stale per-node
+  gradient left behind is a wrong image with no symptom, and the caller's own
+  off-resonance map has to come back untouched.
+
+  The static arm is EXACT -- with nothing moving, the nodal value IS the
+  Eulerian answer -- so it is checked against the same field handed to the
+  solver as `delta_B` and to the readout as `phi_dB0`, which is the Lagrangian
+  spelling that agrees with it only because the phantom is still.
+
+  The moving arm replays the SAME magnetization through the readout with the
+  gradient channel dropped, so the solver is identical by construction and the
+  difference is the readout channel alone.
+  """
+  pytest.importorskip('mpi4py')
+  pytest.importorskip('pymetis')
+  try:
+    from feelmri.Phantom import FEMPhantom
+  except ImportError as exc:
+    pytest.skip(f'feelmri C++ extensions not available: {exc}')
+  from feelmri import B0Field
+  from feelmri.Motion import POD
+  from feelmri.MRObjects import Scanner
+  from _phantom_fixtures import make_cube_mesh
+
+  seq_path = DATA_DIR / 'gre_v15.seq'
+  skip_if_pypulseq_too_old(seq_path)
+
+  scanner = Scanner()
+  gamma = scanner.gamma.m_as('rad/ms/mT')
+  path, _vol = make_cube_mesh(tmp_path / 'nodal_b0.vtu', 'tetra', n=2,
+                              scale=6e-2)
+
+  def fresh():
+    ph = FEMPhantom(path=str(path))
+    ph.set_assembler(voxel_size=0.0, lorder=2, horder=2,
+                     nodal_approximation=False, lumped=False)
+    return ph
+
+  # Curved on the scale of the object, so `on_phantom` cannot fit it.
+  expr = lambda p: 1.0e-3 * np.sin(p[:, 0] / 0.04) * np.cos(p[:, 1] / 0.05)
+
+  phantom = fresh()
+  n = phantom.local_nodes.shape[0]
+  T2 = np.full(n, 1e9, dtype=np.float32)
+  tissue = np.full(n, 0.013, dtype=np.float32)     # the caller's own map
+  phantom.set_static_fields(T2=T2, phi_dB0=tissue)
+  field = B0Field.on_phantom(expr, phantom, collective=False)
+  assert field.kind == 'nodal'
+  nodal_mT = B0Field._sample(expr, B0Field._scanner_nodes(phantom))
+
+  kw = dict(scanner=scanner, M0=1.0, T1=Quantity(1e9, 'ms'),
+            T2=Quantity(1e9, 'ms'), dtype='float64')
+  sim = adapter.simulate_pulseq(seq_path, phantom, b0_field=field, **kw)
+
+  # The caller's own off-resonance map comes back untouched.
+  assert np.allclose(phantom._static_fields[1], tissue), (
+      "the per-node field was left on the caller's phi_dB0")
+
+  # And so does the gradient channel: re-running the readout by hand must give
+  # the same answer as re-running it after an explicit clear.
+  rw = sim.imp.readouts[0]
+  pts, t = _readout_inputs(adapter, rw)
+  phantom.update_magnetization(sim.Mxy[:, rw.m_storage_idx])
+  after = np.asarray(phantom.mri_signal(pts, t, None)).reshape(-1)
+  phantom.set_b0_gradient(None)
+  assert np.array_equal(
+      after, np.asarray(phantom.mri_signal(pts, t, None)).reshape(-1)), (
+      'the per-node gradient was left on the assembler')
+
+  # The static arm, against the Lagrangian spelling of the same field.
+  ref = fresh()
+  ref.set_static_fields(T2=T2,
+                        phi_dB0=(tissue + gamma * nodal_mT).astype(np.float32))
+  ref_sim = adapter.simulate_pulseq(
+      seq_path, ref, delta_B=nodal_mT.reshape(-1, 1), **kw)
+  got = np.asarray(sim.kspace[0]).reshape(-1)
+  want = np.asarray(ref_sim.kspace[0]).reshape(-1)
+  scale = np.abs(want).max()
+  assert np.abs(got - want).max() <= 1e-5 * scale, (
+      'a static phantom must sample the field exactly at its nodes')
+
+  # Moving: the same field, now sampled where the spins go.
+  data = np.zeros((n, 3, 4), dtype=np.float32)
+  data[:, 0, :] = 0.012
+  data[:, 1, :] = -0.009
+  pod = POD(data=data, times=np.linspace(0.0, 60.0, 4), n_modes=1,
+            is_periodic=True)
+
+  moved = fresh()
+  moved.set_static_fields(T2=T2, phi_dB0=tissue)
+  moving = adapter.simulate_pulseq(seq_path, moved, b0_field=field, pod=pod,
+                                   **kw)
+  mrw = moving.imp.readouts[0]
+  mpts, mt = _readout_inputs(adapter, mrw)
+  # The frozen description: the same magnetization, the same trajectory, the
+  # field written per node and the gradient channel absent.
+  moved.set_static_fields(T2=T2,
+                          phi_dB0=(tissue + gamma * nodal_mT).astype(np.float32))
+  moved.set_b0_gradient(None)
+  moved.update_magnetization(moving.Mxy[:, mrw.m_storage_idx])
+  frozen = mrw.demodulate(
+      np.asarray(moved.mri_signal(mpts, mt, pod))).reshape(-1)
+  eulerian = np.asarray(moving.kspace[0]).reshape(-1)
+  gap = np.abs(eulerian - frozen).max() / np.abs(frozen).max()
+  assert gap > 1e-2, (
+      f'following the spins changes the readout by only {gap:.3e}, so the '
+      f'per-node gradient is not reaching the assembler')
+
+
+def _readout_inputs(adapter, rw):
+  points, t = adapter._reshape_signal_inputs(
+      rw.kspace[:, 0], rw.kspace[:, 1], rw.kspace[:, 2],
+      rw.times - rw.t_anchor, None)
+  return list(points), t

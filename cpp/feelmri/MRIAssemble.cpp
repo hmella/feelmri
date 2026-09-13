@@ -172,6 +172,56 @@ public:
         }
     }
 
+    /// Per-node gradient of a scanner-fixed B0 field, in rad/ms/m.
+    ///
+    /// The Eulerian counterpart of `phi_dB0`: that one is frozen onto the node
+    /// and travels with the tissue, this one says how the field changes as the
+    /// node MOVES, so the phase becomes `-(phi + g . u) * t` with `u` the
+    /// displacement. Empty clears it -- leaving a stale gradient behind would
+    /// be a wrong image with no symptom.
+    void set_b0_gradient(const Eigen::Array<T, Eigen::Dynamic, 3>& g)
+    {
+        if (g.rows() == 0) {
+            has_b0_grad_ = false;
+            f_nodes_g0_.resize(0); f_nodes_g1_.resize(0); f_nodes_g2_.resize(0);
+            f_gq0_.resize(0); f_gq1_.resize(0); f_gq2_.resize(0);
+            return;
+        }
+        if (g.rows() != nb_nodes_)
+            throw std::invalid_argument(
+                "set_b0_gradient: got " + std::to_string(g.rows()) +
+                " rows for " + std::to_string(nb_nodes_) + " nodes.");
+        for (Eigen::Index i = 0; i < g.rows(); ++i)
+            for (int c = 0; c < 3; ++c)
+                if (!feelmri_is_finite(g(i, c)))
+                    throw std::invalid_argument(
+                        "set_b0_gradient: entry " + std::to_string(i) +
+                        " is not finite, which turns every k-space sample "
+                        "into NaN.");
+
+        f_nodes_g0_ = g.col(0);
+        f_nodes_g1_ = g.col(1);
+        f_nodes_g2_ = g.col(2);
+
+        // To quadrature points through the same shape functions `phi_dB0`
+        // takes, so the two describe the same field at the same places.
+        const int nne = elems_.cols();
+        f_gq0_.resize(total_q_); f_gq1_.resize(total_q_); f_gq2_.resize(total_q_);
+        for (int e = 0; e < nelem_; ++e)
+        {
+            const int offset = e * nq_;
+            Eigen::Vector<T, Eigen::Dynamic> g0_e(nne), g1_e(nne), g2_e(nne);
+            for (int a = 0; a < nne; ++a) {
+                const int idx = elems_(e, a);
+                g0_e(a) = g(idx, 0); g1_e(a) = g(idx, 1); g2_e(a) = g(idx, 2);
+            }
+            f_gq0_.segment(offset, nq_) = cache_.SqT[e] * g0_e;
+            f_gq1_.segment(offset, nq_) = cache_.SqT[e] * g1_e;
+            f_gq2_.segment(offset, nq_) = cache_.SqT[e] * g2_e;
+        }
+        has_b0_grad_ = true;
+    }
+
     // Quadrature-space POD modes: Phi_q = S_global_ * Phi, cached.
     //
     // The quadrature signal path needs the displacement AT quadrature points,
@@ -436,6 +486,13 @@ public:
             auto x2b    = f_nodes_x2_.segment(q_start, q_count);
             auto invT2b = f_nodes_invT2_.segment(q_start, q_count);
             auto phib   = f_nodes_phi_.segment(q_start, q_count);
+            // Empty when no B0 gradient was set, so the segment is taken at
+            // (0, 0) there -- the views are never read on that path.
+            const int gq = has_b0_grad_ ? q_start : 0;
+            const int gc = has_b0_grad_ ? q_count : 0;
+            auto g0b    = f_nodes_g0_.segment(gq, gc);
+            auto g1b    = f_nodes_g1_.segment(gq, gc);
+            auto g2b    = f_nodes_g2_.segment(gq, gc);
             auto ownb   = f_node_owned_.segment(q_start, q_count);
 
             T t_old = T(-1); // per block: the k-point walk restarts here
@@ -475,7 +532,30 @@ public:
                     // exp(-i*phi*t), which continues the solver's own
                     // exp(-i*gamma*delta_B*t); only this term is negated,
                     // the -k.x below keeps its sign.
-                    f_po.head(q_count)  = -phib * tij;
+                    // A scanner-fixed field is sampled where the spin has MOVED
+                    // to, so the DISPLACEMENT carries it: phib is the field at
+                    // the reference position and g its gradient there, giving
+                    // dB0(x0 + u) to first order in u.
+                    //
+                    // The DISPLACEMENT is what makes this work on the
+                    // quadrature path. Written against the absolute position
+                    // instead -- phib carrying dB0(x0) - g.x0 and the kernel
+                    // adding g.x(t) -- the shape functions interpolate a
+                    // PRODUCT of two nodal fields, leaving
+                    // (sum N_a g_a).x_q - sum N_a (g_a . x_a), which has
+                    // nothing to do with the motion. Measured on a 6 cm
+                    // element at a 20 mm displacement: 6.7e-02 of the signal
+                    // that way against 2.5e-03 this way, where freezing the
+                    // field costs 1.79e-01. A phantom that does not move takes
+                    // today's line unchanged.
+                    if (has_b0_grad_ && has_traj) {
+                        f_po.head(q_count) = -(phib
+                            + g0b * (dx0.head(q_count) - x0b)
+                            + g1b * (dx1.head(q_count) - x1b)
+                            + g2b * (dx2.head(q_count) - x2b)) * tij;
+                    } else {
+                        f_po.head(q_count)  = -phib * tij;
+                    }
                     t_old = tij;
                 }
 
@@ -644,6 +724,13 @@ public:
             auto x2b    = f_nodes_x2_.segment(q_start, q_count);
             auto invT2b = f_nodes_invT2_.segment(q_start, q_count);
             auto phib   = f_nodes_phi_.segment(q_start, q_count);
+            // Empty when no B0 gradient was set, so the segment is taken at
+            // (0, 0) there -- the views are never read on that path.
+            const int gq = has_b0_grad_ ? q_start : 0;
+            const int gc = has_b0_grad_ ? q_count : 0;
+            auto g0b    = f_nodes_g0_.segment(gq, gc);
+            auto g1b    = f_nodes_g1_.segment(gq, gc);
+            auto g2b    = f_nodes_g2_.segment(gq, gc);
 
             T t_old = T(-1);
 
@@ -680,7 +767,30 @@ public:
                     // exp(-i*phi*t), which continues the solver's own
                     // exp(-i*gamma*delta_B*t); only this term is negated,
                     // the -k.x below keeps its sign.
-                    f_po.head(q_count)  = -phib * tij;
+                    // A scanner-fixed field is sampled where the spin has MOVED
+                    // to, so the DISPLACEMENT carries it: phib is the field at
+                    // the reference position and g its gradient there, giving
+                    // dB0(x0 + u) to first order in u.
+                    //
+                    // The DISPLACEMENT is what makes this work on the
+                    // quadrature path. Written against the absolute position
+                    // instead -- phib carrying dB0(x0) - g.x0 and the kernel
+                    // adding g.x(t) -- the shape functions interpolate a
+                    // PRODUCT of two nodal fields, leaving
+                    // (sum N_a g_a).x_q - sum N_a (g_a . x_a), which has
+                    // nothing to do with the motion. Measured on a 6 cm
+                    // element at a 20 mm displacement: 6.7e-02 of the signal
+                    // that way against 2.5e-03 this way, where freezing the
+                    // field costs 1.79e-01. A phantom that does not move takes
+                    // today's line unchanged.
+                    if (has_b0_grad_ && has_traj) {
+                        f_po.head(q_count) = -(phib
+                            + g0b * (dx0.head(q_count) - x0b)
+                            + g1b * (dx1.head(q_count) - x1b)
+                            + g2b * (dx2.head(q_count) - x2b)) * tij;
+                    } else {
+                        f_po.head(q_count)  = -phib * tij;
+                    }
                     t_old = tij;
                 }
 
@@ -863,6 +973,11 @@ public:
             auto wqb    = f_wq_.segment(q_start, q_count);
             auto invT2b = f_invT2_.segment(q_start, q_count);
             auto phib   = f_phi_.segment(q_start, q_count);
+            const int gq = has_b0_grad_ ? q_start : 0;
+            const int gc = has_b0_grad_ ? q_count : 0;
+            auto g0b    = f_gq0_.segment(gq, gc);
+            auto g1b    = f_gq1_.segment(gq, gc);
+            auto g2b    = f_gq2_.segment(gq, gc);
 
             T t_old = T(-1);
 
@@ -900,7 +1015,30 @@ public:
                     // exp(-i*phi*t), which continues the solver's own
                     // exp(-i*gamma*delta_B*t); only this term is negated,
                     // the -k.x below keeps its sign.
-                    f_po.head(q_count)  = -phib * tij;
+                    // A scanner-fixed field is sampled where the spin has MOVED
+                    // to, so the DISPLACEMENT carries it: phib is the field at
+                    // the reference position and g its gradient there, giving
+                    // dB0(x0 + u) to first order in u.
+                    //
+                    // The DISPLACEMENT is what makes this work on the
+                    // quadrature path. Written against the absolute position
+                    // instead -- phib carrying dB0(x0) - g.x0 and the kernel
+                    // adding g.x(t) -- the shape functions interpolate a
+                    // PRODUCT of two nodal fields, leaving
+                    // (sum N_a g_a).x_q - sum N_a (g_a . x_a), which has
+                    // nothing to do with the motion. Measured on a 6 cm
+                    // element at a 20 mm displacement: 6.7e-02 of the signal
+                    // that way against 2.5e-03 this way, where freezing the
+                    // field costs 1.79e-01. A phantom that does not move takes
+                    // today's line unchanged.
+                    if (has_b0_grad_ && has_traj) {
+                        f_po.head(q_count) = -(phib
+                            + g0b * (dx0.head(q_count) - x0b)
+                            + g1b * (dx1.head(q_count) - x1b)
+                            + g2b * (dx2.head(q_count) - x2b)) * tij;
+                    } else {
+                        f_po.head(q_count)  = -phib * tij;
+                    }
                     t_old = tij;
                 }
 
@@ -966,12 +1104,16 @@ private:
     // Quadrature Point parameters (Static / Weights / B0 / T2 / Dynamic)
     Eigen::Array<T, Eigen::Dynamic, 1> f_xq0_, f_xq1_, f_xq2_, f_wq_;
     Eigen::Array<T, Eigen::Dynamic, 1> f_invT2_, f_phi_;
+    Eigen::Array<T, Eigen::Dynamic, 1> f_gq0_, f_gq1_, f_gq2_;
     Eigen::Array<T, Eigen::Dynamic, 1> f_dyn_xq0_, f_dyn_xq1_, f_dyn_xq2_;    
 
     // Nodal Point parameters
     Eigen::Array<T, Eigen::Dynamic, 1> f_nodes_x0_, f_nodes_x1_, f_nodes_x2_;
     Eigen::Array<T, Eigen::Dynamic, 1> f_dyn_nodes_x0_, f_dyn_nodes_x1_, f_dyn_nodes_x2_;
     Eigen::Array<T, Eigen::Dynamic, 1> f_nodes_invT2_, f_nodes_phi_;
+    /// Per-node and per-quadrature-point B0 field gradient, rad/ms/m.
+    Eigen::Array<T, Eigen::Dynamic, 1> f_nodes_g0_, f_nodes_g1_, f_nodes_g2_;
+    bool has_b0_grad_ = false;
     
     // Magnetization vectors matrices
     Eigen::Matrix<C, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> f_M_Mxy_nodes_;
@@ -1029,7 +1171,13 @@ PYBIND11_MODULE(MRIAssemble, m)
         .def("set_static_fields", &Assembler::set_static_fields,
              py::arg("T2"), 
              py::arg("phi_dB0"))
-        
+
+        .def("set_b0_gradient", &Assembler::set_b0_gradient,
+             py::arg("gradient"),
+             "Per-node gradient of a scanner-fixed B0 field, rad/ms/m, one row "
+             "per node. The phase then follows the spin where it moves to; an "
+             "empty array clears it.")
+
         // Expose Magnetization setups
         .def("update_magnetization", &Assembler::update_magnetization,
              py::arg("Mxy"))
