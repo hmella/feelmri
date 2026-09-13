@@ -45,7 +45,7 @@ resolution = 48 if FAST_MODE else 96
 # Gaussian falling away from its own centre, times a constant phase that
 # differs from coil to coil. Nothing here is fitted or estimated -- it is
 # written down, which is what lets the matched filter be exact.
-coil_radius = 0.16
+coil_radius = 0.10
 # The reconstruction is band-limited while the map divided out is not, so
 # recon(S*M) is not S*recon(M) and the matched filter cannot be exactly right
 # for a map varying on the scale of the point-spread function. The effect is
@@ -53,7 +53,7 @@ coil_radius = 0.16
 # 0.09 m, while the single-coil shading it removes goes from 8.1x to 155x.
 # Real arrays are smooth on the voxel scale, which is what makes the filter --
 # and every scheme that ESTIMATES a map -- work at all.
-coil_width = 0.13
+coil_width = 0.08
 
 
 def coil_sensitivity(points):
@@ -92,7 +92,7 @@ if __name__ == '__main__':
   # error in 18 / 27 / 43 s, so 6 costs 63% more for nothing.
   phantom = FEMPhantom(path=script_path/'phantoms/water_fat_P1_prism.xdmf',
                        scale_factor=0.01)
-  phantom.set_assembler(voxel_size=2e-3, lorder=2, horder=4,
+  phantom.set_assembler(voxel_size=2e-3, lorder=2, horder=6,
                         nodal_approximation=False, lumped=False)
   nodes = phantom.local_nodes
   n_local = nodes.shape[0]
@@ -108,9 +108,27 @@ if __name__ == '__main__':
   # 0.6*pi across the half-width, so the ramp spans 1.2*pi end to end and
   # never wraps -- a ramp that wraps is still recovered correctly but the
   # comparison below would have to unwrap it to say so.
+  M0 = 1.0e+10
   reach, phase_gain = 0.10, 0.6*np.pi
   true_phase = (phase_gain * nodes[:, 0] / reach).astype(np.float32)
-  initial_Mxy = np.exp(1j * true_phase).astype(np.complex64)
+
+  # SCALED BY M0 HERE, and that is the only thing that sets the image level.
+  # `BlochSolver(M0=...)` is the equilibrium LONGITUDINAL magnetization and
+  # reaches the Bloch update only through the T1 recovery term
+  # `Mz <- Mz*E1 + (1-E1)*M0` -- there is no M0 in the transverse update at
+  # all. This block is `empty=True`, so there is no RF to tip Mz into the
+  # transverse plane, `initial_Mz` is 0, and the readout takes Mxy. Measured:
+  # raising M0 from 1 to 1e10 moves Mz from 5e-10 to 5 and leaves |Mxy| at
+  # exactly 1. So M0 is still declared below because it is the honest
+  # equilibrium value, but it cannot reach this image except through here.
+  initial_Mxy = (M0 * np.exp(1j * true_phase)).astype(np.complex64)
+
+  # What the image level then is, end to end:
+  #     S(0)       = |Mxy| x mesh volume            = M0 x 1.569e-3
+  #     image peak = 1.29 x S(0) / n_samples
+  # the 1/n_samples being the adjoint NUFFT's normalisation and the 1.29 the
+  # point-spread overshoot at the disc edge. Both are fixed by the geometry and
+  # the matrix size, so `M0` is the only knob.
 
   # 3. Hand the map to the phantom. It arrives in the layout the caller is
   # under and is redistributed into the signal layout once; the fold into the
@@ -124,7 +142,7 @@ if __name__ == '__main__':
   seq.add_block(SequenceBlock(dur=Q_(0.5, 'ms'), dt=Q_(0.5, 'ms'),
                               empty=True, store_magnetization=True))
   solver = BlochSolver(seq, phantom, scanner=scanner,
-                       T1=Q_(1e9, 'ms'), T2=Q_(1e9, 'ms'),
+                       T1=Q_(1e9, 'ms'), T2=Q_(1e9, 'ms'), M0=M0,
                        initial_Mxy=initial_Mxy.reshape((-1, 1)),
                        initial_Mz=0.0, perfect_spoiling=False,
                        dtype='float64')
