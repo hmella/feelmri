@@ -2170,3 +2170,127 @@ def test_a_quadratic_field_follows_a_moving_phantom_through_the_readout(tmp_path
   assert lagrangian > 100.0 * eulerian, (
       f'freezing the field costs only {lagrangian:.3e}, so this geometry '
       f'cannot tell the two descriptions apart')
+
+
+@pytest.mark.parametrize('path_name', ['signal_sum', 'signal_nodal', 'signal'])
+def test_the_signal_paths_refuse_an_assembler_with_no_static_fields(
+        tmp_path, path_name):
+  """Calling `signal_*` straight after `set_assembler` SEGFAULTED.
+
+  Every loop reads `f_nodes_phi_.segment(q_start, q_count)` with `q_start`
+  bounded by the node count, so an assembler whose static fields were never set
+  indexes a zero-length array out of bounds -- and under `-DEIGEN_NO_DEBUG`
+  that is not an assertion, it is a segmentation fault. Reproduced on all
+  three paths, with and without a B0 gradient installed, so it is the assembler
+  and not the B0 channel.
+
+  The twin of `require_magnetization`, which audit 5 added for the same shape
+  of hole.
+  """
+  pytest.importorskip('meshio')
+  pytest.importorskip('mpi4py')
+  from _phantom_fixtures import make_cube_mesh
+
+  nodal = path_name == 'signal_nodal'
+  path, _v = make_cube_mesh(tmp_path / f'nofields_{path_name}.vtu', 'tetra',
+                            n=2, scale=0.1)
+  phantom = FEMPhantom(path=str(path))
+  phantom.set_assembler(voxel_size=1e3 if nodal else 0.0, lorder=2, horder=4,
+                        nodal_approximation=nodal, lumped=nodal)
+  n = phantom.local_nodes.shape[0]
+  phantom.update_magnetization(np.ones(n, dtype=np.complex64))
+
+  pts = (np.zeros((1, 1, 1), dtype=np.float32),) * 3
+  t = np.full((1, 1, 1), 5.0, dtype=np.float32)
+  with pytest.raises(RuntimeError, match='set_static_fields'):
+    getattr(phantom, path_name)(list(pts), t, None)
+
+
+def test_a_per_node_field_and_the_maxwell_channel_compose_in_one_readout(
+        tmp_path):
+  """The kernel cell no test executed.
+
+  The phase line has a separate branch for `has_maxwell`, and the per-node B0
+  gradient folds into `f_po` inside it exactly as it does in the plain branch
+  -- but every test of the gradient ran with `maxwell=None` and every test of
+  `maxwell` ran with no gradient, so the two together were never compiled
+  through. A concomitant readout on a phantom carrying a shim residual is the
+  ordinary case that reaches it.
+
+  On a LUMPED nodal path the phase is applied at the node, so the whole signal
+  has a closed form in the assembler's own node weights -- no mass matrix and
+  no quadrature reference needed, and the prediction is exact rather than a
+  tolerance.
+  """
+  pytest.importorskip('meshio')
+  pytest.importorskip('mpi4py')
+  import meshio
+  from feelmri import B0Field
+  from feelmri.Motion import POD
+  from feelmri.MRObjects import Scanner
+  from _phantom_fixtures import make_cube_mesh
+
+  scanner = Scanner()
+  gamma = scanner.gamma.m_as('rad/ms/mT')
+  seed, _v = make_cube_mesh(tmp_path / 'both.vtu', 'tetra', n=2, scale=0.12)
+  mesh = meshio.read(str(seed))
+  P = np.asarray(mesh.points, dtype=np.float64)
+  n = P.shape[0]
+  shift = np.array([0.018, -0.011, 0.015])
+
+  phantom = FEMPhantom(path=str(seed))
+  phantom.set_assembler(voxel_size=1e3, lorder=2,
+                        nodal_approximation=True, lumped=True)
+  rough = lambda q: 1.0e-3 * np.sin(q[:, 0] / 0.22) * np.cos(q[:, 1] / 0.26)
+  field = B0Field.on_phantom(rough, phantom, collective=False)
+  assert field.kind == 'nodal'
+  terms = field.readout_terms(phantom, scanner, moving=True)
+
+  T2 = np.full(n, 1e9, dtype=np.float32)
+  phantom.set_static_fields(T2=T2, phi_dB0=terms.phi_nodal.astype(np.float32))
+  phantom.set_b0_gradient(terms.node_gradient)
+
+  data = np.zeros((n, 3, 4), dtype=np.float32)
+  for axis in range(3):
+    data[:, axis, :] = shift[axis]
+  pod = POD(data=data, times=np.linspace(0.0, 8.0, 4), n_modes=1)
+
+  coef = _six_coefficients()                       # all six live, none zero
+  t_ms = 6.0
+  pts = (np.zeros((1, 1, 1), dtype=np.float32),) * 3
+  t = np.full((1, 1, 1), t_ms, dtype=np.float32)
+
+  # The assembler's own node weights, recovered one unit vector at a time, so
+  # the prediction below needs nothing but them.
+  weights = []
+  for i in range(n):
+    e = np.zeros(n, dtype=np.complex64)
+    e[i] = 1.0
+    phantom.update_magnetization(e)
+    weights.append(complex(np.asarray(phantom.signal_nodal(
+        list(pts), np.zeros((1, 1, 1), dtype=np.float32), None)).reshape(-1)[0]))
+  weights = np.array(weights)
+
+  phantom.update_magnetization(np.ones(n, dtype=np.complex64))
+  got = complex(np.asarray(phantom.signal_nodal(list(pts), t, pod,
+                                                maxwell=coef)).reshape(-1)[0])
+
+  moved = np.asarray(phantom.local_nodes, dtype=np.float64) + shift
+  phase = (-(terms.phi_nodal
+             + np.einsum('ij,j->i', terms.node_gradient, shift)) * t_ms
+           + _monomial_phase(coef[0], moved))
+  want = complex(np.sum(weights * np.exp(1j * phase)))
+
+  scale = abs(want)
+  assert abs(got - want) < 5e-6 * scale, (
+      f'the two channels together read {got:.6e} against a closed form of '
+      f'{want:.6e}')
+
+  # Neither channel may be silently dropped when the other is present.
+  no_grad = complex(np.sum(weights * np.exp(
+      1j * (-terms.phi_nodal * t_ms + _monomial_phase(coef[0], moved)))))
+  no_max = complex(np.sum(weights * np.exp(1j * (
+      -(terms.phi_nodal
+        + np.einsum('ij,j->i', terms.node_gradient, shift)) * t_ms))))
+  assert abs(no_grad - want) > 1e-2 * scale
+  assert abs(no_max - want) > 1e-2 * scale

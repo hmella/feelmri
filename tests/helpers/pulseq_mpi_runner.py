@@ -44,6 +44,11 @@ def main() -> int:
                        'of NODE POSITION, and pass them as coil_sensitivities. '
                        'Position-tied on purpose: a redistribution that moved '
                        'the wrong rows is invisible against a constant map.')
+  ap.add_argument('--b0-nodal', action='store_true',
+                  help='carry a scanner-fixed field that no polynomial can '
+                       'represent, so it rides the per-node channel: the '
+                       'values on phi_dB0 and the gradient on '
+                       'set_b0_gradient, both redistributed under --dual')
   ap.add_argument('--dual', action='store_true',
                   help='build two partitions instead of one, so every static '
                        'field and magnetization handoff is redistributed')
@@ -93,6 +98,18 @@ def main() -> int:
       phi_dB0=(2.0 * nodes[:, 0] / reach).astype(np.float32))
 
   extra = {}
+  if args.b0_nodal:
+    from feelmri import B0Field
+    # Curved on the scale of the object, so `on_phantom` falls back to the
+    # per-node rung. Sampled in SCANNER coordinates, so it follows the node
+    # through the redistribution rather than its index in a rank-local array.
+    rough = (lambda q: 1.0e-3 * np.sin(q[:, 0] / (0.45 * reach))
+             * np.cos(q[:, 1] / (0.55 * reach)))
+    field = B0Field.on_phantom(rough, phantom)
+    if field.kind != 'nodal':
+      raise SystemExit(f'the fixture must need the per-node rung, '
+                       f'got {field.kind}')
+    extra['b0_field'] = field
   if args.t2_prime > 0.0:
     extra = dict(t2_prime=Quantity(args.t2_prime, 'ms'),
                  spectral_bins=args.spectral_bins)

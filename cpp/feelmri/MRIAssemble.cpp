@@ -306,6 +306,24 @@ public:
 
     // Every signal path sizes its output from nv_, which only a magnetization
     // update sets.
+    /// T2 and the off-resonance rate must exist before any signal is formed.
+    ///
+    /// Every loop reads `f_nodes_phi_.segment(q_start, q_count)` and
+    /// `f_invT2_.segment(...)` with `q_start` bounded by the NODE count, so an
+    /// assembler whose static fields were never set indexes a zero-length
+    /// array out of bounds -- and under `-DEIGEN_NO_DEBUG` that is not an
+    /// assertion, it is a segmentation fault. Reproduced on every one of the
+    /// three paths by calling `signal_*` straight after `set_assembler`.
+    void require_static_fields(const char* who) const
+    {
+        if (f_nodes_invT2_.size() != nb_nodes_
+                || f_nodes_phi_.size() != nb_nodes_)
+            throw std::runtime_error(
+                std::string(who) + ": no static fields have been set on this "
+                "assembler, so T2 and the off-resonance rate would be read out "
+                "of bounds. Call set_static_fields first.");
+    }
+
     void require_magnetization(const char* who) const
     {
         if (nv_ <= 0 || f_Mxy_nodes_.rows() != nb_nodes_)
@@ -387,6 +405,7 @@ public:
         bool has_traj,
         const std::vector<Tensor3> &maxwell)
     {
+        require_static_fields("signal_sum");
         require_magnetization("signal_sum");
 
         const C i1(T(0), T(1));
@@ -627,6 +646,7 @@ public:
     {
         // This function is structurally identical to signal_sum, except it integrates 
         // using the pre-computed mass-matrix projection (f_M_Mxy_nodes_) instead of raw Mxy.
+        require_static_fields("signal_nodal");
         require_magnetization("signal_nodal");
         // f_M_Mxy_nodes_ is written by update_nodal_magnetization only, and
         // the reads below are unchecked under -DNDEBUG.
@@ -881,6 +901,7 @@ public:
     {
         // Only path that reads f_Mxy_, so the nodal -> quadrature projection is
         // performed here rather than on every magnetization update.
+        require_static_fields("signal");
         require_magnetization("signal");
         ensure_full_magnetization();
 
