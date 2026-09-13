@@ -654,7 +654,7 @@ def test_a_zero_or_non_finite_static_field_is_refused(tmp_path):
 # x = z = 10 cm over its 103 ms train.
 
 
-def _maxwell_fixture(tmp_path, name, orientation=None):
+def _maxwell_fixture(tmp_path, name, orientation=None, location=None):
   """Five nodes at incommensurate coordinates spread over ~20 cm, so all four
   Maxwell terms are live and none of them is degenerate.
 
@@ -672,8 +672,10 @@ def _maxwell_fixture(tmp_path, name, orientation=None):
   meshio.write(str(path), meshio.Mesh(points, [('tetra', np.array([[0, 1, 2, 3],
                                                                   [1, 2, 4, 3]]))]))
   phantom = FEMPhantom(path=str(path))
-  if orientation is not None:
-    phantom.orient(orientation, _Q(np.zeros(3), 'm'))
+  if orientation is not None or location is not None:
+    R = np.eye(3) if orientation is None else orientation
+    L = np.zeros(3) if location is None else np.asarray(location, dtype=float)
+    phantom.orient(R, _Q(L, 'm'))
   phantom.set_assembler(voxel_size=0.0, lorder=2, horder=4,
                         nodal_approximation=False, lumped=False)
   n = phantom.local_nodes.shape[0]
@@ -819,9 +821,10 @@ def test_the_readout_term_follows_a_moving_phantom(tmp_path):
     f'tell a moving phantom from a still one')
 
 
+@pytest.mark.parametrize('offset', [False, True], ids=['isocentre', 'offset'])
 @pytest.mark.parametrize('oblique', [False, True], ids=['axial', 'oblique'])
 def test_the_concomitant_term_continues_across_the_solver_to_assembler_handoff(
-        tmp_path, oblique):
+        tmp_path, oblique, offset):
   """The acceptance test for carrying concomitant fields into the readout.
 
   Evolving `TA` in the solver and handing the remaining `TB` to the assembler
@@ -847,17 +850,26 @@ def test_the_concomitant_term_continues_across_the_solver_to_assembler_handoff(
   the assembler works in the imaging frame, and the two must still meet.
   Measured with the solver made frame-naive again: the axial arm is unmoved
   and the oblique one reads **3.11e-01**, against the 1e-3 gate.
+
+  The `offset` arm covers the other half of the geometry. `orient` measures the
+  nodes from the SLICE centre while `Bc` is a quadratic form about ISOCENTRE, so
+  both halves owe the rest of the expansion about `LOC` -- a k-space shift and
+  a uniform phase. With the readout's share dropped the offset arms read
+  **2.66e-01** (axial) and **4.25e-01** (oblique) while the isocentre arms do
+  not move at all, which is why `LOC = 0` everywhere else hid it.
   """
   pytest.importorskip('meshio')
   from pint import Quantity as Q_
 
   from feelmri import BlochSolver, maxwell_moments, maxwell_phase_coefficients
+  from feelmri.PulseqAdapter import maxwell_recentre
   from feelmri.Bloch import Sequence, SequenceBlock
   from feelmri.MRObjects import Gradient, Scanner
   from feelmri.PulseqAdapter import _gradient_moment_between
 
   scanner = Scanner()
   TA, TB, amps = 2.0, 3.0, (14.0, -9.0, 20.0)
+  LOC = np.array([0.031, -0.047, 0.062]) if offset else None
   th = np.deg2rad(23.0)
   R = (np.array([[np.cos(th), -np.sin(th), 0.0],
                  [np.sin(th), np.cos(th), 0.0],
@@ -876,8 +888,9 @@ def test_the_concomitant_term_continues_across_the_solver_to_assembler_handoff(
     # The solver reads the orientation off the phantom, which is the whole
     # point: forgetting to pass it is how the frame defect arose.
     phantom, _points = _maxwell_fixture(
-        tmp_path, f'handoff_{tag}_{"obl" if oblique else "ax"}.vtu',
-        orientation=R)
+        tmp_path,
+        f'handoff_{tag}_{"obl" if oblique else "ax"}_{"loc" if offset else "iso"}.vtu',
+        orientation=R, location=LOC)
     block = SequenceBlock(gradients=gradients(duration),
                           dur=Q_(duration, 'ms'), dt=Q_(0.002, 'ms'),
                           empty=False)
@@ -895,9 +908,17 @@ def test_the_concomitant_term_continues_across_the_solver_to_assembler_handoff(
     points = tuple(np.full((1, 1, 1), v, dtype=np.float32) for v in kvec)
     coef = (None if moments is None
             else maxwell_phase_coefficients(moments, scanner, rotation=R))
+    phase = 0.0
+    if moments is not None and LOC is not None:
+      # `Bc` is centred on isocentre and `orient` moved the slice to the
+      # origin, so the readout carries the rest of the expansion.
+      dk, ph = maxwell_recentre(moments, scanner, rotation=R, location=LOC)
+      points = tuple(np.full((1, 1, 1), kvec[i] + dk[0, i], dtype=np.float32)
+                     for i in range(3))
+      phase = float(ph[0])
     return complex(np.asarray(phantom.signal_sum(
         points, np.zeros((1, 1, 1), dtype=np.float32), None,
-        maxwell=coef)).ravel()[0])
+        maxwell=coef)).ravel()[0]) * np.exp(-1j * phase)
 
   leg = Sequence()
   leg.add_block(SequenceBlock(gradients=gradients(TB), dur=Q_(TB, 'ms'),
@@ -1542,3 +1563,242 @@ def test_coils_motion_and_the_maxwell_term_compose_in_one_readout(tmp_path):
                                        pod)).reshape(-1)
   assert float(np.abs(flat - got).max()) > 1e-3 * scale, 'the maxwell term does nothing'
   assert float(np.abs(np.abs(C) - 1.0).max()) > 0.1, 'the coil map is trivial'
+
+
+@pytest.mark.parametrize('frame', ['axial', 'oblique'])
+def test_a_lab_frame_field_splits_between_the_solver_and_the_readout(tmp_path,
+                                                                    frame):
+  """A scanner field described once must survive the solver-to-assembler split.
+
+  The linear part of a lab-frame field is `-gamma*t*(g.x)`, which is exactly
+  what a k-space offset of `gammabar*t*g` applies, so the readout needs no new
+  assembler channel -- the shift alone has to carry it. Asserted the same way
+  the off-resonance handoff is: `TA` in the solver plus `TB` on the readout must
+  equal `TA + TB` in the solver, an identity that fixes the sign, the factor of
+  `2*pi` and the frame without assuming any of them.
+
+  What this pins is the HANDOFF -- the sign, the factor of `2*pi` and the
+  time scaling -- and not the frame: both halves read the field through the same
+  `in_frame`, so a wrong rotation is common to them and cancels in the identity.
+  Measured, dropping the `R^T` or the `g.LOC` leaves both arms passing. The
+  frame is pinned against the lab-frame field itself by
+  `test_a_lab_frame_field_is_the_same_field_however_the_phantom_is_placed`.
+  """
+  pytest.importorskip('mpi4py')
+  pytest.importorskip('pymetis')
+  pytest.importorskip('meshio')
+  from pint import Quantity as Q_
+  from feelmri import B0Field, b0_kspace_shift
+  from feelmri.Bloch import BlochSolver, Sequence, SequenceBlock
+  from feelmri.Bloch import apply_demodulation
+  from feelmri.MRObjects import RF, Scanner
+  from _phantom_fixtures import make_cube_mesh
+
+  path, _volume = make_cube_mesh(tmp_path / 'cube.vtu', 'tetra', n=1,
+                                 scale=2e-2)
+
+  scanner = Scanner()
+  gamma = scanner.gamma.m_as('rad/ms/mT')
+  # 6e-3 mT/m over the 20 mm cube is ~0.2 rad/ms of spread, so TB alone puts
+  # about a radian across the object -- enough that a wrong shift cannot hide.
+  field = B0Field(offset=Q_(2.0e-3, 'mT'),
+                  gradient=Q_(np.array([6.0e-3, -4.0e-3, 9.0e-3]), 'mT/m'))
+  TA, TB = 4.0, 3.0
+
+  if frame == 'axial':
+    rotation, location = None, None
+  else:
+    c, s = np.cos(0.35), np.sin(0.35)
+    rotation = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+    location = Q_(np.array([0.011, -0.023, 0.037]), 'm')
+
+  def hard90(dur_ms=0.1, n=64):
+    t = np.linspace(0.0, dur_ms, n)
+    amp = (np.pi / 2) / (gamma * dur_ms)
+    return RF(waveform=Q_(np.full(n, amp, dtype=complex), 'mT'),
+              timings=Q_(t, 'ms'))
+
+  def snapshot_after(delay_ms):
+    phantom = FEMPhantom(path=str(path))
+    if rotation is not None:
+      phantom.orient(rotation, location)
+    # Driven NODAL and LUMPED: the identity being asserted is that the phase
+    # the solver put on the magnetization equals the phase the assembler
+    # applies, and only the lumped nodal path evaluates both at the same
+    # points. Through a quadrature rule the split arm carries the field into
+    # the element interior exactly while the whole arm carries a projected
+    # version of it, and the two differ by the interpolation error of the
+    # basis -- 1.0e-02 on this cube, which is the mesh, not the handoff.
+    phantom.set_assembler(voxel_size=1e3, lorder=2,
+                          nodal_approximation=True, lumped=True)
+    seq = Sequence()
+    seq.add_block(SequenceBlock(rf_pulses=[hard90()]))
+    seq.add_block(SequenceBlock(dur=Q_(delay_ms, 'ms'), dt=Q_(0.01, 'ms'),
+                                store_magnetization=True))
+    Mxy, _Mz = BlochSolver(sequence=seq, phantom=phantom, M0=1.0,
+                           T1=Q_(1e9, 'ms'), T2=Q_(1e9, 'ms'),
+                           b0_field=field, dtype='float64',
+                           perfect_spoiling=False).solve()
+    return phantom, Mxy[:, -1]
+
+  def readout(phantom, mxy, elapsed_ms, shifted=True):
+    n = phantom.local_nodes.shape[0]
+    phantom.set_static_fields(T2=np.full(n, 1e9, dtype=np.float32),
+                              phi_dB0=np.zeros(n, dtype=np.float32))
+    phantom.update_magnetization(np.ascontiguousarray(mxy))
+    t = np.full((1, 1, 1), elapsed_ms, dtype=np.float32)
+    k = [np.zeros((1, 1, 1), dtype=np.float32) for _ in range(3)]
+    dk, phase = b0_kspace_shift(field, t, scanner, rotation=rotation,
+                                location=getattr(phantom, '_location', None))
+    if shifted:
+      k = [np.ascontiguousarray(k[i] + dk[..., i], dtype=np.float32)
+           for i in range(3)]
+    signal = np.asarray(phantom.mri_signal(k, t, None))
+    if shifted:
+      signal = apply_demodulation(signal, phase.reshape(-1))
+    return complex(signal.ravel()[0])
+
+  ph_a, mxy_a = snapshot_after(TA)
+  ph_b, mxy_b = snapshot_after(TA + TB)
+  whole = readout(ph_b, mxy_b, 0.0)
+  split = readout(ph_a, mxy_a, TB)
+
+  gap = abs(split - whole) / abs(whole)
+  assert gap < 1e-3, (
+      f'[{frame}] the field comes apart at the handoff by {gap:.3e}: {TA} ms in '
+      f'the solver plus {TB} ms on the readout disagrees with {TA + TB} ms in '
+      f'the solver')
+
+  # Without the shift the readout carries none of the field, so the same
+  # comparison must fail by orders of magnitude -- otherwise the geometry is too
+  # weak to prove anything.
+  naked = abs(readout(ph_a, mxy_a, TB, shifted=False) - whole) / abs(whole)
+  assert naked > 100.0 * max(gap, 1e-12), (
+      f'[{frame}] dropping the k-space shift changes the readout by only '
+      f'{naked:.3e} against {gap:.3e} with it, so this geometry cannot '
+      f'discriminate')
+
+
+@pytest.mark.parametrize('concomitant', [False, True])
+@pytest.mark.parametrize('frame', ['axial', 'oblique'])
+def test_a_lab_frame_field_is_the_same_field_however_the_phantom_is_placed(
+        tmp_path, frame, concomitant):
+  """`b0_field` must reproduce the same field written out per node.
+
+  The ground truth is the lab-frame expression itself: a spin sitting at the
+  physical position `x` sees `dB0(x)` whatever coordinates the phantom happens
+  to be stored in. So the two spellings below describe one experiment and must
+  agree to round-off --
+
+  * `b0_field=F`, which reaches the kernel as three hoisted scalars;
+  * `delta_B = F(x_lab)` and `phi_dB0 = gamma*F(x_lab)`, the per-node channel,
+    with `x_lab = x_imaging @ R^T + LOC` undoing what `orient` did.
+
+  They agree only if the solver takes `R^T g` (or the bare `g` when the
+  concomitant term has already rotated the positions), the readout always takes
+  `R^T g` since the assembler's nodes are never rotated, and both absorb `g.LOC`
+  into the constant. Dropping any one of those three leaves the halves
+  consistent with each other and wrong -- which is why this is measured against
+  the expression and not against the other half.
+
+  Measured on the oblique arm with the `R^T` removed: **0.114** on the solver at
+  `concomitant=False` and **0.064** on the readout at `concomitant=True` -- two
+  different cells, because the concomitant path rotates the solver's positions
+  itself while the assembler's are never rotated. Dropping the `g.LOC` or
+  transposing the rotation fails it too.
+  """
+  pytest.importorskip('mpi4py')
+  pytest.importorskip('pymetis')
+  pytest.importorskip('meshio')
+  from pint import Quantity as Q_
+  from feelmri import B0Field, b0_kspace_shift
+  from feelmri.Bloch import BlochSolver, Sequence, SequenceBlock
+  from feelmri.Bloch import apply_demodulation
+  from feelmri.MRObjects import Gradient, RF, Scanner
+  from _phantom_fixtures import make_cube_mesh
+
+  path, _volume = make_cube_mesh(tmp_path / 'cube.vtu', 'tetra', n=1,
+                                 scale=2e-2)
+
+  scanner = Scanner()
+  gamma = scanner.gamma.m_as('rad/ms/mT')
+  field = B0Field(offset=Q_(2.0e-3, 'mT'),
+                  gradient=Q_(np.array([6.0e-3, -4.0e-3, 9.0e-3]), 'mT/m'))
+  delay, elapsed = 4.0, 3.0
+
+  if frame == 'axial':
+    rotation, location = None, None
+  else:
+    c, s = np.cos(0.35), np.sin(0.35)
+    rotation = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+    location = Q_(np.array([0.011, -0.023, 0.037]), 'm')
+
+  def hard90(dur_ms=0.1, n=64):
+    t = np.linspace(0.0, dur_ms, n)
+    amp = (np.pi / 2) / (gamma * dur_ms)
+    return RF(waveform=Q_(np.full(n, amp, dtype=complex), 'mT'),
+              timings=Q_(t, 'ms'))
+
+  def run(per_node):
+    phantom = FEMPhantom(path=str(path))
+    if rotation is not None:
+      phantom.orient(rotation, location)
+    phantom.set_assembler(voxel_size=1e3, lorder=2,
+                          nodal_approximation=True, lumped=True)
+    nodes = np.asarray(phantom.local_nodes, dtype=np.float64)
+    if rotation is not None:
+      # orient stores x_imaging = R^T (x_physical - LOC); undo it.
+      nodes = nodes @ np.asarray(rotation, dtype=np.float64).T \
+          + np.asarray(location.m_as('m'), dtype=np.float64)
+    dB = field(nodes)
+    seq = Sequence()
+    seq.add_block(SequenceBlock(rf_pulses=[hard90()]))
+    # A gradient so the concomitant arm has a live quadratic term to rotate
+    # positions for; it is identical in both spellings and cancels.
+    grad = Gradient(scanner=scanner, axis=2, time=Q_(0.1, 'ms'),
+                    timings=Q_(np.array([0.0, delay]), 'ms'),
+                    amplitudes=Q_(np.array([8.0, 8.0]), 'mT/m'))
+    seq.add_block(SequenceBlock(gradients=[grad], dt=Q_(0.01, 'ms'),
+                                store_magnetization=True))
+    kwargs = dict(sequence=seq, phantom=phantom, M0=1.0, T1=Q_(1e9, 'ms'),
+                  T2=Q_(1e9, 'ms'), dtype='float64', perfect_spoiling=False,
+                  concomitant_fields=concomitant, scanner=scanner)
+    if per_node:
+      kwargs['delta_B'] = dB.reshape(-1, 1)
+    else:
+      kwargs['b0_field'] = field
+    Mxy, _Mz = BlochSolver(**kwargs).solve()
+    mxy = Mxy[:, -1]
+
+    n = phantom.local_nodes.shape[0]
+    t = np.full((1, 1, 1), elapsed, dtype=np.float32)
+    k = [np.zeros((1, 1, 1), dtype=np.float32) for _ in range(3)]
+    phi = (gamma * dB if per_node else np.zeros(n))
+    phantom.set_static_fields(T2=np.full(n, 1e9, dtype=np.float32),
+                              phi_dB0=phi.astype(np.float32))
+    phantom.update_magnetization(np.ascontiguousarray(mxy))
+    phase = None
+    if not per_node:
+      dk, phase = b0_kspace_shift(field, t, scanner, rotation=rotation,
+                                  location=getattr(phantom, '_location', None))
+      k = [np.ascontiguousarray(k[i] + dk[..., i], dtype=np.float32)
+           for i in range(3)]
+    signal = np.asarray(phantom.mri_signal(k, t, None))
+    if phase is not None:
+      signal = apply_demodulation(signal, phase.reshape(-1))
+    return mxy, complex(signal.ravel()[0])
+
+  mxy_lab, sig_lab = run(per_node=False)
+  mxy_tis, sig_tis = run(per_node=True)
+
+  solver_gap = float(np.abs(mxy_lab - mxy_tis).max() / np.abs(mxy_tis).max())
+  assert solver_gap < 1e-9, (
+      f'[{frame}, concomitant={concomitant}] the solver reads the lab-frame '
+      f'field {solver_gap:.3e} differently from the same field written out '
+      f'per node')
+
+  readout_gap = abs(sig_lab - sig_tis) / abs(sig_tis)
+  assert readout_gap < 1e-5, (
+      f'[{frame}, concomitant={concomitant}] the readout reads the lab-frame '
+      f'field {readout_gap:.3e} differently from the same field written out '
+      f'per node')

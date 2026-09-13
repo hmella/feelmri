@@ -92,3 +92,60 @@ def test_spiral_stack_radial_speed_is_non_negative(fov, scanner):
   assert rN.mean() > r0.mean(), (
     f'spiral did not grow outward: r0={r0.mean():.3g} rN={rN.mean():.3g}'
   )
+
+
+def test_a_lab_frame_field_displaces_the_readout_by_the_off_resonance_rule(
+        fov, scanner):
+  """The k-space shift must reproduce the textbook off-resonance displacement.
+
+  Off-resonance `df` moves a readout by `df / (gammabar * G_ro)` metres,
+  because the readout gradient is what converts frequency into position. A
+  lab-frame field `g` seen by a spin at `x` is `df = gammabar * (g.x)`, so the
+  displacement is `(g.x) / G_ro` -- no gammabar left in it.
+
+  Asserted as an INTEGER number of pixels: the field is sized so the rule
+  predicts exactly three, and the reconstructed peak has to land three bins
+  away. A wrong sign puts it at -3, a missing `2*pi` puts it off the grid
+  entirely, and neither can be absorbed by a tolerance.
+  """
+  from feelmri import B0Field
+
+  res = np.array([64, 4, 1])
+  traj = CartesianStack(FOV=fov, res=res, oversampling=1, lines_per_shot=1,
+                        scanner=scanner, t_start=Quantity(2.0, 'ms'))
+
+  # G_ro from the trajectory itself: one sample of dk over one dwell.
+  kx = np.asarray(traj.points[0], dtype=float)
+  t = np.asarray(traj.times.m_as('ms'), dtype=float)
+  gammabar = scanner.gammabar.m_as('1/ms/mT')
+  G_ro = (kx[1, 0, 0] - kx[0, 0, 0]) / (gammabar * (t[1, 0, 0] - t[0, 0, 0]))
+
+  pixel = float(fov[0].m_as('m')) / traj.ro_samples
+  z0 = 0.04
+  shift_pixels = 3
+  gz = shift_pixels * pixel * G_ro / z0
+  field = B0Field(gradient=Quantity(np.array([0.0, 0.0, gz]), 'mT/m'))
+
+  nominal = [np.array(p, copy=True) for p in traj.points]
+  shifted = traj.b0_shifted_points(field, scanner)
+  for i in range(3):
+    assert np.array_equal(traj.points[i], nominal[i]), (
+        'b0_shifted_points wrote the shift back into the trajectory, so the '
+        'reconstruction would grid on the distorted k and see nothing')
+
+  def peak_bin(points):
+    # A point object at (0, 0, z0): its signal is exp(-2i pi k.x0), and it is
+    # reconstructed on the NOMINAL grid whichever k actually encoded it.
+    s = np.exp(-2j * np.pi * np.asarray(points[2], dtype=float) * z0)
+    line = np.fft.fftshift(np.fft.ifft(np.fft.ifftshift(s[:, 0, 0])))
+    return int(np.argmax(np.abs(line)))
+
+  here = peak_bin(nominal)
+  there = peak_bin(shifted)
+  assert there - here == shift_pixels, (
+      f'the field should displace the readout by {shift_pixels} pixels '
+      f'({shift_pixels * pixel * 1e3:.2f} mm at G_ro = {G_ro:.3f} mT/m); '
+      f'measured {there - here}')
+
+  with pytest.raises(TypeError, match='B0Field'):
+    traj.b0_shifted_points(np.zeros(3), scanner)

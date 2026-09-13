@@ -2511,6 +2511,101 @@ def maxwell_phase_coefficients(moments, scanner, rotation=None) -> np.ndarray:
   return out
 
 
+def maxwell_recentre(moments, scanner, rotation=None, location=None):
+  """The terms that move ``Bc`` from the slice centre back onto isocentre.
+
+  :func:`maxwell_phase_coefficients` gives the QUADRATIC form only, and the
+  assembler evaluates it at ``local_nodes`` -- which ``FEMPhantom.orient``
+  measures from the slice centre. ``Bc`` is a quadratic form about ISOCENTRE, so
+  an off-isocentre slab is otherwise imaged as though it sat in the middle of
+  the bore. With ``x_physical = R u + L``,
+
+      x^T F x = u^T (R^T F R) u  +  2 (R^T F L) . u  +  L^T F L
+
+  the first term is what the six coefficients already carry, the second is
+  linear in position -- so it is a k-space shift, exactly like a lab-frame field
+  -- and the third a uniform phase.
+
+  Returns ``(dk, phase)`` with the same convention as :func:`b0_kspace_shift`:
+  ``dk`` is ``(N, 3)`` in 1/m and is ADDED to the samples, ``phase`` is ``(N,)``
+  in rad and goes through :func:`feelmri.Bloch.apply_demodulation`.
+
+  ``location`` is the slice offset in metres, in PHYSICAL coordinates -- the
+  same vector :meth:`FEMPhantom.orient` was given. ``None`` or zero returns
+  zeros, so an acquisition at isocentre pays nothing and stays bit-identical.
+  """
+  m = np.asarray(moments, dtype=float)
+  if m.ndim != 2 or m.shape[1] != 4:
+    raise ValueError(
+        f"maxwell_recentre: expected (N, 4) moments, got {m.shape}")
+  n = m.shape[0]
+  if location is None:
+    return np.zeros((n, 3)), np.zeros(n)
+  L = np.asarray(location, dtype=float).reshape(3)
+  if not np.any(L):
+    return np.zeros((n, 3)), np.zeros(n)
+
+  gamma = scanner.gamma.m_as('rad/ms/mT')
+  B0 = scanner.field_strength.m_as('mT')
+  if not B0 > 0:
+    raise ValueError(
+        f"maxwell_recentre: the concomitant term scales as 1/B0, so a zero or "
+        f"negative field strength ({scanner.field_strength}) is undefined.")
+
+  a, b, c, d = m[:, 0], m[:, 1], m[:, 2], m[:, 3]
+  form = np.zeros((n, 3, 3), dtype=float)
+  form[:, 0, 0] = form[:, 1, 1] = 0.25 * b
+  form[:, 2, 2] = a
+  form[:, 0, 2] = form[:, 2, 0] = -0.5 * c
+  form[:, 1, 2] = form[:, 2, 1] = -0.5 * d
+  scale = -gamma / (2.0 * B0)
+
+  # F L in physical coordinates, then into the frame the assembler's nodes are
+  # in. Only the LINEAR term takes the rotation; the uniform one is a scalar.
+  FL = np.einsum('nij,j->ni', form, L)
+  if rotation is not None:
+    R = np.asarray(rotation, dtype=float)
+    if R.shape != (3, 3):
+      raise ValueError(
+          f"maxwell_recentre: rotation must be 3x3, got {R.shape}")
+    FL = FL @ R
+  lin = scale * 2.0 * FL                       # rad/m, added to the phase
+  uniform = scale * np.einsum('i,nij,j->n', L, form, L)
+  # The assembler carries -2 pi k . x in its phase, so a phase of `lin . x` is
+  # a k-space offset of -lin / (2 pi); `apply_demodulation` applies exp(-i phi),
+  # so the uniform term is handed over negated.
+  return -lin / (2.0 * np.pi), -uniform
+
+
+def b0_kspace_shift(field, times_ms, scanner, rotation=None, location=None):
+  """The k-space shift a lab-frame B0 field puts on a readout.
+
+  A field ``dB0 = b + g . x`` advances a spin at ``x`` by ``-gamma (b + g.x) t``.
+  The position-dependent half is ``-2 pi (gammabar t g) . x``, which is exactly
+  what moving the sample's k by ``gammabar t g`` does -- so it needs no
+  assembler support, and the geometric distortion comes out of the
+  reconstruction by itself. The uniform half is a per-sample phase and is
+  returned alongside.
+
+  Returns ``(dk, phase)``: ``dk`` has shape ``times_ms.shape + (3,)`` in 1/m and
+  is ADDED to the k-space samples; ``phase`` has shape ``times_ms.shape`` in rad
+  and goes through :func:`feelmri.Bloch.apply_demodulation`, which applies
+  ``exp(-i phase)``.
+
+  ``rotation`` and ``location`` describe the phantom the assembler holds. Its
+  nodes are always in the imaging frame -- unlike the solver's, which are
+  rotated into the physical frame when the concomitant term is on -- so the
+  gradient is always taken as ``R^T g`` and the slice offset always lands in
+  the constant.
+  """
+  b, g = field.in_frame(rotation=rotation, location=location, physical=False)
+  t = np.asarray(times_ms, dtype=np.float64)
+  gammabar = scanner.gammabar.m_as('1/ms/mT')
+  gamma = scanner.gamma.m_as('rad/ms/mT')
+  dk = (gammabar * t)[..., None] * g.reshape((1,) * t.ndim + (3,))
+  return dk, gamma * b * t
+
+
 def maxwell_moments_from_kspace(kx, ky, kz, times_ms, scanner) -> np.ndarray:
   """:func:`maxwell_moments` for a trajectory given as sampled k(t).
 
@@ -3128,7 +3223,7 @@ def simulate_pulseq(seq_path,
   -------
   PulseqSimulation
   """
-  from feelmri.Bloch import BlochSolver
+  from feelmri.Bloch import BlochSolver, apply_demodulation
   from feelmri.MPIUtilities import gather_data
 
   if scanner is None:
@@ -3204,6 +3299,13 @@ def simulate_pulseq(seq_path,
     # it is the same coupling rule the off-resonance handoff follows.
     concomitant_readout = bool(solver_kwargs.get('concomitant_fields', False))
 
+    # The scanner field is a property of the bore, so a spin sees it at wherever
+    # it has moved to, not at where it started. The solver already evolves it
+    # that way; the readout gets it as a shift of the sample's k.
+    b0_field = solver_kwargs.get('b0_field', None)
+    if b0_field is not None and b0_field.is_zero:
+      b0_field = None
+
     kspace: List[np.ndarray] = []
     times: List[np.ndarray] = []
     for rw in imp.readouts:
@@ -3225,14 +3327,41 @@ def simulate_pulseq(seq_path,
       points, t = _reshape_signal_inputs(
           rw.kspace[:, 0], rw.kspace[:, 1], rw.kspace[:, 2],
           rw.times - rw.t_anchor, None)
+      # The shift stays LOCAL to this call: `rw.kspace` is the nominal
+      # trajectory the reconstruction grids on, and the difference between the
+      # two is the distortion the field produces.
+      b0_phase = None
+      if b0_field is not None:
+        dk, b0_phase = b0_kspace_shift(
+            b0_field, t, scanner,
+            rotation=getattr(phantom, '_orientation', None),
+            location=getattr(phantom, '_location', None))
+        points = [np.ascontiguousarray(points[i] + dk[..., i],
+                                       dtype=points[i].dtype)
+                  for i in range(3)]
       # `t` is elapsed-since-snapshot, which the relaxation and off-resonance
       # factors need, but the POD weights need absolute sequence time, the frame
       # the motion is defined in. `get_weights` adds the trajectory's own
       # `timeshift`, so point it at this window's anchor and restore it after.
-      maxwell = (maxwell_phase_coefficients(
-                     rw.maxwell, scanner,
-                     rotation=getattr(phantom, '_orientation', None))
-                 if concomitant_readout and rw.maxwell is not None else None)
+      maxwell = None
+      if concomitant_readout and rw.maxwell is not None:
+        rotation = getattr(phantom, '_orientation', None)
+        maxwell = maxwell_phase_coefficients(rw.maxwell, scanner,
+                                             rotation=rotation)
+        # `Bc` is a quadratic form about ISOCENTRE while the assembler's nodes
+        # are measured from the slice centre, so the rest of the expansion --
+        # a k-space shift and a uniform phase -- has to travel with the six
+        # coefficients or an off-isocentre slab is imaged as though it sat in
+        # the middle of the bore.
+        conc_dk, conc_phase = maxwell_recentre(
+            rw.maxwell, scanner, rotation=rotation,
+            location=getattr(phantom, '_location', None))
+        if np.any(conc_dk) or np.any(conc_phase):
+          points = [np.ascontiguousarray(
+                        points[i] + conc_dk[:, i].reshape(points[i].shape),
+                        dtype=points[i].dtype) for i in range(3)]
+          b0_phase = (conc_phase if b0_phase is None
+                      else b0_phase.reshape(-1) + conc_phase)
       # Composed with the caller's own shift, which `get_weights` folds in to
       # reach the cardiac phase, and restored in the finally below.
       shift = getattr(pod, 'timeshift', None) if pod is not None else None
@@ -3272,6 +3401,10 @@ def simulate_pulseq(seq_path,
           # bin of the quadrature with weight ~1e-16, so restore the collapsed
           # magnetization for anything the caller evaluates afterwards.
           phantom.update_magnetization(Mxy[:, rw.m_storage_idx])
+      if b0_phase is not None:
+        # The uniform half of the field is position independent, so it cannot be
+        # carried by a k-space offset; it is a per-sample phase instead.
+        signal = apply_demodulation(signal, b0_phase.reshape(-1))
       # The receiver's frequency/phase offsets and any per-sample phase shape.
       signal = rw.demodulate(signal)
       kspace.append(gather_data(signal) if gather else signal)

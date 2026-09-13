@@ -162,10 +162,17 @@ class B0Field:
             g = np.asarray(rotation, dtype=np.float64).T @ g
         return b, np.ascontiguousarray(g, dtype=np.float64)
 
-    def phi_offset(self, scanner):
+    def phi_offset(self, scanner, location=None):
         """The uniform part as an off-resonance rate in rad/ms, to add to
-        ``phi_dB0``. Spatially uniform, so it needs no frame."""
-        return float(self.offset_mT * scanner.gamma.m_as('rad/ms/mT'))
+        ``phi_dB0``.
+
+        Uniform in space, so it carries no rotation -- but it DOES depend on
+        where isocentre is: a slice offset turns part of the gradient into a
+        constant, so pass the same ``location`` :meth:`in_frame` gets or a
+        shifted slice loses that term.
+        """
+        b, _g = self.in_frame(location=location)
+        return float(b * scanner.gamma.m_as('rad/ms/mT'))
 
     @classmethod
     def fit(cls, expression, points_m, *, rtol=1.0e-3, max_order=None,

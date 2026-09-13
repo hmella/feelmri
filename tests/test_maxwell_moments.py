@@ -484,3 +484,61 @@ def test_a_stack_retains_its_partition_encode_gradient():
 
   assert float(flat.echo_time.m_as('ms')) == pytest.approx(
       float(stack.echo_time.m_as('ms'))), 'the timing moved'
+
+
+@pytest.mark.parametrize('oblique', [False, True], ids=['axial', 'oblique'])
+def test_the_readout_puts_bc_on_isocentre_and_not_on_the_slice(oblique):
+  """`maxwell_coefficients` carries the quadratic form; `maxwell_recentre`
+  carries the rest of the expansion about the slice offset.
+
+  `FEMPhantom.orient` measures the assembler's nodes from the slice centre --
+  which is what makes the linear encoding right -- while `Bc` is a quadratic
+  form about ISOCENTRE. Without the two extra terms an off-isocentre slab is
+  imaged as though it sat in the middle of the bore, and `LOC = 0` in every
+  other fixture here is exactly why that was never caught.
+
+  The reference is the same dense integration the axial/oblique test uses,
+  evaluated at the PHYSICAL position. The `naive` assert is the guard: this
+  offset has to change the phase by more than the tolerance, or the comparison
+  says nothing.
+  """
+  R = _oblique() if oblique else np.eye(3)
+  LOC = np.array([0.031, -0.047, 0.062])
+  traj = _cartesian(MPS_ori=R)
+  traj.LOC = LOC.astype(traj.dtype)
+
+  coef = traj.maxwell_coefficients(SCANNER)
+  dk, phase = traj.maxwell_recentre(SCANNER)
+  times = np.asarray(traj.times.m_as('ms'), dtype=float).reshape(-1)
+  nodes = np.array([[0.12, -0.06, 0.004],
+                    [-0.09, 0.10, -0.003],
+                    [0.05, 0.05, 0.002]])
+
+  x, y, z = nodes[:, 0], nodes[:, 1], nodes[:, 2]
+  quad = (coef[:, 0:1] * x ** 2 + coef[:, 1:2] * y ** 2 + coef[:, 2:3] * z ** 2
+          + coef[:, 3:4] * x * y + coef[:, 4:5] * x * z + coef[:, 5:6] * y * z)
+  # The assembler carries -2 pi k . x, and `phase` is handed to
+  # apply_demodulation, which applies exp(-i phi) -- so both come back with the
+  # sign they contribute to the phase.
+  got = quad - 2.0 * np.pi * (dk @ nodes.T) - phase[:, None]
+
+  # `_dense_phase_from_trajectory` rotates the imaging nodes it is given, so
+  # pass the ones whose physical position is R n + LOC.
+  Rn = np.asarray(traj.MPS_ori, dtype=float)
+  shifted = nodes + (LOC @ Rn)
+
+  worst = 0.0
+  for idx in (0, times.size // 2, times.size - 1):
+    ref = _dense_phase_from_trajectory(traj, times[idx], shifted)
+    assert np.abs(ref).max() > 1e-6, 'this sample carries no phase at all'
+    worst = max(worst, float(np.abs(got[idx] - ref).max() / np.abs(ref).max()))
+  assert worst < 1e-5, f'the re-centred coefficients are off by {worst:.2e}'
+
+  # The correction DOMINATES the quadratic form at a realistic slice offset:
+  # the cross term goes as 2 L . x against x . x, and here |L| is comparable to
+  # the node coordinates. Measured 271x (axial) and 8.4x (oblique) -- the axial
+  # case is the larger only because it leaves `quad` almost nothing.
+  ratio = float(np.abs(quad[-1] - got[-1]).max() / np.abs(quad[-1]).max())
+  assert ratio > 2.0, (
+      f'the re-centring is only {ratio:.3f} of the quadratic term here, so the '
+      f'test cannot tell an isocentre-centred Bc from a slice-centred one')

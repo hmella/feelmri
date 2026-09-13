@@ -203,7 +203,73 @@ class Trajectory:
                                   rotation=R)[0])
         else:
             moments = _moments(gradients, t0, times, rotation=R)
+        self._maxwell_moments = moments
         return _coef(moments, scanner, rotation=R)
+
+    def maxwell_recentre(self, scanner, **kwargs):
+        """The k-space shift and uniform phase that put ``Bc`` on isocentre.
+
+        :meth:`maxwell_coefficients` carries the quadratic form only, and the
+        assembler evaluates it at nodes ``orient`` measured from the SLICE
+        centre. This is the rest of the expansion about :attr:`LOC` -- a linear
+        term, which is a k-space shift, and a uniform one. Returns
+        ``(dk, phase)`` shaped like :attr:`times` flattened; add ``dk`` to the
+        samples and pass ``phase`` to ``feelmri.Bloch.apply_demodulation``.
+
+        Reuses the moments of the last :meth:`maxwell_coefficients` call when
+        the arguments match, so the gradients are integrated once.
+        """
+        from feelmri.PulseqAdapter import maxwell_recentre as _recentre
+        moments = getattr(self, '_maxwell_moments', None)
+        if moments is None or kwargs:
+            self.maxwell_coefficients(scanner, **kwargs)
+            moments = self._maxwell_moments
+        return _recentre(moments, scanner, rotation=np.asarray(self.MPS_ori,
+                                                               dtype=float),
+                         location=self.LOC)
+
+    def b0_shifted_points(self, field, scanner, t_snapshot=None):
+        """:attr:`points` displaced by a lab-frame B0 field, for ``mri_signal``.
+
+        A field ``dB0 = b + g.x`` advances a spin at ``x`` by
+        ``-gamma (b + g.x) t``. The position-dependent half is
+        ``-2 pi (gammabar t g).x``, which is what moving the sample's k by
+        ``gammabar t g`` does -- so it costs one array add and no assembler
+        support, and because the deformed position is what the assembler
+        already encodes against, the field is sampled where the spin has moved
+        to rather than where it started.
+
+        **The shift is not written back into :attr:`points`.** The
+        reconstruction grids on the nominal trajectory, and the difference
+        between the two is the geometric distortion the field produces.
+
+        The uniform half ``b`` is not returned: it is spatially constant, so it
+        belongs on the phantom's off-resonance instead --
+        ``phi_dB0 + field.phi_offset(scanner, location=self.LOC)``, which the
+        assembler applies over the same ``t``.
+
+        ``t_snapshot`` is the instant the magnetization was captured, default
+        :attr:`t_start`; it must be the origin of the ``t`` handed alongside
+        these points to ``mri_signal``, or the shift and the decay disagree
+        about when the readout began.
+        """
+        from feelmri.MRObjects import B0Field as _B0Field
+        if not isinstance(field, _B0Field):
+            raise TypeError(
+                f"b0_shifted_points: expected a B0Field, got "
+                f"{type(field).__name__}. Build one with B0Field.fit or "
+                f"B0Field.on_phantom.")
+        t0 = (float(self.t_start.m_as('ms')) if t_snapshot is None
+              else float(t_snapshot))
+        t = np.asarray(self.times.m_as('ms'), dtype=float) - t0
+        # The assembler's nodes are always the imaging ones `orient` left
+        # behind, whatever the solver does with its own, so the gradient is
+        # always taken through R^T and the offset always absorbs `g.LOC`.
+        _b, g = field.in_frame(rotation=self.MPS_ori, location=self.LOC)
+        scale = scanner.gammabar.m_as('1/ms/mT') * t
+        return tuple(np.ascontiguousarray(self.points[i] + scale * g[i],
+                                          dtype=self.points[i].dtype)
+                     for i in range(3))
 
     def check_ph_enc_lines(self, ph_samples):
         """Verify that the number of phase-encoding lines is divisible by the multishot factor."""

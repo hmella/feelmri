@@ -887,3 +887,79 @@ def test_adc_demodulation_is_applied_by_simulate_pulseq(adapter, tmp_path):
   assert not np.any(plain.demodulation_phase())
   probe = np.arange(plain.times.size, dtype=np.complex128).reshape(-1, 1, 1, 1)
   assert plain.demodulate(probe) is probe
+
+
+def test_a_lab_frame_b0_field_shifts_the_readout_but_not_the_trajectory(
+        adapter, tmp_path):
+  """`simulate_pulseq` must apply the shift and leave `rw.kspace` alone.
+
+  The scanner field displaces where the signal comes from, and the
+  reconstruction still grids on the nominal trajectory -- the difference
+  between the two IS the geometric distortion, so writing the shift back into
+  `rw.kspace` would cancel exactly the effect being modelled.
+
+  The signal is compared against the same readout driven by hand at the shifted
+  k, which fixes the shift's sign and scale independently of anything the
+  adapter does, and against the unshifted one, which must differ.
+  """
+  pytest.importorskip('mpi4py')
+  pytest.importorskip('pymetis')
+  try:
+    from feelmri.Phantom import FEMPhantom
+  except ImportError as exc:
+    pytest.skip(f'feelmri C++ extensions not available: {exc}')
+  from feelmri import B0Field, b0_kspace_shift
+  from feelmri.Bloch import apply_demodulation
+  from feelmri.MRObjects import Scanner
+  from _phantom_fixtures import make_cube_mesh
+
+  seq_path = DATA_DIR / 'gre_v15.seq'
+  skip_if_pypulseq_too_old(seq_path)
+
+  scanner = Scanner()
+  field = B0Field(offset=Quantity(1.5e-3, 'mT'),
+                  gradient=Quantity(np.array([5.0e-3, -3.0e-3, 7.0e-3]),
+                                    'mT/m'))
+
+  path, _vol = make_cube_mesh(tmp_path / 'cube.vtu', 'tetra', n=2, scale=2e-2)
+  phantom = FEMPhantom(path=str(path))
+  phantom.set_assembler(voxel_size=0.0, lorder=2, horder=2,
+                        nodal_approximation=False, lumped=False)
+  n = phantom.local_nodes.shape[0]
+  phantom.set_static_fields(T2=np.full(n, 1e9, dtype=np.float32),
+                            phi_dB0=np.zeros(n, dtype=np.float32))
+
+  imp = adapter.import_pulseq(seq_path, scanner=scanner)
+  nominal = np.array(imp.readouts[0].kspace, copy=True)
+
+  sim = adapter.simulate_pulseq(seq_path, phantom, scanner=scanner, M0=1.0,
+                                T1=Quantity(1e9, 'ms'), T2=Quantity(1e9, 'ms'),
+                                dtype='float64', b0_field=field)
+  rw = sim.imp.readouts[0]
+  assert np.array_equal(rw.kspace, nominal), (
+      'the shift was written back into the trajectory, so the reconstruction '
+      'would grid on the distorted k and see no distortion at all')
+
+  points, t = adapter._reshape_signal_inputs(
+      rw.kspace[:, 0], rw.kspace[:, 1], rw.kspace[:, 2],
+      rw.times - rw.t_anchor, None)
+  phantom.update_magnetization(sim.Mxy[:, rw.m_storage_idx])
+  plain = np.asarray(phantom.mri_signal(list(points), t, None)).reshape(-1)
+
+  dk, phase = b0_kspace_shift(field, t, scanner)
+  shifted = [np.ascontiguousarray(points[i] + dk[..., i],
+                                  dtype=points[i].dtype) for i in range(3)]
+  expect = apply_demodulation(
+      np.asarray(phantom.mri_signal(shifted, t, None)), phase.reshape(-1))
+  expect = rw.demodulate(expect).reshape(-1)
+
+  got = np.asarray(sim.kspace[0]).reshape(-1)
+  scale = np.abs(expect).max()
+  assert np.abs(got - expect).max() <= 1e-6 * scale, (
+      'simulate_pulseq does not reproduce the hand-driven shifted readout')
+
+  # The shift has to matter on this geometry, or the agreement above is vacuous.
+  gap = np.abs(got - rw.demodulate(plain.reshape(-1, 1, 1, 1)).reshape(-1)).max()
+  assert gap > 1e-2 * scale, (
+      f'the field moves the readout by only {gap / scale:.3e} of peak, so this '
+      f'sequence cannot show whether the shift was applied')
