@@ -3152,154 +3152,169 @@ def simulate_pulseq(seq_path,
   if sensitivity_set:
     phantom.set_receive_sensitivity(coil_sensitivities)
 
-  solver = BlochSolver(sequence=imp.feelmri_seq, phantom=phantom,
-                       scanner=scanner, **solver_kwargs)
-  Mxy, Mz = solver.solve()
+  # The temporary sensitivity map has to come off even when a readout
+  # raises: leaving it on hands the caller back a phantom that silently
+  # multiplies every later signal by a map they never set.
+  try:
+    solver = BlochSolver(sequence=imp.feelmri_seq, phantom=phantom,
+                         scanner=scanner, **solver_kwargs)
+    Mxy, Mz = solver.solve()
 
-  # When the solver carried a spectral sub-ensemble, reproduce the readout from
-  # it rather than from the collapsed magnetization. Needs the static fields the
-  # caller set, which the phantom remembers for exactly this.
-  bins = None
-  if getattr(solver, 'bin_magnetization', None) is not None:
-    remembered = getattr(phantom, '_static_fields', None)
-    if remembered is None:
-      logger.warning(
-          "t2_prime is set but set_static_fields was never called, so the "
-          "readout cannot be reproduced per sub-spin and every echo will be "
-          "attenuated by the dephasing standing at its anchor")
-    else:
-      offsets = solver.bin_offsets
-      # The row counts are compared on LOCAL data, so under dual partitioning
-      # this fires on some ranks and not others -- measured 4 of 6 on a cube at
-      # 6 ranks, where two ranks happen to have equal bloch and signal counts.
-      # Calling the collective inside the branch that found the problem is the
-      # bug this repo has now hit four times: those two ranks walked into the
-      # redistribution below while the other four waited in the allgather, and
-      # all six hung. Every rank reaches it, with an empty message when clean.
-      mismatch = ''
-      if (remembered[0].shape[0] != offsets.shape[0]
-              or remembered[1].shape[0] != offsets.shape[0]):
-        mismatch = (
-            f"simulate_pulseq: the remembered static fields have "
-            f"{remembered[0].shape[0]} (T2) and {remembered[1].shape[0]} "
-            f"(phi_dB0) rows against {offsets.shape[0]} sub-spin offsets. "
-            f"set_static_fields must be called under the same partition the "
-            f"solver was built on, or the two describe different nodes")
-      _collective_raise(mismatch)
-      bins = (solver.bin_magnetization, offsets,
-              solver.bin_weights, remembered[0], remembered[1])
-
-  # Under dual partitioning every set_static_fields and update_magnetization is
-  # an Alltoallv into the signal layout, and the bin loop below makes three of
-  # them per sub-spin: measured on cpmg_v15 at K = 16, 4 redistributions for the
-  # whole simulation became 208. The window-independent arrays are moved once
-  # here and the per-window ensemble once below, after which the loop runs with
-  # the signal layout already active and communicates nothing.
-  dual = (bins is not None and getattr(phantom, '_dual', False)
-          and phantom._active_partition != 'signal')
-  # `bins` stays in the BLOCH layout: it is what the finally below hands back
-  # to set_static_fields, which redistributes it itself. `readout_bins` is the
-  # same data already moved, for the loop that runs inside the signal layout.
-  readout_bins = bins
-  if dual:
-    _ens, offsets, weights, T2_read, phi_read = bins
-    move = lambda a: phantom.redistribute_nodal(
-        np.ascontiguousarray(a), 'bloch', 'signal')
-    readout_bins = (_ens, move(offsets), weights, move(T2_read),
-                    move(phi_read))
-
-  # The readout carries the concomitant term exactly when the SOLVER did. The
-  # two halves describe one field, and modelling it up to the snapshot and then
-  # dropping it for the readout would be worse than not modelling it at all --
-  # it is the same coupling rule the off-resonance handoff follows.
-  concomitant_readout = bool(solver_kwargs.get('concomitant_fields', False))
-
-  kspace: List[np.ndarray] = []
-  times: List[np.ndarray] = []
-  for rw in imp.readouts:
-    if rw.m_storage_idx < 0:
-      logger.warning(
-          "readout blocks %d-%d have no coherence anchor and are skipped",
-          rw.first_block, rw.last_block)
-      continue
-    if bins is None:
-      # On the bins path the loop below sets this once per sub-spin and the
-      # finally puts the collapsed value back, so doing it here as well is a
-      # wasted nodal store -- and, under dual partitioning, a wasted Alltoallv
-      # per readout window (4 of 23 on cpmg_v15 at K = 16).
-      phantom.update_magnetization(Mxy[:, rw.m_storage_idx])
-    # Elapsed time since the snapshot, not absolute time from the start of the
-    # file. mri_signal uses t for exp(-t/T2) and exp(i*phi*t), both of which
-    # continue from the instant the magnetization was captured; feeding it
-    # absolute times applies a spurious exp(-t_anchor/T2) to the whole window.
-    points, t = _reshape_signal_inputs(
-        rw.kspace[:, 0], rw.kspace[:, 1], rw.kspace[:, 2],
-        rw.times - rw.t_anchor, None)
-    # `t` is elapsed-since-snapshot, which is what the relaxation and
-    # off-resonance factors need -- but the POD weights need ABSOLUTE
-    # sequence time, because that is the frame the motion is defined in.
-    # `get_weights` reconciles the two by adding the trajectory's own
-    # `timeshift`, so point it at this window's anchor. Without this every
-    # window sampled the motion from cycle phase 0 and the readout
-    # deformation disagreed with the one the solver used at the same
-    # instant. Restored afterwards so the caller's object comes back
-    # unchanged.
-    maxwell = (maxwell_phase_coefficients(rw.maxwell, scanner)
-               if concomitant_readout and rw.maxwell is not None else None)
-    shift = getattr(pod, 'timeshift', None) if pod is not None else None
-    if shift is not None:
-      pod.update_timeshift(float(rw.t_anchor))
-    try:
-      if bins is None:
-        signal = phantom.mri_signal(list(points), t, pod, maxwell=maxwell)
+    # When the solver carried a spectral sub-ensemble, reproduce the readout from
+    # it rather than from the collapsed magnetization. Needs the static fields the
+    # caller set, which the phantom remembers for exactly this.
+    bins = None
+    if getattr(solver, 'bin_magnetization', None) is not None:
+      remembered = getattr(phantom, '_static_fields', None)
+      if remembered is None:
+        logger.warning(
+            "t2_prime is set but set_static_fields was never called, so the "
+            "readout cannot be reproduced per sub-spin and every echo will be "
+            "attenuated by the dephasing standing at its anchor")
       else:
-        # Bin-by-bin readout. Collapsing the sub-ensemble at the snapshot and
-        # letting the assembler replay a single exp(-t/T2) from there cannot
-        # reproduce a readout: the snapshot sits at the coherence ANCHOR, where
-        # the ensemble is maximally dephased, and nothing downstream can bring
-        # it back. Measured on cpmg_v15 at T2' = 8 ms, every echo came out
-        # scaled by exp(-0.5*(tau/T2')^2) = 0.82.
-        #
-        # Each sub-spin is instead given its own off-resonance -- the bin
-        # offsets are in the same rad/ms frame as phi_dB0, so they simply add --
-        # and the signals are weight-summed. Exact, and it costs n_bins passes
-        # over the signal path per window.
-        bin_Mxy, offsets, weights, T2_read, phi_read = readout_bins
-        ensemble = bin_Mxy[:, :, rw.m_storage_idx]
-        if dual:
-          ensemble = phantom.redistribute_nodal(
-              np.ascontiguousarray(ensemble), 'bloch', 'signal')
-        signal = None
-        with phantom._using('signal') if dual else _no_layout_change():
-          for k, w in enumerate(weights):
-            phantom.set_static_fields(T2_read, phi_read + offsets[:, k])
-            phantom.update_magnetization(ensemble[:, k])
-            contribution = w * phantom.mri_signal(list(points), t, pod,
-                                                  maxwell=maxwell)
-            signal = contribution if signal is None else signal + contribution
-    finally:
-      if shift is not None:
-        pod.update_timeshift(shift)
-      if bins is not None:
-        phantom.set_static_fields(bins[3], bins[4])
-        # The bin loop above left the phantom holding the LAST sub-spin --
-        # a tail bin of the quadrature, weight ~1e-16 -- so anything the
-        # caller evaluates afterwards reads that instead of the collapsed
-        # magnetization. Measured on cpmg_v15 at T2' = 8 ms, K = 32: S(0)
-        # came back 1.133x too large and with a spurious real part where
-        # the correct value is purely imaginary.
-        phantom.update_magnetization(Mxy[:, rw.m_storage_idx])
-    # The receiver's frequency/phase offsets and any per-sample phase shape.
-    signal = rw.demodulate(signal)
-    kspace.append(gather_data(signal) if gather else signal)
-    times.append(rw.times)
+        offsets = solver.bin_offsets
+        # The row counts are compared on LOCAL data, so under dual partitioning
+        # this fires on some ranks and not others -- measured 4 of 6 on a cube at
+        # 6 ranks, where two ranks happen to have equal bloch and signal counts.
+        # Calling the collective inside the branch that found the problem is the
+        # bug this repo has now hit four times: those two ranks walked into the
+        # redistribution below while the other four waited in the allgather, and
+        # all six hung. Every rank reaches it, with an empty message when clean.
+        mismatch = ''
+        if (remembered[0].shape[0] != offsets.shape[0]
+                or remembered[1].shape[0] != offsets.shape[0]):
+          mismatch = (
+              f"simulate_pulseq: the remembered static fields have "
+              f"{remembered[0].shape[0]} (T2) and {remembered[1].shape[0]} "
+              f"(phi_dB0) rows against {offsets.shape[0]} sub-spin offsets. "
+              f"set_static_fields must be called under the same partition the "
+              f"solver was built on, or the two describe different nodes")
+        _collective_raise(mismatch)
+        bins = (solver.bin_magnetization, offsets,
+                solver.bin_weights, remembered[0], remembered[1])
 
-  if sensitivity_set:
-    # Restored as the ALREADY-REDISTRIBUTED array, not by re-running the
-    # setter: `previous_sensitivity` was read out of the signal layout, and
-    # feeding it back through set_receive_sensitivity would redistribute it a
-    # second time and pair it with the wrong nodes.
-    phantom._receive_sensitivity = previous_sensitivity
+    # Under dual partitioning every set_static_fields and update_magnetization is
+    # an Alltoallv into the signal layout, and the bin loop below makes three of
+    # them per sub-spin: measured on cpmg_v15 at K = 16, 4 redistributions for the
+    # whole simulation became 208. The window-independent arrays are moved once
+    # here and the per-window ensemble once below, after which the loop runs with
+    # the signal layout already active and communicates nothing.
+    dual = (bins is not None and getattr(phantom, '_dual', False)
+            and phantom._active_partition != 'signal')
+    # `bins` stays in the BLOCH layout: it is what the finally below hands back
+    # to set_static_fields, which redistributes it itself. `readout_bins` is the
+    # same data already moved, for the loop that runs inside the signal layout.
+    readout_bins = bins
+    if dual:
+      _ens, offsets, weights, T2_read, phi_read = bins
+      move = lambda a: phantom.redistribute_nodal(
+          np.ascontiguousarray(a), 'bloch', 'signal')
+      readout_bins = (_ens, move(offsets), weights, move(T2_read),
+                      move(phi_read))
+
+    # The readout carries the concomitant term exactly when the SOLVER did. The
+    # two halves describe one field, and modelling it up to the snapshot and then
+    # dropping it for the readout would be worse than not modelling it at all --
+    # it is the same coupling rule the off-resonance handoff follows.
+    concomitant_readout = bool(solver_kwargs.get('concomitant_fields', False))
+
+    kspace: List[np.ndarray] = []
+    times: List[np.ndarray] = []
+    for rw in imp.readouts:
+      if rw.m_storage_idx < 0:
+        logger.warning(
+            "readout blocks %d-%d have no coherence anchor and are skipped",
+            rw.first_block, rw.last_block)
+        continue
+      if bins is None:
+        # On the bins path the loop below sets this once per sub-spin and the
+        # finally puts the collapsed value back, so doing it here as well is a
+        # wasted nodal store -- and, under dual partitioning, a wasted Alltoallv
+        # per readout window (4 of 23 on cpmg_v15 at K = 16).
+        phantom.update_magnetization(Mxy[:, rw.m_storage_idx])
+      # Elapsed time since the snapshot, not absolute time from the start of the
+      # file. mri_signal uses t for exp(-t/T2) and exp(i*phi*t), both of which
+      # continue from the instant the magnetization was captured; feeding it
+      # absolute times applies a spurious exp(-t_anchor/T2) to the whole window.
+      points, t = _reshape_signal_inputs(
+          rw.kspace[:, 0], rw.kspace[:, 1], rw.kspace[:, 2],
+          rw.times - rw.t_anchor, None)
+      # `t` is elapsed-since-snapshot, which is what the relaxation and
+      # off-resonance factors need -- but the POD weights need ABSOLUTE
+      # sequence time, because that is the frame the motion is defined in.
+      # `get_weights` reconciles the two by adding the trajectory's own
+      # `timeshift`, so point it at this window's anchor. Without this every
+      # window sampled the motion from cycle phase 0 and the readout
+      # deformation disagreed with the one the solver used at the same
+      # instant. Restored afterwards so the caller's object comes back
+      # unchanged.
+      # The phantom's orientation, or `Bc` is evaluated in the imaging frame
+      # and treats the SLICE NORMAL as B0. Read off the phantom for the same
+      # reason `BlochSolver` does -- passing it is the step that gets
+      # forgotten, and the two halves must agree or the readout contradicts
+      # the evolution that produced its snapshot.
+      maxwell = (maxwell_phase_coefficients(
+                     rw.maxwell, scanner,
+                     rotation=getattr(phantom, '_orientation', None))
+                 if concomitant_readout and rw.maxwell is not None else None)
+      # COMPOSED, not overwritten. `get_weights` folds `timeshift` in to reach
+      # the cardiac phase, so a caller who set their own shift must keep it;
+      # overwriting it discarded that for every window. Same defect, and the
+      # same fix, as the block-start shift in `BlochSolver.solve`.
+      shift = getattr(pod, 'timeshift', None) if pod is not None else None
+      if shift is not None:
+        pod.update_timeshift(float(shift) + float(rw.t_anchor))
+      try:
+        if bins is None:
+          signal = phantom.mri_signal(list(points), t, pod, maxwell=maxwell)
+        else:
+          # Bin-by-bin readout. Collapsing the sub-ensemble at the snapshot and
+          # letting the assembler replay a single exp(-t/T2) from there cannot
+          # reproduce a readout: the snapshot sits at the coherence ANCHOR, where
+          # the ensemble is maximally dephased, and nothing downstream can bring
+          # it back. Measured on cpmg_v15 at T2' = 8 ms, every echo came out
+          # scaled by exp(-0.5*(tau/T2')^2) = 0.82.
+          #
+          # Each sub-spin is instead given its own off-resonance -- the bin
+          # offsets are in the same rad/ms frame as phi_dB0, so they simply add --
+          # and the signals are weight-summed. Exact, and it costs n_bins passes
+          # over the signal path per window.
+          bin_Mxy, offsets, weights, T2_read, phi_read = readout_bins
+          ensemble = bin_Mxy[:, :, rw.m_storage_idx]
+          if dual:
+            ensemble = phantom.redistribute_nodal(
+                np.ascontiguousarray(ensemble), 'bloch', 'signal')
+          signal = None
+          with phantom._using('signal') if dual else _no_layout_change():
+            for k, w in enumerate(weights):
+              phantom.set_static_fields(T2_read, phi_read + offsets[:, k])
+              phantom.update_magnetization(ensemble[:, k])
+              contribution = w * phantom.mri_signal(list(points), t, pod,
+                                                    maxwell=maxwell)
+              signal = contribution if signal is None else signal + contribution
+      finally:
+        if shift is not None:
+          pod.update_timeshift(shift)
+        if bins is not None:
+          phantom.set_static_fields(bins[3], bins[4])
+          # The bin loop above left the phantom holding the LAST sub-spin --
+          # a tail bin of the quadrature, weight ~1e-16 -- so anything the
+          # caller evaluates afterwards reads that instead of the collapsed
+          # magnetization. Measured on cpmg_v15 at T2' = 8 ms, K = 32: S(0)
+          # came back 1.133x too large and with a spurious real part where
+          # the correct value is purely imaginary.
+          phantom.update_magnetization(Mxy[:, rw.m_storage_idx])
+      # The receiver's frequency/phase offsets and any per-sample phase shape.
+      signal = rw.demodulate(signal)
+      kspace.append(gather_data(signal) if gather else signal)
+      times.append(rw.times)
+  finally:
+    if sensitivity_set:
+      # Restored as the ALREADY-REDISTRIBUTED array, not by re-running the
+      # setter: `previous_sensitivity` was read out of the signal layout, and
+      # feeding it back through set_receive_sensitivity would redistribute it a
+      # second time and pair it with the wrong nodes.
+      phantom._receive_sensitivity = previous_sensitivity
 
   return PulseqSimulation(kspace=kspace, times=times, Mxy=Mxy, Mz=Mz, imp=imp)
 

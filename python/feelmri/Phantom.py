@@ -1061,7 +1061,28 @@ class FEMPhantom:
             3×3 machine-to-patient-space rotation matrix.
         LOC : pint.Quantity
             3-element location (translation) vector with physical units.
+
+        Notes
+        -----
+        **The matrix is remembered on the phantom** as ``_orientation``,
+        because after this call the stored coordinates are IMAGING-frame and
+        anything evaluating a field that is not frame-invariant needs to know
+        it. The linear encoding `x . G` is a dot product and does not care;
+        the concomitant term does -- `Bc = (Bx^2 + By^2)/(2 B0)` singles out
+        B0's axis, so evaluating it on imaging-frame coordinates treats the
+        SLICE NORMAL as B0. `BlochSolver` reads this attribute so that cannot
+        be forgotten; measured on a 20 deg tilt, forgetting it is a 31.6%
+        error on the concomitant phase.
         """
+        # Kept in float64 whatever the mesh dtype, and taken BEFORE the cast
+        # below: it is used to rotate gradients, so its ORTHOGONALITY is what
+        # matters, not its agreement with the stored nodes. Rounded to float32
+        # first, `R^T R` departs from the identity by 2.7e-8, which on a
+        # readout carrying several thousand radians of `G . x` shows up as
+        # 2.4e-4 rad of spurious LINEAR phase -- measured, and four orders
+        # above the concomitant agreement it was hiding.
+        self._orientation = np.array(MPS_ori, dtype=np.float64)
+
         # Get orientation
         MPS_ori = MPS_ori.astype(self.dtype)
         LOC = LOC.astype(self.dtype)
@@ -1080,6 +1101,9 @@ class FEMPhantom:
         LOC : pint.Quantity
             3-element location vector previously passed to :meth:`orient`.
         """
+        # Back in the phantom's own frame, so nothing downstream should rotate.
+        self._orientation = None
+
         # Get orientation
         MPS_ori = MPS_ori.astype(self.dtype)
         LOC = LOC.astype(self.dtype)

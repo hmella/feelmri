@@ -850,6 +850,104 @@ def test_concomitant_phase_can_only_ever_retard(wide_phantom):
       f'{phase.max():.3e}, which no sum of squares can do.')
 
 
+def _phantom_from_points(points, cells, tag):
+  """A fresh phantom on a given node cloud, so a test may `orient` it without
+  mutating a module-scoped fixture."""
+  import meshio as _meshio
+  import tempfile
+  path = Path(tempfile.mkdtemp()) / f'{tag}.vtu'
+  _meshio.write(str(path), _meshio.Mesh(np.asarray(points, dtype=np.float64),
+                                        [('tetra', np.asarray(cells))]))
+  return FEMPhantom(path=str(path))
+
+
+def _rotation_zyx(az, ay, ax):
+  """An ordinary right-handed rotation, built from the three axis rotations so
+  the test does not depend on any library helper."""
+  ca, sa = np.cos(az), np.sin(az)
+  cb, sb = np.cos(ay), np.sin(ay)
+  cc, sc = np.cos(ax), np.sin(ax)
+  Rz = np.array([[ca, -sa, 0.0], [sa, ca, 0.0], [0.0, 0.0, 1.0]])
+  Ry = np.array([[cb, 0.0, sb], [0.0, 1.0, 0.0], [-sb, 0.0, cb]])
+  Rx = np.array([[1.0, 0.0, 0.0], [0.0, cc, -sc], [0.0, sc, cc]])
+  return Rz @ Ry @ Rx
+
+
+def test_the_solver_evaluates_bc_in_the_physical_frame(wide_phantom):
+  """ONE physical experiment, described twice: once in the frame where B0 is z,
+  once in an oblique imaging frame. The concomitant phase must be the same.
+
+  `Bc = (Bx^2 + By^2)/(2 B0)` singles out B0's axis, so unlike the linear term
+  `x . G` it is NOT frame-invariant. `FEMPhantom.orient` leaves the nodes in the
+  imaging frame and the sequence carries logical gradients, so before this the
+  kernel evaluated `Bc` as though the SLICE NORMAL were B0.
+
+  Measured at a 20 deg tilt on this node cloud: 1.559 rad of disagreement,
+  31.6% of the phase. The guard below is what makes that a finding rather than
+  a tolerance -- a shallow tilt would make the two frames agree for free, and
+  the test would then pass on the unfixed code.
+
+  float64 throughout: at float32 the solver's own noise is ~1e-2 rad, an order
+  above nothing this test is trying to resolve.
+  """
+  dur_ms = 6.0
+  scanner = Scanner()
+  B0_mT = scanner.field_strength.m_as('mT')
+  gamma = scanner.gamma.m_as('rad/ms/mT')
+
+  R = _rotation_zyx(np.deg2rad(20.0), np.deg2rad(-14.0), np.deg2rad(9.0))
+  P = wide_phantom.local_nodes.astype(np.float64)      # physical coordinates
+  cells = np.asarray(wide_phantom.local_elements)
+  G_phys = np.array([21.0, -13.0, 25.0])
+
+  # The same gradient and the same spins, written in the imaging frame.
+  # `orient` applies `nodes @ R`, i.e. `R^T P` in column form, and the scanner
+  # plays `G_physical = R G_logical`.
+  G_img = R.T @ G_phys
+  X = P @ R
+
+  # 1. Physical description: no orientation, no rotation anywhere.
+  ph_phys = _phantom_from_points(P, cells, 'frame_phys')
+  blk = _gradient_block(tuple(G_phys), dur_ms)
+  phi_phys = np.angle(_precess(ph_phys, blk, concomitant_fields=True)
+                      / _precess(ph_phys, blk, concomitant_fields=False))
+
+  # 2. Imaging description of the SAME experiment.
+  ph_img = _phantom_from_points(P, cells, 'frame_img')
+  ph_img.orient(R, Quantity(np.zeros(3), 'm'))
+  assert np.allclose(ph_img.local_nodes, X, atol=1e-9)
+  blk_img = _gradient_block(tuple(G_img), dur_ms)
+  phi_img = np.angle(_precess(ph_img, blk_img, concomitant_fields=True)
+                     / _precess(ph_img, blk_img, concomitant_fields=False))
+
+  # The linear term is a dot product and must be untouched by any of this.
+  # The floor here is the phantom's float32 NODE STORAGE, not the solver:
+  # `orient` rotates the stored coordinates, and the round trip leaves 7.6e-9 m,
+  # which at 25 mT/m over 6 ms is 3e-4 rad. Nothing about the frame fix can
+  # improve that, and the concomitant comparison below is unaffected because
+  # `Bc` varies far more slowly with position than `G . x` does.
+  lin_phys = np.angle(_precess(ph_phys, blk, concomitant_fields=False))
+  lin_img = np.angle(_precess(ph_img, blk_img, concomitant_fields=False))
+  assert np.abs(np.exp(1j * lin_phys) - np.exp(1j * lin_img)).max() < 1e-3, (
+    'the rotation moved the LINEAR encoding, which is frame-invariant')
+
+  # VACUITY GUARD. The frame-naive answer -- `Bc` evaluated on the imaging
+  # coordinates with the logical gradient, which is what the solver did before
+  # -- has to be far enough away that agreeing is evidence.
+  naive = -gamma * _concomitant_field_mT(X, tuple(G_img), B0_mT) * dur_ms
+  truth = -gamma * _concomitant_field_mT(P, tuple(G_phys), B0_mT) * dur_ms
+  gap = float(np.abs(naive - truth).max())
+  assert gap > 0.1, (
+    f'this geometry cannot discriminate the frames: the naive prediction is '
+    f'only {gap:.3e} rad away, so the test would pass unfixed')
+
+  worst = float(np.abs(np.exp(1j * phi_phys) - np.exp(1j * phi_img)).max())
+  assert worst < 1e-5, (
+    f'the concomitant phase depends on the frame the experiment is described '
+    f'in: {worst:.3e} between the physical and imaging descriptions, against '
+    f'a {gap:.3f} rad frame-naive gap')
+
+
 def _shaped_rf_block(scale, dur_ms=1.0, n=64, dt_ms=0.02):
   """A COMPLEX, time-varying pulse. Needed for the order-4 commutator to be
   non-zero: a real hard pulse on resonance makes both correction terms vanish

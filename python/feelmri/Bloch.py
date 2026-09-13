@@ -1056,6 +1056,7 @@ class BlochSolver:
                  initial_Mz: np.ndarray | float = None,
                  perfect_spoiling: bool | None = None,
                  concomitant_fields: bool = False,
+                 orientation: np.ndarray | None = None,
                  isochromat_K: int = 25,
                  isochromat_distribution: str = 'sobol',
                  isochromat_seed: int | None = 0,
@@ -1243,6 +1244,42 @@ class BlochSolver:
         self.concomitant_fields = bool(concomitant_fields)
         self._B0_mT = (float(scanner.field_strength.m_as('mT'))
                        if self.concomitant_fields else 0.0)
+
+        # WHICH FRAME THE STORED COORDINATES ARE IN. `FEMPhantom.orient` leaves
+        # nodes in the IMAGING frame, and `Bc = (Bx^2 + By^2)/(2 B0)` singles
+        # out B0's axis -- so evaluated on those coordinates it treats the
+        # SLICE NORMAL as B0. The linear term `x . G` is a dot product and is
+        # frame-invariant, which is exactly why this went unnoticed: everything
+        # else in the kernel gives the same answer either way.
+        #
+        # Picked up from the phantom by default rather than demanded from the
+        # caller, because forgetting it is how the defect arose: measured on a
+        # 20 deg tilt, the same physical experiment described in the two frames
+        # disagreed by 1.559 rad, 31.6% of the phase.
+        if orientation is None:
+            orientation = getattr(phantom, '_orientation', None)
+        # The message is COMPUTED behind the predicate; the collective is
+        # called outside it. This repo has hit the other arrangement four
+        # times, most recently in a guard written to fix it.
+        problem = ''
+        R = None
+        if orientation is not None:
+            R = np.asarray(orientation, dtype=np.float64)
+            if R.shape != (3, 3):
+                problem = (f"BlochSolver: orientation must be a 3x3 rotation, "
+                           f"got shape {R.shape}.")
+            elif not np.allclose(R @ R.T, np.eye(3), atol=1e-5):
+                # Checked here and not in `maxwell_phase_coefficients`, where
+                # the congruence R^T M R is algebraically fine for any
+                # invertible R: it is the PHYSICS that needs a rotation, since
+                # `G_physical = R G_logical` assumes lengths are preserved.
+                problem = (f"BlochSolver: orientation is not orthogonal; "
+                           f"R @ R.T departs from the identity by "
+                           f"{np.abs(R @ R.T - np.eye(3)).max():.2e}. A frame "
+                           f"that scales or skews does not describe a rotation "
+                           f"of the gradient axes.")
+        collective_raise(problem)
+        self._orientation = R
         if self.concomitant_fields and not self._B0_mT > 0.0:
             raise ValueError(
                 f"BlochSolver: concomitant_fields=True needs a positive "
@@ -1387,6 +1424,13 @@ class BlochSolver:
                 return mat
 
         modes = self.pod_trajectory.get_modes(nb_nodes)
+        if self.concomitant_fields and self._orientation is not None:
+            # Displacements are vectors and rotate with the positions they are
+            # added to, or the deformed mesh would be a mixture of the two
+            # frames. Done before the (N, 3, M) -> (3N, M) flatten, while the
+            # component axis is still addressable.
+            modes = np.einsum('ij,njm->nim', self._orientation,
+                              np.asarray(modes, dtype=np.float64))
         mat = np.asfortranarray(
             modes.reshape(3 * nb_nodes, -1), dtype=self._np_real
         )
@@ -1599,8 +1643,26 @@ class BlochSolver:
         # Current machine time
         t0 = time.perf_counter()
 
-        # Phantom position
-        x = np.ascontiguousarray(self.phantom.local_nodes, dtype=self._np_real)
+        # Phantom position.
+        #
+        # ROTATED INTO THE PHYSICAL FRAME when the phantom is oriented and the
+        # concomitant term is on. `Bc = (Bx^2 + By^2)/(2 B0)` singles out B0's
+        # axis, so it has to be evaluated on coordinates whose z IS B0; the
+        # linear term `x . G` is a dot product and does not notice, which is
+        # why nothing else moves. Gradients and POD modes are rotated with it
+        # (below and in `_trajectory_modes`), so `G . x` is preserved exactly
+        # and a caller who never asks for the term gets a bit-identical path.
+        #
+        # This is a ROTATION only. `orient` also SUBTRACTS a slice location,
+        # and `Bc` is quadratic about the magnet isocentre rather than about
+        # the slab, so an off-isocentre acquisition carries a further term this
+        # does not model -- the same limitation the readout half has.
+        R_phys = self._orientation if self.concomitant_fields else None
+        x = self.phantom.local_nodes
+        if R_phys is not None:
+            # Rows are positions, so `R x` is `x @ R.T`.
+            x = np.asarray(x, dtype=np.float64) @ R_phys.T
+        x = np.ascontiguousarray(x, dtype=self._np_real)
 
         # Blocks to be solved
         self._solve_calls = getattr(self, '_solve_calls', 0) + 1
@@ -1816,6 +1878,12 @@ class BlochSolver:
             gradients[:, 0] = G[0]
             gradients[:, 1] = G[1]
             gradients[:, 2] = G[2]
+            if R_phys is not None:
+                # `G_physical = R G_logical`, the same rotation the scanner
+                # applies to the logical axes.
+                gradients = np.ascontiguousarray(
+                    gradients.astype(np.float64) @ R_phys.T,
+                    dtype=self._np_real)
 
             # Indicator array
             regime_idx = np.abs(rf_pulses) != 0.0
