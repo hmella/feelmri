@@ -42,6 +42,7 @@ import pytest
 from pint import Quantity
 
 from feelmri import (
+  B0Field,
   BlochSolver,
   FEMPhantom,
   Scanner,
@@ -2134,3 +2135,151 @@ def test_a_partial_solve_is_quiet_on_a_natively_built_sequence(minimal_phantom):
     seq.add_block(make_empty_block(1.0))
     solver.solve(start=-2)
   assert [w for w in caught if 'm_storage_idx' in str(w.message)]
+
+
+def _constant_displacement_pod(n_nodes, shift, n_frames=4, dur_ms=5.0):
+  """A POD whose every mode is the same rigid translation, so the deformed
+  mesh is exactly the reference mesh moved by `shift`."""
+  from feelmri.Motion import POD
+  data = np.zeros((n_nodes, 3, n_frames), dtype=np.float32)
+  for axis in range(3):
+    data[:, axis, :] = shift[axis]
+  return POD(data=data, times=np.linspace(0.0, dur_ms, n_frames), n_modes=1)
+
+
+def test_a_lab_frame_field_moves_under_the_spins_and_delta_b_does_not():
+  """The whole point of the channel, as a pair. Two fields that are numerically
+  identical while the phantom is at rest must behave oppositely once it moves:
+
+    lab-frame  (`b0_field`)  -- the spin samples the field where it now IS,
+                                so a rigid shift `s` changes every node's
+                                phase by exactly `-gamma (g.s) T`
+    tissue-bound (`delta_B`) -- the value is frozen to the node, so the same
+                                shift changes nothing at all
+
+  Both arms are required. The equality alone passes for a solver that ignores
+  the field; the null alone passes for one that ignores the motion.
+  """
+  import tempfile
+  from pathlib import Path
+  points = np.array([[0.11, -0.03, 0.07],
+                     [-0.05, 0.12, 0.02],
+                     [0.04, 0.06, -0.10],
+                     [-0.09, -0.08, 0.05],
+                     [0.02, -0.11, -0.06]])
+  cells = np.array([[0, 1, 2, 3], [1, 2, 4, 3]])
+  shift = np.array([0.03, -0.02, 0.025])
+  g = np.array([0.011, -0.004, 0.0075])          # mT/m
+  dur_ms = 5.0
+  gamma = Scanner().gamma.m_as('rad/ms/mT')
+  pod = _constant_displacement_pod(points.shape[0], shift, dur_ms=dur_ms)
+
+  # Both descriptions must be built from the SAME node array: the phantom
+  # stores float32 coordinates, so a per-node map computed from the exact
+  # points would differ from the lab-frame field by 5e-08 for that reason
+  # alone and the comparison below would be measuring the mesh dtype.
+  nodes = np.asarray(_phantom_from_points(points, cells, 'b0_ref').local_nodes,
+                     dtype=np.float64)
+
+  def solve(tag, moving, **kwargs):
+    phantom = _phantom_from_points(points, cells, tag)
+    seq = make_single_block_sequence(make_empty_block(dur_ms, dt_ms=0.05))
+    solver = BlochSolver(
+      seq, phantom, T1=Quantity(1e9, 'ms'), T2=Quantity(1e9, 'ms'),
+      initial_Mxy=1.0 + 0.0j, initial_Mz=0.0, perfect_spoiling=False,
+      dtype='float64', method='magnus2',
+      pod_trajectory=pod if moving else None, **kwargs)
+    return solver.solve()[0][:, 0]
+
+  field = B0Field(gradient=Quantity(g, 'mT/m'))
+  lab_still = solve('lab_still', False, b0_field=field)
+  lab_moved = solve('lab_moved', True, b0_field=field)
+
+  per_node = (nodes @ g).reshape(-1, 1)
+  tis_still = solve('tis_still', False, delta_B=per_node)
+  tis_moved = solve('tis_moved', True, delta_B=per_node)
+
+  # At rest the two descriptions are the same field.
+  assert np.abs(lab_still - tis_still).max() < 1e-12, (
+    'the two channels disagree even before anything moves')
+
+  expected = -gamma * float(g @ shift) * dur_ms
+  assert abs(expected) > 0.5, 'this geometry produces no phase to discriminate'
+
+  moved = np.angle(lab_moved / lab_still)
+  worst = float(np.abs(np.exp(1j * moved) - np.exp(1j * expected)).max())
+  assert worst < 1e-6, (
+    f'the lab-frame field did not follow the spins: {worst:.3e} against a '
+    f'predicted {expected:.4f} rad')
+
+  frozen = float(np.abs(tis_moved - tis_still).max())
+  assert frozen < 1e-12, (
+    f'the tissue-bound field moved with the mesh by {frozen:.3e}; delta_B is '
+    f'a property of the material point and must not')
+
+
+def test_bc_is_centred_on_isocentre_and_not_on_the_slice(wide_phantom):
+  """`orient` moves the slice to the origin; `Bc` must stay on isocentre.
+
+  The node coordinates a solver sees are measured from the slice centre, which
+  is what makes the linear encoding right. `Bc` is not translation invariant --
+  it is a quadratic form about ISOCENTRE -- so evaluating it on those same
+  coordinates silently images an off-isocentre slab as though it sat in the
+  middle of the bore.
+
+  Asserted against the closed form at the PHYSICAL position, which needs no
+  second solve to compare against. The `assert` on the naive value is what
+  makes this a finding rather than a tolerance: at this offset the two differ
+  by more than a radian, so a version that ignored `LOC` cannot pass by being
+  nearly right.
+  """
+  dur_ms = 6.0
+  scanner = Scanner()
+  B0_mT = scanner.field_strength.m_as('mT')
+  gamma = scanner.gamma.m_as('rad/ms/mT')
+
+  P = wide_phantom.local_nodes.astype(np.float64)
+  cells = np.asarray(wide_phantom.local_elements)
+  G = np.array([21.0, -13.0, 25.0])
+  LOC = np.array([0.031, -0.047, 0.062])
+
+  # No rotation, so the imaging frame differs from the physical one by the
+  # translation alone and the comparison isolates it.
+  phantom = _phantom_from_points(P, cells, 'bc_loc')
+  phantom.orient(np.eye(3), Quantity(LOC, 'm'))
+  x_img = np.asarray(phantom.local_nodes, dtype=np.float64)
+
+  blk = _gradient_block(tuple(G), dur_ms)
+  phi = np.angle(_precess(phantom, blk, concomitant_fields=True)
+                 / _precess(phantom, blk, concomitant_fields=False))
+
+  def bc(pos):
+    gx, gy, gz = G
+    x, y, z = pos[:, 0], pos[:, 1], pos[:, 2]
+    return ((gx * gx + gy * gy) * z * z + 0.25 * gz * gz * (x * x + y * y)
+            - gx * gz * x * z - gy * gz * y * z) / (2.0 * B0_mT)
+
+  right = -gamma * bc(x_img + LOC) * dur_ms
+  naive = -gamma * bc(x_img) * dur_ms
+
+  gap = float(np.abs(np.exp(1j * phi) - np.exp(1j * right)).max())
+  assert gap < 1e-3, (
+      f'the solver disagrees with Bc at the physical position by {gap:.3e}')
+
+  blind = float(np.abs(right - naive).max())
+  assert blind > 1.0, (
+      f'this offset only moves the phase by {blind:.4f} rad, so the test cannot '
+      f'tell an isocentre-centred Bc from a slice-centred one')
+
+  # The re-centring has THREE mirrors, and the two Magnus seeds recompute the
+  # field in Python. Under a constant gradient the trapezoidal rule is exact, so
+  # `magnus2` must reproduce `cayley_klein`, which never reads a seed -- and a
+  # coarse raster is what makes the resulting O(dt) error visible: it reads
+  # 1.3e-01 with the plain seed left on the slice-centred position.
+  coarse = _gradient_block(tuple(G), dur_ms, dt_ms=0.5)
+  m2 = _precess(phantom, coarse, concomitant_fields=True)
+  ck = _precess(phantom, coarse, concomitant_fields=True, method='cayley_klein')
+  seed_gap = float(np.abs(m2 - ck).max())
+  assert seed_gap < 1e-6, (
+      f'the Magnus seed disagrees with the kernel by {seed_gap:.3e}, so it is '
+      f'not re-centring Bc the same way')

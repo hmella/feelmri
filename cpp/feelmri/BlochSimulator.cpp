@@ -69,7 +69,9 @@ MagnetizationState<T> solve_mri_impl(
   std::complex<T> rf_old_init,
   bool store_history,
   const T &B0,
-  Eigen::Ref<const Matrix<std::complex<T>, Dynamic, 1>> b1_map
+  Eigen::Ref<const Matrix<std::complex<T>, Dynamic, 1>> b1_map,
+  Eigen::Ref<const Matrix<T, Dynamic, 3>> static_lin,
+  Eigen::Ref<const Matrix<T, Dynamic, 1>> conc_offset
 ){
   // The caller's rf!=0 mask is redundant: the kernel derives the rf-free
   // condition from rf_all itself, so a stale or wrong mask cannot corrupt
@@ -96,6 +98,25 @@ MagnetizationState<T> solve_mri_impl(
   // the off switch, not a map of ones: a map of ones would still cost a
   // complex load per node per time step, which is ~20% more traffic through
   // the node loop's working set.
+  // Lab-frame static field, linear part. It is added to the hoisted gradient
+  // scalars for the LINEAR term only: the concomitant field comes from the
+  // gradient coil, so its quadratic form keeps the bare G. Rows are 1 for a
+  // static field or n_time for one that varies; 0 is the off switch.
+  const bool has_static_lin = (static_lin.rows() != 0);
+  const bool static_lin_const = (static_lin.rows() == 1);
+  if (has_static_lin && !static_lin_const && static_lin.rows() != n_time) {
+    throw std::invalid_argument(
+        "solve_mri: static_lin must have 0, 1 or n_time rows");
+  }
+  // Spatially uniform part of the concomitant field, which is what re-centring
+  // Bc about isocentre produces. Only read inside the concomitant branch.
+  const bool has_conc_offset = (conc_offset.size() != 0);
+  const bool conc_offset_const = (conc_offset.size() == 1);
+  if (has_conc_offset && !conc_offset_const && conc_offset.size() != n_time) {
+    throw std::invalid_argument(
+        "solve_mri: conc_offset must have 0, 1 or n_time entries");
+  }
+
   const bool has_b1 = (b1_map.size() != 0);
   if (has_b1 && b1_map.size() != n_pos) {
     throw std::invalid_argument(
@@ -208,6 +229,18 @@ MagnetizationState<T> solve_mri_impl(
     const T Gy = G_all(i + 1, 1);
     const T Gz = G_all(i + 1, 2);
 
+    // The linear term sees the gradient plus the lab-frame static field; the
+    // concomitant form below keeps the bare G. Hoisted here, so the node loop
+    // does the same arithmetic either way and costs nothing when the field is
+    // absent. The ternary rather than `Gx + 0` so the off path carries Gx's
+    // exact bits, signed zero included.
+    const Eigen::Index si = static_lin_const ? 0 : (i + 1);
+    const T Gx_lin = has_static_lin ? Gx + static_lin(si, 0) : Gx;
+    const T Gy_lin = has_static_lin ? Gy + static_lin(si, 1) : Gy;
+    const T Gz_lin = has_static_lin ? Gz + static_lin(si, 2) : Gz;
+    const T Bc_off = has_conc_offset
+        ? conc_offset(conc_offset_const ? 0 : (i + 1)) : T(0);
+
     // Per-order step prefactors (constant across nodes within one step).
     const T kappa    = -T(0.5) * gamma * dt_i;          // Order = 0
     const T m2_scale = -T(0.5) * gamma * dt_i;          // Order >= 2
@@ -260,12 +293,13 @@ MagnetizationState<T> solve_mri_impl(
         // being bit-identical to the build that predates this term.
         T Bz_new;
         if constexpr (Conc) {
-          Bz_new = px*Gx + py*Gy + pz*Gz + delta_B(p)
+          Bz_new = px*Gx_lin + py*Gy_lin + pz*Gz_lin + delta_B(p) + Bc_off
                  + ((Gx*Gx + Gy*Gy) * pz*pz
                     + T(0.25) * Gz*Gz * (px*px + py*py)
                     - Gx*Gz*px*pz - Gy*Gz*py*pz) * inv_2B0;
         } else {
-          Bz_new = curr(p, 0)*Gx + curr(p, 1)*Gy + curr(p, 2)*Gz + delta_B(p);
+          Bz_new = curr(p, 0)*Gx_lin + curr(p, 1)*Gy_lin + curr(p, 2)*Gz_lin
+                 + delta_B(p);
         }
 
         C alpha_p, beta_p;
@@ -444,7 +478,9 @@ MagnetizationState<T> solve_mri_dispatch(
   std::complex<T> rf_old_init,
   bool store_history,
   const T &B0,
-  Eigen::Ref<const Matrix<std::complex<T>, Dynamic, 1>> b1_map
+  Eigen::Ref<const Matrix<std::complex<T>, Dynamic, 1>> b1_map,
+  Eigen::Ref<const Matrix<T, Dynamic, 3>> static_lin,
+  Eigen::Ref<const Matrix<T, Dynamic, 1>> conc_offset
 ){
   // Constant T1/T2 across nodes is the common case (phantoms built from scalar
   // relaxation times); it lets the relaxation exponentials stay in registers.
@@ -457,7 +493,8 @@ MagnetizationState<T> solve_mri_dispatch(
     return solve_mri_impl<T, ORDER, UNIFORM>(                                  \
         r0, T1, T2, delta_B, M0, gamma, rf_all, G_all, dt, regime_idx,         \
         Mxy_initial, Mz_initial, modes, weights,                               \
-        has_traj, Bz_old_init, rf_old_init, store_history, B0, b1_map)
+        has_traj, Bz_old_init, rf_old_init, store_history, B0, b1_map,         \
+        static_lin, conc_offset)
 
   switch (order) {
     case 0:
@@ -502,13 +539,14 @@ PYBIND11_MODULE(BlochSimulator, m) {
        CVec_f32 Mxy_initial, Vec_f32 Mz_initial,
        Modes_f32 modes, MatDyn_f32 weights, bool has_traj,
        int order, Vec_f32 Bz_old_init, std::complex<f32> rf_old_init,
-       bool store_history, const f32 &B0, CVec_f32 b1_map) {
+       bool store_history, const f32 &B0, CVec_f32 b1_map,
+       Mat3_f32 static_lin, Vec_f32 conc_offset) {
       return solve_mri_dispatch<f32>(order, r0, T1, T2, delta_B, M0, gamma,
                                      rf_all, G_all, dt, regime_idx,
                                      Mxy_initial, Mz_initial,
                                      modes, weights, has_traj,
                                      Bz_old_init, rf_old_init, store_history, B0,
-                                     b1_map);
+                                     b1_map, static_lin, conc_offset);
     },
     py::arg("r0"), py::arg("T1"), py::arg("T2"), py::arg("delta_B"),
     py::arg("M0"), py::arg("gamma"), py::arg("rf_all"), py::arg("G_all"),
@@ -519,7 +557,10 @@ PYBIND11_MODULE(BlochSimulator, m) {
     py::arg("store_history") = false,
     py::arg("B0") = 0.0,
     // Empty by default: an absent map, not a map of ones.
-    py::arg("b1_map") = Matrix<std::complex<f32>, Dynamic, 1>());
+    py::arg("b1_map") = Matrix<std::complex<f32>, Dynamic, 1>(),
+    // Empty by default: no lab-frame static field.
+    py::arg("static_lin") = Matrix<f32, Dynamic, 3>(),
+    py::arg("conc_offset") = Matrix<f32, Dynamic, 1>());
 
   m.def("solve_mri_f64",
     [](R0_f64 r0, Vec_f64 T1, Vec_f64 T2, Vec_f64 delta_B,
@@ -528,13 +569,14 @@ PYBIND11_MODULE(BlochSimulator, m) {
        CVec_f64 Mxy_initial, Vec_f64 Mz_initial,
        Modes_f64 modes, MatDyn_f64 weights, bool has_traj,
        int order, Vec_f64 Bz_old_init, std::complex<f64> rf_old_init,
-       bool store_history, const f64 &B0, CVec_f64 b1_map) {
+       bool store_history, const f64 &B0, CVec_f64 b1_map,
+       Mat3_f64 static_lin, Vec_f64 conc_offset) {
       return solve_mri_dispatch<f64>(order, r0, T1, T2, delta_B, M0, gamma,
                                      rf_all, G_all, dt, regime_idx,
                                      Mxy_initial, Mz_initial,
                                      modes, weights, has_traj,
                                      Bz_old_init, rf_old_init, store_history, B0,
-                                     b1_map);
+                                     b1_map, static_lin, conc_offset);
     },
     py::arg("r0"), py::arg("T1"), py::arg("T2"), py::arg("delta_B"),
     py::arg("M0"), py::arg("gamma"), py::arg("rf_all"), py::arg("G_all"),
@@ -545,5 +587,8 @@ PYBIND11_MODULE(BlochSimulator, m) {
     py::arg("store_history") = false,
     py::arg("B0") = 0.0,
     // Empty by default: an absent map, not a map of ones.
-    py::arg("b1_map") = Matrix<std::complex<f64>, Dynamic, 1>());
+    py::arg("b1_map") = Matrix<std::complex<f64>, Dynamic, 1>(),
+    // Empty by default: no lab-frame static field.
+    py::arg("static_lin") = Matrix<f64, Dynamic, 3>(),
+    py::arg("conc_offset") = Matrix<f64, Dynamic, 1>());
 }

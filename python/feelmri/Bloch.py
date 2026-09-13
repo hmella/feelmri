@@ -208,6 +208,38 @@ def _concomitant_mT(pos, G, B0_mT):
             - gx * gz * x * z - gy * gz * y * z) / (2.0 * B0_mT)
 
 
+def _concomitant_recentre(G, L, B0_mT):
+    """Terms that re-centre :func:`_concomitant_mT` about isocentre.
+
+    ``orient`` leaves node coordinates measured from the SLICE centre, while
+    ``Bc`` is centred on isocentre. Writing ``Bc(x) = x^T M x`` and expanding
+    about the offset ``L``,
+
+        (x+L)^T M (x+L) = x^T M x  +  2 (M L) . x  +  L^T M L
+
+    the quadratic part is unchanged, ``2 M L`` is a per-time-step 3-vector that
+    rides the kernel's gradient hoist and ``L^T M L`` a per-time-step scalar.
+    So the node array never has to move -- which matters, because the LINEAR
+    encoding is deliberately measured from the slice centre and shifting the
+    positions would corrupt it.
+
+    ``G`` is ``(n, 3)`` in mT/m and ``L`` a 3-vector in m, both in the frame the
+    kernel evaluates positions in. Returns ``(lin, off)`` in mT/m and mT.
+    """
+    gx, gy, gz = G[:, 0], G[:, 1], G[:, 2]
+    lx, ly, lz = (float(L[0]), float(L[1]), float(L[2]))
+    scale = 1.0 / (2.0 * B0_mT)
+    lin = np.empty(G.shape, dtype=np.float64)
+    lin[:, 0] = 2.0 * scale * (0.25 * gz * gz * lx - 0.5 * gx * gz * lz)
+    lin[:, 1] = 2.0 * scale * (0.25 * gz * gz * ly - 0.5 * gy * gz * lz)
+    lin[:, 2] = 2.0 * scale * (-0.5 * gx * gz * lx - 0.5 * gy * gz * ly
+                               + (gx * gx + gy * gy) * lz)
+    off = scale * (0.25 * gz * gz * (lx * lx + ly * ly)
+                   + (gx * gx + gy * gy) * lz * lz
+                   - gx * gz * lx * lz - gy * gz * ly * lz)
+    return lin, off
+
+
 def _rf_waveform_mT(rf):
     """An RF pulse's B1 waveform in mT, on either construction path.
 
@@ -1034,6 +1066,7 @@ class BlochSolver:
                  perfect_spoiling: bool | None = None,
                  concomitant_fields: bool = False,
                  orientation: np.ndarray | None = None,
+                 b0_field=None,
                  isochromat_K: int = 25,
                  isochromat_distribution: str = 'sobol',
                  isochromat_seed: int | None = 0,
@@ -1229,6 +1262,17 @@ class BlochSolver:
                            f"of the gradient axes.")
         collective_raise(problem)
         self._orientation = R
+
+        # Scanner-fixed off-resonance, sampled at the spin's CURRENT position.
+        # `delta_B` is the tissue-bound channel and stays frozen to the node;
+        # this one does not move with the mesh.
+        from feelmri.MRObjects import B0Field as _B0Field
+        collective_raise(
+            f"BlochSolver: b0_field must be a B0Field or None, got "
+            f"{type(b0_field).__name__}."
+            if b0_field is not None and not isinstance(b0_field, _B0Field)
+            else '')
+        self.b0_field = b0_field
         if self.concomitant_fields and not self._B0_mT > 0.0:
             raise ValueError(
                 f"BlochSolver: concomitant_fields=True needs a positive "
@@ -1587,11 +1631,48 @@ class BlochSolver:
         # so x . G is unchanged. The slice location `orient` subtracts is not
         # restored, so an off-isocentre slab keeps a residual quadratic term.
         R_phys = self._orientation if self.concomitant_fields else None
+
+        # The lab-frame field in whatever coordinates `x` ends up in. Both the
+        # rotation and the slice offset are handled by the adapter: for a
+        # linear field the offset lands entirely in the constant, so the node
+        # array never has to move. Computed here rather than in __init__
+        # because `concomitant_fields` decides the frame and is a plain
+        # attribute.
+        b0_offset_mT, b0_gradient = 0.0, None
+        if self.b0_field is not None and not self.b0_field.is_zero:
+            b0_offset_mT, g_lab = self.b0_field.in_frame(
+                rotation=self._orientation,
+                location=getattr(self.phantom, '_location', None),
+                physical=R_phys is not None)
+            if np.any(g_lab):
+                b0_gradient = g_lab
+
+        # `orient` measures the nodes from the slice centre, so `Bc` -- which is
+        # centred on isocentre -- is evaluated at the wrong origin. Only when
+        # the term is live; the linear encoding is correct as it stands and must
+        # not move. `x` is then physical-frame but offset by -LOC, so this is
+        # the offset in the frame the kernel sees.
+        conc_location = None
+        if self.concomitant_fields and self._B0_mT > 0.0:
+            loc = getattr(self.phantom, '_location', None)
+            if loc is not None and np.any(loc):
+                conc_location = np.asarray(loc, dtype=np.float64).reshape(3)
+
         x = self.phantom.local_nodes
         if R_phys is not None:
             # Rows are positions, so R x is x @ R.T
             x = np.asarray(x, dtype=np.float64) @ R_phys.T
         x = np.ascontiguousarray(x, dtype=self._np_real)
+
+        # The kernel adds this to the hoisted gradient scalars for the LINEAR
+        # term only; the concomitant quadratic form keeps the bare G, because
+        # that field comes from the gradient coil and not from the shim. One
+        # row means constant over the whole solve.
+        # Empty means "absent"; the kernel branches on size, not on content.
+        conc_offset_none = np.empty(0, dtype=self._np_real)
+        static_lin = (np.empty((0, 3), dtype=self._np_real) if b0_gradient is None
+                      else np.ascontiguousarray(b0_gradient.reshape(1, 3),
+                                                dtype=self._np_real))
 
         # Blocks to be solved
         self._solve_calls = getattr(self, '_solve_calls', 0) + 1
@@ -1663,6 +1744,12 @@ class BlochSolver:
         T1 = np.ascontiguousarray(self.T1.m_as('ms'), dtype=self._np_real)
         T2 = np.ascontiguousarray(self.T2.m_as('ms'), dtype=self._np_real)
         delta_B = np.ascontiguousarray(self.delta_B, dtype=self._np_real)
+        if b0_offset_mT:
+            # Spatially uniform, so it needs no frame and no kernel channel.
+            # Added before the reshape and the sub-ensemble repeat below, so
+            # both the bins and the Magnus seed pick it up.
+            delta_B = np.ascontiguousarray(delta_B + self._np_real(b0_offset_mT),
+                                           dtype=self._np_real)
         # Empty means "no map"; the kernel branches on size, not on content.
         b1_map = (np.empty(0, dtype=self._np_cplx) if self.b1_map is None
                   else np.ascontiguousarray(self.b1_map, dtype=self._np_cplx))
@@ -1796,6 +1883,18 @@ class BlochSolver:
                     gradients.astype(np.float64) @ R_phys.T,
                     dtype=self._np_real)
 
+            # Re-centre Bc on isocentre. Both terms follow G(t), so unlike the
+            # shim they are per time step; the quadratic form the kernel keeps
+            # is unchanged.
+            step_lin, conc_offset = static_lin, conc_offset_none
+            if conc_location is not None:
+                lin, off = _concomitant_recentre(
+                    gradients.astype(np.float64), conc_location, self._B0_mT)
+                if b0_gradient is not None:
+                    lin = lin + b0_gradient
+                step_lin = np.ascontiguousarray(lin, dtype=self._np_real)
+                conc_offset = np.ascontiguousarray(off, dtype=self._np_real)
+
             # Indicator array
             regime_idx = np.abs(rf_pulses) != 0.0
 
@@ -1850,8 +1949,14 @@ class BlochSolver:
                 else:
                     c0 = x
                 G0 = gradients[0, :]
-                Bz_old = (c0 @ G0 + delta_B.reshape(-1)
-                          + _concomitant_mT(c0, G0, self._B0_mT)).astype(
+                # The seed must carry the shim, or magnus2 averages the block's
+                # opening field against one that does not and leaves an O(dt)
+                # error at every block boundary. _concomitant_mT still gets the
+                # bare G0.
+                G0_lin = G0 if b0_gradient is None else G0 + b0_gradient
+                c0_conc = c0 if conc_location is None else c0 + conc_location
+                Bz_old = (c0 @ G0_lin + delta_B.reshape(-1)
+                          + _concomitant_mT(c0_conc, G0, self._B0_mT)).astype(
                     self._np_real, copy=False)
                 rf_old = self._py_cplx(rf_pulses[0, 0])
 
@@ -1910,9 +2015,13 @@ class BlochSolver:
                         c0b = x_big + (modes_big @ weights[0]).reshape(-1, 3)
                     else:
                         c0b = x_big
+                    G0b = gradients[0, :]
+                    G0b_lin = G0b if b0_gradient is None else G0b + b0_gradient
+                    c0b_conc = (c0b if conc_location is None
+                                else c0b + conc_location)
                     Bz_old_big = np.ascontiguousarray(
-                        c0b @ gradients[0, :] + deltaB_big.reshape(-1)
-                        + _concomitant_mT(c0b, gradients[0, :], self._B0_mT),
+                        c0b @ G0b_lin + deltaB_big.reshape(-1)
+                        + _concomitant_mT(c0b_conc, G0b, self._B0_mT),
                         dtype=self._np_real)
                 else:
                     Bz_old_big = np.ascontiguousarray(
@@ -1931,7 +2040,7 @@ class BlochSolver:
                     rf_pulses, gradients, dt, regime_idx, Mxy_big, Mz_big,
                     modes_big, weights, has_traj,
                     self._order, Bz_old_big, rf_old,
-                    False, self._B0_mT, b1_big,
+                    False, self._B0_mT, b1_big, step_lin, conc_offset,
                 )
                 self.bloch_elapsed += time.perf_counter() - t_call
 
@@ -1963,7 +2072,7 @@ class BlochSolver:
                     initial_Mxy, initial_Mz,
                     modes, weights, has_traj,
                     self._order, Bz_old, rf_old,
-                    False, self._B0_mT, b1_map,
+                    False, self._B0_mT, b1_map, step_lin, conc_offset,
                 )
                 self.bloch_elapsed += time.perf_counter() - t_call
 
