@@ -53,17 +53,12 @@ class Scanner:
         self.gradient_strength = gradient_strength
         self.gradient_slew_rate = gradient_slew_rate
         self.b1_max = b1_max
-        # Transmit/receive dead times. A .seq file does not record them -- they
-        # are a property of the scanner, not of the sequence -- so they have to
-        # arrive here. They default to ZERO, which preserves the behaviour the
-        # adapter had before they existed; set them to a real spec and
-        # pypulseq's four dormant dead-time checks go live on import.
-        #
-        # Do not default them non-zero. The analytical fixtures are authored
-        # with all three at zero on purpose ("analytical expressions carry no
-        # hidden offsets", tests/data/generate_seq_fixtures.py), so a non-zero
-        # default reports 8 of the 15 bundled files as violating a spec they
-        # were never written against.
+        # Transmit/receive dead times. A .seq file does not record them -- they are
+        # a property of the scanner, not of the sequence -- so they arrive here.
+        # They default to zero, which preserves the adapter's behaviour before they
+        # existed; set them to a real spec and pypulseq's four dead-time checks go
+        # live on import. Do not default them non-zero: the analytical fixtures are
+        # authored with all three at zero on purpose.
         self.rf_dead_time = rf_dead_time
         self.rf_ringdown_time = rf_ringdown_time
         self.adc_dead_time = adc_dead_time
@@ -953,11 +948,9 @@ class RF:
         if self.phase_offset.m != 0.0 or self.frequency_offset.m != 0.0:
             # The frequency term is NEGATED: the solver precesses as
             # exp(-i*gamma*Bz*t), so an RF modulated as exp(+i*2*pi*df*t)
-            # resonates at z = -df/(gammabar*Gz) -- the MIRROR of the slice
+            # resonates at z = -df/(gammabar*Gz), the mirror of the slice
             # Pulseq means. Every writer sets freq_offset = gammabar*Gz*z to
-            # select the slice at +z (see examples/pulseq_write_epi_tagging.py),
-            # so a positive offset must select positive z. Measured before this:
-            # +3000 Hz selected -6.35 mm instead of +7.05 mm.
+            # select the slice at +z, so a positive offset selects positive z.
             B1 *= np.exp(1j*(self.phase_offset.m_as('rad')
                             - 2*np.pi*self.frequency_offset.m_as('kHz')*t_shift))
 
@@ -972,11 +965,9 @@ class RF:
         if self.phase_offset.m != 0.0 or self.frequency_offset.m != 0.0:
             # The frequency term is NEGATED: the solver precesses as
             # exp(-i*gamma*Bz*t), so an RF modulated as exp(+i*2*pi*df*t)
-            # resonates at z = -df/(gammabar*Gz) -- the MIRROR of the slice
+            # resonates at z = -df/(gammabar*Gz), the mirror of the slice
             # Pulseq means. Every writer sets freq_offset = gammabar*Gz*z to
-            # select the slice at +z (see examples/pulseq_write_epi_tagging.py),
-            # so a positive offset must select positive z. Measured before this:
-            # +3000 Hz selected -6.35 mm instead of +7.05 mm.
+            # select the slice at +z, so a positive offset selects positive z.
             B1 *= np.exp(1j*(self.phase_offset.m_as('rad')
                             - 2*np.pi*self.frequency_offset.m_as('kHz')*t_shift))
 
@@ -1007,34 +998,25 @@ class RF:
         self.timings = timings
         self.waveform = waveform
 
-        # Dimensionless arrays for interpolation
-        # float64/complex128, not float32/complex64. A Quantity keeps its own
-        # precision, so narrowing a bare ndarray made the SAME pulse depend on
-        # how it was spelled: scaling a waveform before construction differed
-        # from scaling it afterwards by 3e-8 relative, which is float32 epsilon
-        # and not a physical difference. Absolute time is the worse half --
-        # float32 ms quantises to 2.7e-5 ms at t = 1 s, above the raster
-        # tolerance it has to sit under. Same defect, and the same fix, as the
-        # analytic Gradient timings. PulseqAdapter passes Quantity for both, so
-        # imported pulses were never affected.
+        # Dimensionless arrays for interpolation, in float64/complex128 rather than
+        # float32/complex64. A Quantity keeps its own precision, so narrowing a
+        # bare ndarray would make the same pulse depend on how it was spelled.
+        # Absolute time is the worse half: float32 ms quantises to 2.7e-5 ms at
+        # t = 1 s, above the raster tolerance it has to sit under.
         tt = timings.m_as('ms') if isinstance(timings, Quantity) else np.array(timings, dtype=np.float64)
         ww = waveform.m_as('mT') if isinstance(waveform, Quantity) else np.array(waveform, dtype=np.complex128)
 
-        # Apply phase + frequency offsets, as the analytic generators do.
-        # Without this every IMPORTED pulse ignored them -- PulseqAdapter builds
-        # them all with shape='custom', so this is the only path they take --
-        # and a slice-select offset excited the slice at z = 0 whatever the
-        # offset asked for. Measured: 4800 Hz on an 18.788 mT/m lobe moved the
-        # slice 0.000 mm instead of 6.000 mm.
+        # Apply phase + frequency offsets, as the analytic generators do. This is
+        # the only path an imported pulse takes -- PulseqAdapter builds them all
+        # with shape='custom'.
         #
         # Two deliberate choices:
         #  * The ramp is referenced to the pulse's OWN START (tt[0]), matching
-        #    pypulseq (`rf.signal * exp(1j*(phase + 2*pi*freq*rf.t))`, with
-        #    rf.t starting at 0). The analytic path instead references the
-        #    pulse CENTRE via _t_shift, a standing 2*pi*f*half1 disagreement
-        #    with pypulseq that is left alone here rather than changed blind.
-        #  * It is applied to the INTERPOLATOR only, never to self.waveform,
-        #    so `waveform` keeps matching pypulseq's bare `rf.signal` and the
+        #    pypulseq (`rf.signal * exp(1j*(phase + 2*pi*freq*rf.t))`, with rf.t
+        #    starting at 0). The analytic path references the pulse CENTRE via
+        #    _t_shift, a standing 2*pi*f*half1 disagreement left alone here.
+        #  * It is applied to the INTERPOLATOR only, never to self.waveform, so
+        #    `waveform` keeps matching pypulseq's bare `rf.signal` and the
         #    flip-angle round trip in test_pulseq_invariants stays meaningful.
         if self.phase_offset.m != 0.0 or self.frequency_offset.m != 0.0:
             ww = ww * np.exp(1j*(self.phase_offset.m_as('rad')

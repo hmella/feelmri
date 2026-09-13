@@ -113,13 +113,12 @@ public:
         const Eigen::Array<T, Eigen::Dynamic, 1>& T2,
         const Eigen::Array<T, Eigen::Dynamic, 1>& phi_dB0)
     {
-        // A T2 of zero inverts to Inf and exp(-t*Inf) is NaN even at t = 0,
-        // so ONE bad node poisons every k-space sample rather than its own
-        // contribution -- silently, since the build is -ffinite-math-only and
-        // nothing downstream can test for it. A negative T2 is worse: it is
-        // finite, so it produces a plausible GROWING signal. Checked here and
-        // in Phantom.set_static_fields, the same pairing the row-count guard
-        // uses. feelmri_is_finite is the only test that survives the flag.
+        // A T2 of zero inverts to Inf and exp(-t*Inf) is NaN even at t = 0, so
+        // one bad node poisons every k-space sample rather than its own
+        // contribution. A negative T2 is worse: it is finite, so it produces a
+        // plausible growing signal. Checked here and in
+        // Phantom.set_static_fields; feelmri_is_finite is the only test that
+        // survives -ffinite-math-only.
         if (T2.size() != phi_dB0.size())
             throw std::invalid_argument(
                 "set_static_fields: T2 has " + std::to_string(T2.size()) +
@@ -369,19 +368,13 @@ public:
                                            mxz(maxwell_scratch), myz(maxwell_scratch);
 
         // Flatten the per-sample scalars once; S is small (one readout).
-        // Concomitant (Maxwell) phase: a general symmetric quadratic form in
-        // position, six coefficients per sample over x^2, y^2, z^2, xy, xz and
-        // yz. This is the quadratic counterpart of k and the only channel here
-        // that is not linear in position.
-        //
-        // Six rather than four because the form is only B0-aligned in the
-        // scanner's physical frame; once the phantom has been oriented, the
-        // same field is a general quadratic form in the imaging coordinates
-        // this loop works in. The rotation, the signs and the 1/B0 are all
-        // folded in by maxwell_phase_coefficients, so nothing here knows about
-        // B0, about the Maxwell expression, or about the geometry -- three
-        // copies of that expression exist already and must not become four.
-        // EMPTY means off.
+        // Concomitant (Maxwell) phase: a symmetric quadratic form in position,
+        // six coefficients per sample over x^2, y^2, z^2, xy, xz and yz. It is
+        // the quadratic counterpart of k and the only channel here that is not
+        // linear in position. Six rather than four because the form is only
+        // B0-aligned in the physical frame, and this loop works in imaging
+        // coordinates. The rotation, the signs and the 1/B0 are folded in by
+        // maxwell_phase_coefficients. EMPTY means off.
         const bool has_maxwell = !maxwell.empty();
         if (has_maxwell && maxwell.size() != 6) {
             throw std::invalid_argument(
@@ -590,19 +583,13 @@ public:
                                            mzz(maxwell_scratch), mxy(maxwell_scratch),
                                            mxz(maxwell_scratch), myz(maxwell_scratch);
 
-        // Concomitant (Maxwell) phase: a general symmetric quadratic form in
-        // position, six coefficients per sample over x^2, y^2, z^2, xy, xz and
-        // yz. This is the quadratic counterpart of k and the only channel here
-        // that is not linear in position.
-        //
-        // Six rather than four because the form is only B0-aligned in the
-        // scanner's physical frame; once the phantom has been oriented, the
-        // same field is a general quadratic form in the imaging coordinates
-        // this loop works in. The rotation, the signs and the 1/B0 are all
-        // folded in by maxwell_phase_coefficients, so nothing here knows about
-        // B0, about the Maxwell expression, or about the geometry -- three
-        // copies of that expression exist already and must not become four.
-        // EMPTY means off.
+        // Concomitant (Maxwell) phase: a symmetric quadratic form in position,
+        // six coefficients per sample over x^2, y^2, z^2, xy, xz and yz. It is
+        // the quadratic counterpart of k and the only channel here that is not
+        // linear in position. Six rather than four because the form is only
+        // B0-aligned in the physical frame, and this loop works in imaging
+        // coordinates. The rotation, the signs and the 1/B0 are folded in by
+        // maxwell_phase_coefficients. EMPTY means off.
         const bool has_maxwell = !maxwell.empty();
         if (has_maxwell && maxwell.size() != 6) {
             throw std::invalid_argument(
@@ -814,19 +801,13 @@ public:
 
         if (has_traj) ensure_quadrature_modes(modes_x, modes_y, modes_z);
 
-        // Concomitant (Maxwell) phase: a general symmetric quadratic form in
-        // position, six coefficients per sample over x^2, y^2, z^2, xy, xz and
-        // yz. This is the quadratic counterpart of k and the only channel here
-        // that is not linear in position.
-        //
-        // Six rather than four because the form is only B0-aligned in the
-        // scanner's physical frame; once the phantom has been oriented, the
-        // same field is a general quadratic form in the imaging coordinates
-        // this loop works in. The rotation, the signs and the 1/B0 are all
-        // folded in by maxwell_phase_coefficients, so nothing here knows about
-        // B0, about the Maxwell expression, or about the geometry -- three
-        // copies of that expression exist already and must not become four.
-        // EMPTY means off.
+        // Concomitant (Maxwell) phase: a symmetric quadratic form in position,
+        // six coefficients per sample over x^2, y^2, z^2, xy, xz and yz. It is
+        // the quadratic counterpart of k and the only channel here that is not
+        // linear in position. Six rather than four because the form is only
+        // B0-aligned in the physical frame, and this loop works in imaging
+        // coordinates. The rotation, the signs and the 1/B0 are folded in by
+        // maxwell_phase_coefficients. EMPTY means off.
         const bool has_maxwell = !maxwell.empty();
         if (has_maxwell && maxwell.size() != 6) {
             throw std::invalid_argument(

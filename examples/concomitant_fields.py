@@ -34,12 +34,11 @@ from feelmri.PulseqAdapter import maxwell_moments, maxwell_phase_coefficients
 # encoding IS a bipolar pair.
 
 # BOTH HALVES CARRY IT. The solver integrates Bc up to the magnetization
-# snapshot -- prep, slice select, velocity-encoding lobes -- and the assembler
-# applies the rest during the ADC window, from a second trajectory of
-# time-integrated gradient products that factorises the same way `k` does
+# snapshot -- prep, slice select, velocity-encoding lobes -- and the
+# assembler applies the rest during the ADC window, from a second trajectory
+# of time-integrated gradient products that factorises the same way `k` does
 # (`maxwell_moments` / `maxwell_phase_coefficients`, wired into `mri_signal`
-# through its `maxwell=` argument). An earlier version of this note said the
-# readout half was not modelled; it is, and the fifth panel below shows it.
+# through its `maxwell=` argument). The fifth panel below shows it.
 #
 # The two halves pick out DIFFERENT terms, which is why both matter:
 #
@@ -48,8 +47,8 @@ from feelmri.PulseqAdapter import maxwell_moments, maxwell_phase_coefficients
 #   an in-plane readout      -> (Gx^2 + Gy^2) z^2,  zero in a slice at
 #                               isocentre and quadratic in SLICE OFFSET
 #
-# So an axial slice at isocentre sees nothing from its readout however long the
-# echo train, and an off-isocentre slab on the same train sees radians.
+# So an axial slice at isocentre sees nothing from its readout however long
+# the echo train, and an off-isocentre slab on the same train sees radians.
 
 # Enable fast mode for testing if the environment variable is set
 FAST_MODE = os.getenv("FEELMRI_FAST_TEST", "0") == "1"
@@ -201,17 +200,12 @@ if __name__ == '__main__':
     worst = MPI_comm.allreduce(float(deviation.max()), op=MPI.MAX)
     MPI_print('B0 = {:>4} T: peak concomitant phase {:5.3f} rad at the rim, '
               'worst deviation from the closed form {:.2e}'.format(B0, peak, worst))
-    # Proportional to the phase, because that is what the error is: a
-    # coarser raster makes a RELATIVE error on the accumulated phase, so a
-    # fixed bound would pass at 1.5 T and fail at 0.55 T purely because the
-    # phase there is 2.7x larger.
-    #
-    # Measured at 7.8e-5 per radian at both field strengths, and the same on
-    # the coarsened FEELMRI_FAST_TEST raster: the solver sub-samples gradient
-    # ramps itself when the concomitant term is on, because Bc goes as G^2 and
-    # is therefore quadratic along a ramp, where no trapezoidal rule is exact.
-    # Before it did, this read 1.95e-3 per radian at dt = 0.05 ms -- 25x worse,
-    # and within 1.5x of the bound below.
+    # Proportional to the phase, because that is what the error is: a coarser
+    # raster makes a relative error on the accumulated phase, so a fixed bound
+    # would pass at 1.5 T and fail at 0.55 T purely because the phase there is
+    # 2.7x larger. The solver sub-samples gradient ramps itself when the
+    # concomitant term is on, since Bc goes as G^2 and is quadratic along a
+    # ramp, where no trapezoidal rule is exact.
     assert worst < 3e-4 * peak, (
       f'B0 = {B0} T: concomitant phase departs from the closed form by '
       f'{worst:.2e}, i.e. {worst / peak:.2e} per radian of a {peak:.3f} rad '

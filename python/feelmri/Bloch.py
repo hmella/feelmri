@@ -31,17 +31,14 @@ from pint import Quantity as Quantity
 
 from feelmri.BlochSimulator import solve_mri_f32, solve_mri_f64
 
-# Timings reaching the raster from different sources can name the same instant
-# and disagree in the last bits -- _get_extent pads t_max to honour a declared
-# dur, and a shifted waveform corner is recomputed rather than moved. np.unique
-# keeps both, and the kernel then takes a zero-length step there: harmless
-# numerically, but it re-exponentiates every node and invalidates the dt cache
-# twice (335 such steps on epi_v142.seq before this).
+# Timings reaching the raster from different sources can name the same
+# instant and disagree in the last bits, and np.unique keeps both. The
+# kernel then takes a zero-length step there, which re-exponentiates every
+# node and invalidates the dt cache twice.
 #
-# 1e-6 ms is three orders below the 1 us finest raster Pulseq permits, but it is
-# only a CEILING: _raster_tolerance lowers it further for a block that asks for
-# finer steps, because a tolerance at or above the step size deletes the raster
-# instead of de-duplicating it.
+# This is a CEILING: _raster_tolerance lowers it for a block that asks for
+# finer steps, since a tolerance at or above the step size deletes the
+# raster instead of de-duplicating it.
 RASTER_TOL_MS = 1e-6
 
 # How far outside an RF pulse's support to place the guard point. The interval
@@ -50,16 +47,11 @@ RASTER_TOL_MS = 1e-6
 # tolerance or the guard is removed again.
 RF_EDGE_GUARD_MS = 1e-5
 
-# Ramp sub-raster used when the concomitant term is on. `magnus2` integrates a
-# straight ramp exactly from its endpoints, which is why dt_gr defaults to
-# disabled -- but that argument covers the LINEAR field only. Bc goes as G^2, so
-# along a ramp it is QUADRATIC in time and the trapezoidal rule is not exact:
-# over a ramp it charges A^2*h/2 where the exact second moment is A^2*h/3, a
-# one-signed 50% over-count of every ramp's contribution. Measured against a
-# converged raster, the error is 0.152 rad on gre_v15, 0.200 on se_v15 and
-# 0.187 on epi_v142 -- about 20% of the effect the feature exists to model.
-# At this step it falls to 3.6e-4 rad for +95% raster points on gre_v15 and
-# +24% on epi_v142, and it converges as O(dt^2).
+# Ramp sub-raster used when the concomitant term is on. magnus2 integrates
+# a straight ramp exactly from its endpoints, but only for the LINEAR
+# field: Bc goes as G^2, so along a ramp it is quadratic in time and the
+# trapezoidal rule charges A^2*h/2 where the second moment is A^2*h/3. The
+# error converges as O(dt^2) in this step.
 CONCOMITANT_DT_GR_MS = 0.01
 
 
@@ -428,14 +420,12 @@ class SequenceBlock:
             # returning an empty mask.
             adc_mask = np.zeros(rel.shape, dtype=bool)
         else:
-            # adc.times are BLOCK-LOCAL (see the ADC docstring) while `t` is
-            # absolute, so bring them onto one origin before comparing --
-            # np.isin against raw absolute times never matched, and the mask
-            # came back all-False on every block.
+            # adc.times are block-local (see the ADC docstring) while `t` is absolute,
+            # so bring them onto one origin before comparing.
             #
-            # searchsorted, not an (n, m) isclose broadcast: a single-shot
-            # spiral ADC can carry tens of thousands of samples in one block,
-            # and n x m float64 plus np.isclose's temporaries runs to GB.
+            # searchsorted, not an (n, m) isclose broadcast: a single-shot spiral ADC
+            # can carry tens of thousands of samples in one block, and the temporaries
+            # run to GB.
             rel = rel - self.time_extent[0].m
             idx = np.clip(np.searchsorted(adc_local, rel), 0, adc_local.size - 1)
             prev = np.clip(idx - 1, 0, adc_local.size - 1)
@@ -521,16 +511,11 @@ class SequenceBlock:
         if self.gradients:
             gr_timings = np.concatenate([g.timings.m for g in self.gradients])
             if self.dt_gr > 0:
-                # Sub-sample only the SLOPED segments. The kernel charges each
-                # interval the field at its end, so a flat top is already exact
-                # and a ramp is not: stored as bare corners, a trapezoid is
-                # over-charged by A*rise/2 on the way up and under-charged by
-                # A*fall/2 on the way down, leaving A*(rise - fall)/2 -- zero
-                # only while rise == fall, which is why symmetric trapezoids
-                # have never shown it. On a UNIFORM sub-raster the two errors
-                # are +A*dt/2 and -A*dt/2 and cancel exactly, whatever the ramps.
-                # Skipping flat tops costs x1.15-2.10 in raster size instead of
-                # x1.59-5.64 for the same result.
+                # Sub-sample only the sloped segments. The kernel charges each interval the
+                # field at its end, so a flat top is already exact while a ramp stored as
+                # bare corners is over-charged by A*rise/2 and under-charged by A*fall/2.
+                # On a uniform sub-raster the two errors cancel. Skipping flat tops costs
+                # x1.15-2.10 in raster size instead of x1.59-5.64.
                 gr_timings = np.concatenate(
                     [_sloped_segment_times(g, self.dt_gr.m_as('ms')) for g in self.gradients]
                     + [gr_timings]
@@ -542,19 +527,13 @@ class SequenceBlock:
         if self.rf_pulses:
             rf_timings = np.concatenate([list(_rf_support_ms(rf)) for rf in self.rf_pulses])
             if self.dt_rf > 0:
-                # One step OUTSIDE each edge of the support as well. The kernel
-                # charges every interval the field at its END, so the interval
-                # arriving at a pulse edge is charged full RF amplitude however
-                # long it is: on ppm_v15 the raster jumped 0 -> 0.1 ms straight
-                # onto the pulse start and billed the whole gap as pulse,
-                # +1.25% of flip.
+                # One step outside each edge of the support as well. The kernel charges
+                # every interval the field at its end, so the interval arriving at a pulse
+                # edge is billed full RF amplitude however long it is.
                 #
-                # The guard must sit a HAIR outside the support, not one dt_rf
-                # outside: the guarded interval is still charged full amplitude,
-                # so its length lands directly on the flip angle. At one dt_rf
-                # that is dt_rf/dur -- +10.0% on a 0.1 ms imported hard pulse,
-                # and magnus2 does not help because a pulse edge is a step, not
-                # a ramp. At RF_EDGE_GUARD_MS it is 1e-4 of the pulse.
+                # The guard sits a hair outside the support rather than one dt_rf outside:
+                # the guarded interval is still charged full amplitude, so its length lands
+                # directly on the flip angle.
                 guards = []
                 lo_blk, hi_blk = self.time_extent[0].m, self.time_extent[1].m
                 eps = min(RF_EDGE_GUARD_MS, float(self.dt_rf.m_as('ms')))
@@ -579,13 +558,10 @@ class SequenceBlock:
 
         # ADC timings
         if self.adc is not None:
-            # adc.times are BLOCK-LOCAL (see the ADC docstring, and
-            # test_pulseq_timing.py, which adds time_extent[0] to recover
-            # absolute times), so they must be placed in the block's frame
-            # before joining an otherwise absolute raster. They were
-            # concatenated raw, which agrees only while time_extent[0] == 0 --
-            # true for every imported block, since _convert_* puts every event
-            # at t = 0, and false for a natively built one.
+            # adc.times are block-local (see the ADC docstring), so place them in the
+            # block's frame before joining an otherwise absolute raster. Concatenating
+            # them raw agrees only while time_extent[0] == 0, which holds for an
+            # imported block and not for a natively built one.
             adc_times = self.adc.times.m_as('ms') + self.time_extent[0].m
         else:
             adc_times = np.array([])
@@ -598,22 +574,18 @@ class SequenceBlock:
 
         # Concatenate all timings, sort them and remove duplicates
         all_timings = np.concatenate((gr_timings, rf_timings, seq_timings, adc_times, block_ends))
-        # Keep the FIRST of each near-duplicate cluster, never the last, and do
-        # not snap the ends onto time_extent. The block end can sit an ulp above
-        # an event's last sample, and the interpolators are built with
-        # right=0.0, so a raster point pushed past that sample evaluates the
-        # event as zero: on a hard pulse defined by its two endpoints that costs
-        # half the final interval, and 2.5% of the flip angle.
+        # Keep the first of each near-duplicate cluster and do not snap the ends
+        # onto time_extent. The block end can sit an ulp above an event's last
+        # sample, and the interpolators use right=0.0, so a raster point pushed
+        # past that sample evaluates the event as zero.
         tol = _raster_tolerance(self.dt.m_as('ms'), self.dt_rf.m_as('ms'),
                                 self.dt_gr.m_as('ms'))
         all_timings = _collapse_near_duplicates(np.sort(all_timings), tol)
 
         # A block's raster must not leave the block. Several sources feed it and
-        # they do not all share an origin -- a user-defined Gradient keeps its
-        # own `timings` without applying `time`, so a block whose extent starts
-        # late could otherwise be handed points before its own start. The solver
-        # would then integrate time that belongs to the previous block, and
-        # add_block would chain the next one from a duration that disagrees.
+        # they do not share an origin -- a user-defined Gradient keeps its own
+        # `timings` without applying `time` -- so a block whose extent starts late
+        # could otherwise be handed points before its own start.
         lo, hi = self.time_extent[0].m, self.time_extent[1].m
         inside = (all_timings >= lo - tol) & (all_timings <= hi + tol)
         if not inside.all():
@@ -1084,15 +1056,9 @@ class BlochSolver:
         self.sequence = sequence
         self.scanner = scanner
         self.phantom = phantom
-        # The solver allocates per-node state sized by this partition. Mark the
-        # partition in use so a later repartition raises instead of leaving the
-        # solver inconsistent.
-        # Problems found by validation that inspects LOCAL-node data, so a bad
-        # entry can exist on one rank only. Collected rather than raised on the
-        # spot and reported through a single collective below -- see
-        # _collective_raise. The collective must be reached UNCONDITIONALLY by
-        # every rank, which is why the messages are accumulated instead of the
-        # call being made inside the branch that found them.
+        # Problems found by validation that inspects local-node data, so a bad
+        # entry can exist on one rank only. They are collected and reported through
+        # a single collective below, which every rank must reach unconditionally.
         node_problems = []
         # Whether guard 3 has already warned for the CURRENT value of
         # perfect_spoiling. Set before any guard can run.
@@ -1117,13 +1083,10 @@ class BlochSolver:
             base = ones if template is None else template
 
             def refuse(message):
-                # Collected, NOT raised: this validates LOCAL-node data, so a
-                # bad value can exist on one rank only, and raising here would
-                # leave that rank outside the _collective_raise below while
-                # every other rank waited in its allgather. Reproduced as a
-                # hang under `mpirun -n 2` with a delta_B one node short on one
-                # rank. The template is returned so the rest of __init__ keeps
-                # working on well-shaped data until the collective fires.
+                # Collected, not raised: this validates local-node data, so a bad value can
+                # exist on one rank only and raising here would leave that rank outside the
+                # _collective_raise below. The template is returned so the rest of
+                # __init__ keeps working until the collective fires.
                 node_problems.append(message)
                 return base
 
@@ -1163,14 +1126,10 @@ class BlochSolver:
 
         self.T1 = Quantity(_node_column(T1.m, 'T1'), T1.units)
         self.T2 = Quantity(_node_column(T2.m, 'T2'), T2.units)
-        # A NaN here is invisible to the kernel. Its uniform-relaxation
-        # dispatch asks `(T1.array() == T1(0)).all()`, and -ffinite-math-only
-        # lets the compiler assume that comparison cannot involve a NaN, so a
-        # NaN at any node but the first is silently given node 0's value --
-        # measured: NaN T2 at local node 2 of 27 returned the HEALTHY
-        # exp(-0.04) = 0.96078944 for that node, while the same NaN at node 0
-        # turned all 27 nodes into NaN. The blast radius depends on which local
-        # index the bad node lands at, i.e. on the partition.
+        # A NaN here is invisible to the kernel: its uniform-relaxation dispatch
+        # asks `(T1.array() == T1(0)).all()`, and -ffinite-math-only lets the
+        # compiler assume that comparison cannot involve a NaN, so a NaN at any
+        # node but the first is silently given node 0's value.
         for name, values in (('T1', self.T1.m), ('T2', self.T2.m)):
             arr = np.asarray(values, dtype=np.float64)
             if not np.all(~np.isnan(arr) & (arr > 0.0)):
@@ -1180,15 +1139,13 @@ class BlochSolver:
                     f"every {name} must be positive and not NaN; entry "
                     f"{int(bad[0])} is {arr.reshape(-1)[int(bad[0])]}")
         self.delta_B = _node_column(delta_B, 'delta_B')
-        # Transmit sensitivity. Stored as a complex vector of local-node
-        # length, or None. It is applied at USE TIME inside the kernel rather
-        # than folded into rf_all, which keeps the carried Magnus state
-        # (rf_old) a scalar and every unpack site unchanged -- b1 is
+        # Transmit sensitivity: a complex vector of local-node length, or None.
+        # Applied at use time inside the kernel rather than folded into rf_all,
+        # which keeps the carried Magnus state (rf_old) a scalar. b1 is
         # time-invariant, so scaling both trapezoid endpoints is identical to
-        # scaling the pulse.
-        # Accept a scalar, (n,) or (n, 1) and normalise to (n,). Deliberately
-        # NOT the `value * ones` idiom used above: `ones` is (n, 1), so an (n,)
-        # map would broadcast to (n, n) instead of raising.
+        # scaling the pulse. Normalised by reshape rather than the
+        # `value * ones` idiom used above, whose (n, 1) `ones` would broadcast
+        # an (n,) map to (n, n) instead of raising.
         if b1_map is None:
             self.b1_map = None
         else:
@@ -1274,16 +1231,14 @@ class BlochSolver:
                 f"term scales as 1/B0, so a zero or negative B0 is not a "
                 f"weaker field, it is undefined.")
         # Spectral sub-ensemble for reversible (T2') dephasing. OFF unless
-        # t2_prime is given. Each node gets `spectral_bins` sub-spins whose
-        # only difference is a static frequency offset, so the offsets ride the
-        # existing per-node delta_B channel and the kernel is untouched.
+        # t2_prime is given. Each node gets `spectral_bins` sub-spins differing
+        # only by a static frequency offset, so the offsets ride the existing
+        # per-node delta_B channel and the kernel is untouched.
         #
-        # The ensemble PERSISTS across blocks -- that is the whole point. A
-        # scalar T2* decays monotonically from the snapshot whatever constant
-        # it is given, so it can never rephase at an echo; a real sub-ensemble
-        # does, because each sub-spin simply runs backwards after a 180.
-        # Validated even when t2_prime is None, so a typo is caught rather
-        # than silently accepted on a path that never builds the bins.
+        # The ensemble persists across blocks, which is what lets it rephase at an
+        # echo: each sub-spin runs backwards after a 180, where a scalar T2*
+        # decays monotonically from the snapshot. Validated even when t2_prime is
+        # None, so a typo is caught on a path that never builds the bins.
         self._lineshape = str(lineshape).lower()
         if self._lineshape not in LINESHAPES:
             raise ValueError(
@@ -1323,14 +1278,11 @@ class BlochSolver:
             # Follow the rule, not the request: lineshape_bins prunes sub-spins
             # whose weight is below float64 epsilon.
             self._n_bins = int(self._bin_z.size)
-            # The bin offsets are tiny -- z/(T2'*gamma) is 3e-5 to 5e-4 mT at
-            # T2' = 50 ms -- and the kernel adds them to `curr.G + delta_B`,
-            # which is O(1-10 mT) under any readout gradient. In float32 the
-            # rounding quantum of that sum swamps the offset in proportion to
-            # the background field. Measured on a gaussian FID at t = 2*T2',
-            # against the float64 answer: 2.2e-4 with no gradient, 1.9e-3 at
-            # |Bz| = 1 mT, and 2.4e-2 at |Bz| = 8 mT -- an ordinary readout.
-            # It is a floor, not a step-size error, so a finer dt does not help.
+            # The bin offsets are small -- z/(T2'*gamma) is 3e-5 to 5e-4 mT at
+            # T2' = 50 ms -- and the kernel adds them to `curr.G + delta_B`, which is
+            # O(1-10 mT) under a readout gradient. In float32 the rounding quantum of
+            # that sum swamps the offset in proportion to the background field. It is a
+            # floor, not a step-size error, so a finer dt does not help.
             if self._dtype == 'float32':
                 warnings.warn(
                     "BlochSolver: t2_prime with dtype='float32' loses the bin "
@@ -1347,12 +1299,10 @@ class BlochSolver:
                     f"K^-0.55. Use 'gaussian' or 'uniform' unless you need "
                     f"continuity with the exp(-t/T2*) convention.")
 
-        # Both of the following are COLLECTIVE and are therefore called
-        # unconditionally, outside the branch that decides whether this rank
-        # uses a sub-ensemble at all. Calling either inside that branch pairs
-        # this rank's allgather with a different rank's -- which is exactly the
-        # class of bug these guards exist to prevent, and it bit twice while
-        # writing them.
+        # Both of the following are collective, so they are called unconditionally,
+        # outside the branch that decides whether this rank uses a sub-ensemble.
+        # Calling either inside that branch pairs this rank's allgather with a
+        # different rank's.
         _collective_raise('BlochSolver: ' + '; '.join(node_problems)
                           if node_problems else '')
         self._check_bin_preconditions()
@@ -1515,15 +1465,12 @@ class BlochSolver:
             return bool(MPI_comm.allreduce(bool(local_flag), op=MPI.LOR))
 
         # Guard 1: a K-fold node expansion also duplicates the POD mode matrix,
-        # which is rebuilt and Fortran-transposed on every block once the
-        # ensemble persists -- 3*N*K*M reals, against the 23 MB the layout was
-        # tuned to avoid re-transposing. That is a kernel redesign (a bin axis
-        # sharing positions and modes), not a tuning knob, so refuse rather
-        # than quietly crawl.
+        # which is rebuilt and Fortran-transposed on every block once the ensemble
+        # persists -- 3*N*K*M reals. Supporting it needs a kernel bin axis sharing
+        # positions and modes, so refuse instead.
+        #
         # Collective: this sits between the allgather above and the allreduces
-        # below, so a rank-local raise here leaves the others blocked in one of
-        # them. Reproduced by setting solver.pod_trajectory on one rank only,
-        # which is reachable because solve() deliberately re-reads it.
+        # below, so a rank-local raise leaves the others blocked in one of them.
         collective_raise(
             '' if self.pod_trajectory is None else
             ("BlochSolver: t2_prime with a pod_trajectory is not supported. "
@@ -1542,18 +1489,15 @@ class BlochSolver:
                     f"BlochSolver: t2_prime with a per-node {name} is not "
                     f"supported; the kernel would fall onto its per-node exp() "
                     f"path at K times the cost.")
-        # Guard 3: perfect_spoiling zeroes Mxy at every non-empty block
-        # boundary, which destroys the ensemble's coherence -- making the whole
-        # feature a no-op that still costs K times.
+        # Guard 3: perfect_spoiling zeroes Mxy at every non-empty block boundary,
+        # which destroys the ensemble's coherence and leaves the feature a no-op
+        # that still costs K times.
         #
-        # Warned on TRANSITION, not on every visit. warnings.warn deduplicates
-        # per (message, category, module, lineno) under the default filter, and
-        # __init__ and solve() reach this same line -- so once any solver in the
-        # process had warned, the solve-time re-check was silent, including for
-        # the post-construction `solver.perfect_spoiling = True` flip that is
-        # the whole reason the re-check exists. Tracking the last state seen
-        # makes the warning fire when it actually changes. stacklevel=3 points
-        # at the caller rather than at this file.
+        # Warned on transition, not on every visit: warnings.warn deduplicates per
+        # (message, category, module, lineno), and __init__ and solve() reach this
+        # same line, so the solve-time re-check would otherwise be silent. Tracking
+        # the last state seen makes it fire when the flag changes. stacklevel=3
+        # points at the caller rather than at this file.
         if self.perfect_spoiling and not self._warned_perfect_spoiling:
             self._warned_perfect_spoiling = True
             warnings.warn(
@@ -1564,12 +1508,11 @@ class BlochSolver:
                 stacklevel=3)
         elif not self.perfect_spoiling:
             self._warned_perfect_spoiling = False
-        # Guard 4: the spatial spoiler ensemble is a SECOND sub-voxel axis. A
+        # Guard 4: the spatial spoiler ensemble is a second sub-voxel axis. A
         # tensor product is K_spatial * K_spectral (x400 at the default
         # isochromat_K=25), and merging them onto one index is wrong: the
-        # quadrature weights span ~10 orders of magnitude, so the spatial
-        # average would inherit them and its effective sample size would
-        # collapse.
+        # quadrature weights span ~10 orders of magnitude, so the spatial average
+        # would inherit them and its effective sample size would collapse.
         if any(getattr(b, 'spoiler', False)
                for b in getattr(self.sequence, 'blocks', [])):
             raise NotImplementedError(
@@ -1658,12 +1601,10 @@ class BlochSolver:
           f"({len(blocks)} blocks) method={self._method} dtype={self._dtype}."
         )
 
-        # Re-check the sub-ensemble's preconditions against the LIVE
-        # attributes. They were validated in __init__, but every one of them is
-        # public and mutable, and `modes` -- the array guard 1 protects -- is
-        # sized from the un-expanded node count, so a post-construction
-        # `solver.pod_trajectory = pod` was a silent out-of-bounds read under
-        # cayley_klein rather than an exception.
+        # Re-check the sub-ensemble's preconditions against the live attributes.
+        # They were validated in __init__, but all of them are public and mutable,
+        # and `modes` -- the array guard 1 protects -- is sized from the
+        # un-expanded node count.
         self._check_bin_preconditions()
 
         # Pick the right C++ entry point for this dtype.
@@ -1693,27 +1634,20 @@ class BlochSolver:
                 f"columns are numbered from `start` and no longer line up with "
                 f"ReadoutWindow.m_storage_idx, which counts from block 0.")
 
-        # Allocate magnetizations. Only the STORED columns are allocated: a
-        # column is written once and read only by the return below, so sizing
-        # these over every block carried len(blocks) / len(store_indices) times
-        # the memory for nothing. The bin array is the one that hurts, since it
-        # carries the n_bins factor as well -- on epi_v142 at 22 167 nodes and
-        # K = 28 (a pruned gaussian K = 32) it reserved 2.29 GB to keep
-        # 0.01 GB, and on flash_tr_v15, which stores nothing at all, 1.59 GB
-        # to keep none.
+        # Allocate magnetizations. Only the stored columns: a column is written
+        # once and read only by the return below, so sizing these over every block
+        # costs len(blocks) / len(store_indices) times the memory for nothing. The
+        # bin array carries the n_bins factor on top of that.
         store_slot = {b: j for j, b in enumerate(store_indices)}
         nb_stored = len(store_indices)
         Mxy = np.zeros((nb_nodes, nb_stored), dtype=self._np_cplx)
         Mz  = np.zeros((nb_nodes, nb_stored), dtype=self._np_real)
-        # The UNCOLLAPSED ensemble at each stored column, (n_nodes, n_bins,
-        # n_stored). Kept because collapsing at the snapshot is what makes a
-        # readout lose the sub-voxel rephasing: the assembler can only replay
-        # exp(-t/T2) from a single value per node, so an echo forming inside a
-        # readout window is flattened and every spin-echo readout comes out
-        # attenuated by the dephasing standing at the anchor. A caller that
-        # wants the readout right evaluates the signal per bin and weight-sums.
-        # Costs n_bins x the stored magnetization, which the caller has already
-        # accepted n_bins x of in the solver itself.
+        # The uncollapsed ensemble at each stored column, (n_nodes, n_bins,
+        # n_stored). Collapsing at the snapshot is what makes a readout lose the
+        # sub-voxel rephasing: the assembler can only replay exp(-t/T2) from a
+        # single value per node, so an echo forming inside a readout window is
+        # flattened. A caller that wants the readout right evaluates the signal per
+        # bin and weight-sums. Costs n_bins x the stored magnetization.
         bins_out = (None if self._n_bins <= 1 else
                     np.zeros((nb_nodes, self._n_bins, nb_stored),
                              dtype=self._np_cplx))
@@ -1788,41 +1722,31 @@ class BlochSolver:
                          and self._bin_Mz.shape == want
                          and self._bin_state_is_current(initial_Mxy, initial_Mz))
             if resumable:
-                # COPY. np.ascontiguousarray is a no-op when the dtype and
-                # layout already match, so this would otherwise alias
-                # self._bin_Mxy -- and the block loop writes into it in place.
-                # A solve() that raises midway would then leave the carried
-                # ensemble half-advanced while the stamp it is compared against
-                # still described the state before the call, so the next solve()
-                # resumed silently from a corrupted ensemble (measured 0.24
-                # absolute error, no exception, no warning).
+                # Copy: np.ascontiguousarray is a no-op when the dtype and layout already
+                # match, so this would alias self._bin_Mxy, which the block loop writes
+                # into in place. A solve() that raises midway would then leave the carried
+                # ensemble half-advanced while its stamp still described the earlier state.
                 initial_Mxy = np.array(self._bin_Mxy, dtype=self._np_cplx,
                                        copy=True, order='C')
                 initial_Mz = np.array(self._bin_Mz, dtype=self._np_real,
                                       copy=True, order='C')
-                # Do NOT also invalidate self._bin_collapsed here. With the copy
-                # above the carried ensemble and the public attributes both
-                # survive a failed call intact and still correspond, so the
-                # retry should RESUME. Forcing a re-seed instead would rebuild
-                # every bin from the collapsed per-node value, discarding the
-                # intra-voxel phase spread -- measured as a 0.17 error on the
-                # next block, i.e. a different wrong answer rather than a fix.
+                # Do not also invalidate self._bin_collapsed here. With the copy above the
+                # carried ensemble and the public attributes survive a failed call intact
+                # and still correspond, so a retry resumes. Forcing a re-seed would rebuild
+                # every bin from the collapsed per-node value and discard the intra-voxel
+                # phase spread.
             else:
                 initial_Mxy = np.ascontiguousarray(
                     np.repeat(initial_Mxy, n_bins, axis=0), dtype=self._np_cplx)
                 initial_Mz = np.ascontiguousarray(
                     np.repeat(initial_Mz, n_bins, axis=0), dtype=self._np_real)
-        # The kernel sizes everything from r0.rows() and validates no other
-        # length (only b1_map), so a wrong length is an out-of-bounds WRITE
-        # under -DNDEBUG -DEIGEN_NO_DEBUG rather than an exception -- it
-        # corrupts the heap. This runs on EVERY path, not just the sub-ensemble
-        # one: the attributes below are public, so a caller can reassign
-        # `solver.initial_Mxy = 0.0 + 0j` between solves -- the exact spelling
-        # the constructor accepts -- and `np.ascontiguousarray` of a scalar is
-        # a 0-d array, which pybind hands the kernel as a length-1 vector.
-        # b1_map is included when present: it is public, per-node, and the
-        # kernel's own length check throws rank-locally, which hangs the others
-        # at solve()'s closing Barrier.
+        # The kernel sizes everything from r0.rows() and validates no other length
+        # (only b1_map), so a wrong length is an out-of-bounds write under
+        # -DNDEBUG -DEIGEN_NO_DEBUG. This runs on every path: the attributes below
+        # are public, so a caller can reassign them between solves, and
+        # np.ascontiguousarray of a scalar is a 0-d array that pybind hands the
+        # kernel as a length-1 vector. b1_map is included because the kernel's own
+        # check throws rank-locally, which hangs the others at solve()'s Barrier.
         _check_rows_collectively(
             (('x', x, 3), ('T1', T1, 1), ('T2', T2, 1),
              ('delta_B', delta_B, 1), ('Bz_old', Bz_old, None),
@@ -1871,31 +1795,20 @@ class BlochSolver:
             # Pre-compute the POD modes and weights for this block's timeframe
             has_traj = self.pod_trajectory is not None
             if has_traj:
-                # The argument is time measured from the START OF THIS BLOCK,
-                # and the two roles it plays are NOT the same quantity:
+                # The argument is time measured from the start of this block, and the two
+                # roles it plays are different quantities:
                 #
                 #   fold(t + timeshift)  picks the cardiac phase -- absolute
                 #   t itself             is `t_ro`, the Taylor time
                 #
-                # `PODVelocity` models position as the first-order expansion
-                # `x0 + v * t_ro`, with `t_ro` measured from the excitation, so
-                # the argument sets HOW FAR the spins have moved. Passing
-                # absolute sequence time let `t_ro` run to the whole sequence
-                # duration: on `examples/phase_contrast.py` the imaging block
-                # sits at 1305 ms, so the displacement came out ~450x too
-                # large -- median 195 mm against a 10.4 mm slab, with 84-90% of
-                # the moving nodes advected clean out of the slice, which
-                # emptied the fast core of the vessel and left only its walls.
+                # PODVelocity models position as `x0 + v * t_ro` with `t_ro` measured from
+                # the excitation, so the argument sets how far the spins have moved. The
+                # base POD class ignores the scale and reads the argument only inside the
+                # fold, where the block offset cancels against the shift.
                 #
-                # The base `POD` class is immune: it ignores the scale and uses
-                # the argument only inside the fold, where the block offset
-                # cancels against the shift. That asymmetry is why "the two
-                # spellings cancel exactly" was measured on `POD`, held there,
-                # and was wrong for the subclass that overrides `get_weights`.
-                #
-                # The shift is COMPOSED and restored rather than overwritten,
-                # so a caller's own `timeshift` is honoured and the attribute is
-                # not left mutated at the last block's start time.
+                # The shift is composed and restored rather than overwritten, so a caller's
+                # own `timeshift` is honoured and the attribute is not left mutated at the
+                # last block's start time.
                 block_start = float(block.time_extent[0].m_as('ms'))
                 user_shift = self.pod_trajectory.timeshift
                 try:
@@ -1938,34 +1851,24 @@ class BlochSolver:
             # Solve
             if block.spoiler is True:
                 K = self.isochromat_K
-                # pos_jitter is the sphere RADIUS and global_elem_size is
-                # cbrt(element volume), a LENGTH -- which looks like it wants a
-                # factor of 1/2. It does not, and halving it was measured worse:
-                # the region a node must dephase over is its CONTROL VOLUME, not
-                # one element. For P1 tets a node owns ~n_adj/4 elements, so the
-                # equivalent sphere is R = (3*n_adj/(16*pi))**(1/3) * elem_size
-                # = 0.89..1.13 * elem_size for 12..24 adjacent tets. The two
-                # errors -- radius-vs-length and element-vs-control-volume --
-                # very nearly cancel, so elem_size is right to ~6%.
-                # Measured rho at K=200 for a spoiler winding one cycle per
-                # element: 0.0775 at R = elem_size against 0.3044 at half that.
+                # pos_jitter is the sphere radius and global_elem_size is cbrt(element
+                # volume), a length, which looks like it wants a factor of 1/2. It does
+                # not: the region a node must dephase over is its control volume, not one
+                # element. For P1 tets a node owns ~n_adj/4 elements, so the equivalent
+                # sphere is R = (3*n_adj/(16*pi))**(1/3) * elem_size, i.e. 0.89..1.13 x
+                # elem_size for 12..24 adjacent tets.
                 #
-                # The .min() over the whole mesh is still crude: on a graded
-                # mesh the single smallest element sets the jitter everywhere,
-                # so large elements are under-dephased by size_min/size_local.
-                # Per-node radii need a vector pos_jitter through
-                # create_multi_isochromats; not done here.
+                # The .min() over the whole mesh is crude: on a graded mesh the smallest
+                # element sets the jitter everywhere, so large elements are under-dephased
+                # by size_min/size_local. Per-node radii need a vector pos_jitter through
+                # create_multi_isochromats.
                 elem_size = self.phantom.global_elem_size.min()
-                # A fixed seed draws the IDENTICAL point set in every spoiler
-                # block, so the residual is the same complex number each time
-                # and accumulates coherently instead of averaging down as
-                # 1/sqrt(n_blocks). Offsetting by the block index decorrelates
-                # them while keeping the whole solve reproducible.
-                # `i` indexes the SLICE, so solve(start=-4) called once per
-                # shot would hand every shot the same seed and the residual
-                # would again accumulate coherently. Offset by the absolute
-                # block index AND by a per-call counter, so repeated solves of
-                # the same blocks decorrelate too.
+                # A fixed seed draws the identical point set in every spoiler block, so the
+                # residual is the same complex number each time and accumulates coherently
+                # instead of averaging down as 1/sqrt(n_blocks). `i` indexes the slice, so
+                # the offset uses the absolute block index and a per-call counter: repeated
+                # solves of the same blocks then decorrelate too, and the solve stays
+                # reproducible.
                 block_seed = (None if self.isochromat_seed is None
                               else int(self.isochromat_seed)
                               + (start + i) + 7919 * self._solve_calls)
@@ -1992,12 +1895,9 @@ class BlochSolver:
                                   K, axis=0).reshape(3 * nb_nodes * K, -1))
                 else:
                     modes_big = modes
-                # Re-derive the Magnus seed from the JITTERED positions.
-                # np.repeat(Bz_old, K) copies a field computed at the node
-                # centres, which carries none of the intra-voxel dephasing this
-                # block exists to produce, so the first trapezoidal step of
-                # every spoiler block averaged the correct field with one that
-                # had the spoiler's entire effect missing.
+                # Re-derive the Magnus seed from the jittered positions. np.repeat(Bz_old,
+                # K) copies a field computed at the node centres, which carries none of the
+                # intra-voxel dephasing this block exists to produce.
                 if self._order > 0:
                     if has_traj and weights.size > 0:
                         c0b = x_big + (modes_big @ weights[0]).reshape(-1, 3)
@@ -2096,13 +1996,11 @@ class BlochSolver:
         # when dtype and layout already match -- so rebinding only does
         # anything when a dtype conversion forced a copy above.
         if n_bins > 1:
-            # Keep the sub-ensemble for the next solve(), and expose the
-            # collapsed per-node state on the public attributes. Both are
-            # stamped with the per-node state they correspond to, so that a
-            # caller who RESETS initial_Mxy/initial_Mz between calls -- an
-            # inversion-recovery or multi-TI loop -- is honoured instead of
-            # silently resuming the previous shot's ensemble. Every other knob
-            # on this class is read live at solve time; these must be too.
+            # Keep the sub-ensemble for the next solve() and expose the collapsed
+            # per-node state on the public attributes. Both are stamped with the
+            # per-node state they correspond to, so a caller who resets
+            # initial_Mxy/initial_Mz between calls -- an inversion-recovery or
+            # multi-TI loop -- is honoured instead of resuming the previous ensemble.
             self._bin_Mxy = initial_Mxy
             self._bin_Mz = initial_Mz
             self.initial_Mxy = collapse_bins(
@@ -2115,16 +2013,13 @@ class BlochSolver:
             self.initial_Mxy = initial_Mxy
             self.initial_Mz = initial_Mz
 
-        # Persist final Magnus state for the next solve() call. Bz_old is stored
-        # per NODE: the next call re-expands it K-fold, so storing the expanded
-        # array made the second solve() build n_nodes * n_bins^2 rows and trip
-        # the length check. Collapsing is safe because the Magnus seed is
-        # re-derived from the block's own opening field for order > 0, and the
-        # kernel ignores it entirely for order 0 -- only the LENGTH is
-        # load-bearing here.
-        # collapse_bins multiplies by float64 weights, so cast back or the
-        # stored state silently widens to float64 on a float32 solver and
-        # forces a copy on every later call.
+        # Persist the final Magnus state for the next solve(). Bz_old is stored per
+        # node: the next call re-expands it K-fold, so an expanded array would make
+        # the second solve() build n_nodes * n_bins^2 rows. Collapsing is safe
+        # because the seed is re-derived from the block's opening field for
+        # order > 0 and ignored entirely for order 0; only the length matters here.
+        # collapse_bins multiplies by float64 weights, so cast back or the stored
+        # state widens to float64 on a float32 solver.
         self._Bz_old = (collapse_bins(Bz_old.reshape(-1)).astype(
             self._np_real, copy=False) if n_bins > 1 else Bz_old)
         self._rf_old = rf_old
@@ -2290,16 +2185,14 @@ def lineshape_bins(K, lineshape='gaussian'):
   # phantom at the wrong M0.
   w = w / w.sum()
   # Drop sub-spins that cannot contribute. Gauss-Hermite spends its extreme
-  # abscissae on weights far below machine epsilon -- 4 of 32, 70 of 128 and
-  # 172 of 256 sit under 1e-16 -- and each one is a full sub-spin carried
-  # through every time step and then multiplied by nothing. Pruning at float64
-  # epsilon changes no result that float64 can represent, and it keeps large K
-  # from being mostly waste.
-  # >= 2, not >= 1: a single surviving bin is not an ensemble, and it would
-  # make _n_bins == 1, which silently routes the solver down the no-ensemble
-  # path while t2_prime still reads back as configured. Unreachable for the
-  # three shipped rules -- after normalisation at least one weight is ~1/K --
-  # but the threshold should not be the one that fails open.
+  # abscissae on weights far below machine epsilon -- 4 of 32, 70 of 128 --
+  # and each is a full sub-spin carried through every time step and then
+  # multiplied by nothing. Pruning at float64 epsilon changes no result
+  # float64 can represent.
+  #
+  # >= 2, not >= 1: a single surviving bin is not an ensemble and would make
+  # _n_bins == 1, routing the solver down the no-ensemble path while
+  # t2_prime still reads back as configured.
   keep = w >= 1e-16
   if keep.sum() >= 2:
     z, w = z[keep], w[keep]

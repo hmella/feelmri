@@ -102,15 +102,13 @@ MagnetizationState<T> solve_mri_impl(
         "solve_mri: b1_map must be empty or have one entry per node");
   }
   // A non-finite entry poisons that node from the first RF step and is then
-  // carried into every later block through the returned magnetization, with no
-  // diagnostic anywhere.
+  // carried into every later block through the returned magnetization.
   //
-  // This CANNOT be written as `!b1_map.allFinite()`, `v != v` or std::isnan:
-  // the default build is -Ofast, which implies -ffinite-math-only, under which
-  // the compiler is entitled to assume no NaN or Inf exists and folds every
-  // such test to false. Measured: the Eigen form accepted both NaN and Inf and
-  // returned a NaN magnetization. Test the IEEE exponent field through the
-  // object representation instead, which no fast-math flag may reinterpret.
+  // This cannot be written as `!b1_map.allFinite()`, `v != v` or std::isnan:
+  // the default build is -Ofast, which implies -ffinite-math-only, under
+  // which the compiler may assume no NaN or Inf exists and folds every such
+  // test to false. Test the IEEE exponent field through the object
+  // representation instead, which no fast-math flag may reinterpret.
   if (has_b1) {
     for (Eigen::Index p = 0; p < b1_map.size(); ++p) {
       if (!feelmri_is_finite(b1_map(p).real()) ||
@@ -247,18 +245,15 @@ MagnetizationState<T> solve_mri_impl(
           rf_o = b1p * rf_old;
         }
 
-        // Concomitant (Maxwell) term. The gradient coil cannot produce a
-        // purely linear Bz: Maxwell's equations force a second-order
-        // correction, which for a symmetric cylindrical design is
+        // Concomitant (Maxwell) term. The gradient coil cannot produce a purely
+        // linear Bz: Maxwell's equations force a second-order correction, which for
+        // a symmetric cylindrical design is
         //   Bc = [ (Gx^2+Gy^2) z^2 + (Gz^2/4)(x^2+y^2)
         //          - Gx Gz x z - Gy Gz y z ] / (2 B0)
-        // This is the ONLY channel in the kernel that is non-linear in
-        // position; everything else here is linear, which is why it cannot be
-        // faked upstream in the adapter.
-        //
-        // inv_2B0 is 0 when the caller leaves concomitant fields off, so the
-        // whole term is identically zero rather than merely small -- the
-        // numerical A/B against the feature-off build reads 0.000e+00.
+        // This is the only channel in the kernel that is non-linear in position,
+        // which is why it cannot be faked upstream in the adapter. inv_2B0 is 0
+        // when the caller leaves concomitant fields off, so the term is identically
+        // zero rather than merely small.
         const T px = curr(p, 0), py = curr(p, 1), pz = curr(p, 2);
         // Written as ONE expression per branch, not a running sum: under
         // -ffast-math a `+=` regroups the FMAs and the feature-off build stops
@@ -383,12 +378,10 @@ MagnetizationState<T> solve_mri_impl(
       }
     };
 
-    // Both branches are selected ONCE PER TIME STEP, never per node -- the
-    // same shape as the rf-free hoist, and for the same reason. `concomitant`
-    // is loop-invariant, so with the feature off the Maxwell arithmetic is not
-    // emitted at all rather than computed and multiplied by zero. That matters
-    // because the term is off by default and this box cannot resolve a ~5%
-    // kernel effect from a single run anyway.
+    // Both branches are selected once per time step, never per node -- the same
+    // shape as the rf-free hoist. `concomitant` is loop-invariant, so with the
+    // feature off the Maxwell arithmetic is not emitted at all rather than
+    // computed and multiplied by zero.
     //
     // `has_b1` is invariant over the whole solve and joins the same hoist: the
     // rf-free condition survives it unchanged, since b1 * 0 == 0.

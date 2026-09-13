@@ -2767,15 +2767,7 @@ def import_pulseq(
   # trajectory comes from pypulseq, whose calculate_kspace bridges the gap by
   # interpolating linearly from `last` to the next event on that axis, while
   # the solver integrates FEelMRI's own gradients, which are zero outside the
-  # event. Neither is what a scanner does -- one ramps absurdly slowly, the
-  # other jumps infinitely fast -- so refusing to guess and saying so is the
-  # only honest answer.
-  #
-  # Measured on the old tests/data/arb_v15.seq, whose shaped Gx stopped one
-  # sample short of a full sine period and so ended at 1.57% of peak: the kx
-  # handed to mri_signal ran to -8.43 1/m where the solver's own gradients
-  # played ~0, i.e. **1.686 cycles of phase across the 0.2 m FOV**, invisible
-  # to check_timing (which returns ok=True) and to every test.
+  # event. Neither is what a scanner does, so warn rather than guess.
   _warn_discontinuous_gradients(filename, pulseq_seq)
 
   for i in range(len(pulseq_seq)):
@@ -2872,18 +2864,16 @@ def import_pulseq(
     # cast at that boundary, usually after subtracting the window start.
     times_arr = np.ascontiguousarray(t_adc[mask] * 1e3, dtype=np.float64)
 
-    # The magnetization is snapshotted at the END of the anchor block, and
+    # The magnetization is snapshotted at the end of the anchor block, and
     # calculate_kspace measures k from the excitation, so the snapshot already
-    # carries whatever moment had accumulated by then. Handing the assembler
-    # the file's k as-is winds that moment a second time -- on the bundled
-    # files that is 252 to 460 1/m of slice-select, one to two whole cycles
-    # across the slice. Subtract it, so rw.kspace is the encoding measured
-    # FROM THE SNAPSHOT, which is what pairs with rw's Mxy column.
+    # carries whatever moment had accumulated by then. Subtract it, so
+    # rw.kspace is the encoding measured from the snapshot, which is what pairs
+    # with rw's Mxy column.
     #
     # The anchor is the last RF before the readout, so nothing between it and
     # the first sample reflects k and a plain integral is valid there. Working
     # backwards from the first ADC sample also keeps any earlier refocusing
-    # reflections, which pypulseq has already folded into k_traj_adc.
+    # reflections, which pypulseq has folded into k_traj_adc.
     if m_block >= 0 and times_arr.size:
       t_anchor_ms = float(block_end_s[m_block]) * 1e3
       k_at_anchor = kspace_file[0].astype(float) - _gradient_moment_between(
@@ -3172,13 +3162,9 @@ def simulate_pulseq(seq_path,
             "attenuated by the dephasing standing at its anchor")
       else:
         offsets = solver.bin_offsets
-        # The row counts are compared on LOCAL data, so under dual partitioning
-        # this fires on some ranks and not others -- measured 4 of 6 on a cube at
-        # 6 ranks, where two ranks happen to have equal bloch and signal counts.
-        # Calling the collective inside the branch that found the problem is the
-        # bug this repo has now hit four times: those two ranks walked into the
-        # redistribution below while the other four waited in the allgather, and
-        # all six hung. Every rank reaches it, with an empty message when clean.
+        # The row counts are compared on local data, so under dual partitioning
+        # this fires on some ranks and not others. Every rank reaches the
+        # collective, with an empty message when clean.
         mismatch = ''
         if (remembered[0].shape[0] != offsets.shape[0]
                 or remembered[1].shape[0] != offsets.shape[0]):
@@ -3192,12 +3178,11 @@ def simulate_pulseq(seq_path,
         bins = (solver.bin_magnetization, offsets,
                 solver.bin_weights, remembered[0], remembered[1])
 
-    # Under dual partitioning every set_static_fields and update_magnetization is
-    # an Alltoallv into the signal layout, and the bin loop below makes three of
-    # them per sub-spin: measured on cpmg_v15 at K = 16, 4 redistributions for the
-    # whole simulation became 208. The window-independent arrays are moved once
-    # here and the per-window ensemble once below, after which the loop runs with
-    # the signal layout already active and communicates nothing.
+    # Under dual partitioning every set_static_fields and update_magnetization
+    # is an Alltoallv into the signal layout, and the bin loop below would make
+    # three per sub-spin. The window-independent arrays are moved once here and
+    # the per-window ensemble once below, after which the loop runs with the
+    # signal layout already active and communicates nothing.
     dual = (bins is not None and getattr(phantom, '_dual', False)
             and phantom._active_partition != 'signal')
     # `bins` stays in the BLOCH layout: it is what the finally below hands back
@@ -3238,17 +3223,10 @@ def simulate_pulseq(seq_path,
       points, t = _reshape_signal_inputs(
           rw.kspace[:, 0], rw.kspace[:, 1], rw.kspace[:, 2],
           rw.times - rw.t_anchor, None)
-      # `t` is elapsed-since-snapshot, which is what the relaxation and
-      # off-resonance factors need -- but the POD weights need ABSOLUTE
-      # sequence time, because that is the frame the motion is defined in.
-      # `get_weights` reconciles the two by adding the trajectory's own
-      # `timeshift`, so point it at this window's anchor. Without this every
-      # window sampled the motion from cycle phase 0 and the readout
-      # deformation disagreed with the one the solver used at the same
-      # instant. Restored afterwards so the caller's object comes back
-      # unchanged.
-      # The phantom's orientation, so the readout evaluates Bc in the same
-      # frame the solver did.
+      # `t` is elapsed-since-snapshot, which the relaxation and off-resonance
+      # factors need, but the POD weights need absolute sequence time, the frame
+      # the motion is defined in. `get_weights` adds the trajectory's own
+      # `timeshift`, so point it at this window's anchor and restore it after.
       maxwell = (maxwell_phase_coefficients(
                      rw.maxwell, scanner,
                      rotation=getattr(phantom, '_orientation', None))
@@ -3264,15 +3242,12 @@ def simulate_pulseq(seq_path,
         else:
           # Bin-by-bin readout. Collapsing the sub-ensemble at the snapshot and
           # letting the assembler replay a single exp(-t/T2) from there cannot
-          # reproduce a readout: the snapshot sits at the coherence ANCHOR, where
-          # the ensemble is maximally dephased, and nothing downstream can bring
-          # it back. Measured on cpmg_v15 at T2' = 8 ms, every echo came out
-          # scaled by exp(-0.5*(tau/T2')^2) = 0.82.
+          # reproduce a readout: the snapshot sits at the coherence anchor, where the
+          # ensemble is maximally dephased, and nothing downstream can bring it back.
           #
-          # Each sub-spin is instead given its own off-resonance -- the bin
-          # offsets are in the same rad/ms frame as phi_dB0, so they simply add --
-          # and the signals are weight-summed. Exact, and it costs n_bins passes
-          # over the signal path per window.
+          # Each sub-spin is given its own off-resonance instead -- the bin offsets
+          # are in the same rad/ms frame as phi_dB0, so they simply add -- and the
+          # signals are weight-summed. Costs n_bins passes over the signal path.
           bin_Mxy, offsets, weights, T2_read, phi_read = readout_bins
           ensemble = bin_Mxy[:, :, rw.m_storage_idx]
           if dual:
@@ -3291,12 +3266,9 @@ def simulate_pulseq(seq_path,
           pod.update_timeshift(shift)
         if bins is not None:
           phantom.set_static_fields(bins[3], bins[4])
-          # The bin loop above left the phantom holding the LAST sub-spin --
-          # a tail bin of the quadrature, weight ~1e-16 -- so anything the
-          # caller evaluates afterwards reads that instead of the collapsed
-          # magnetization. Measured on cpmg_v15 at T2' = 8 ms, K = 32: S(0)
-          # came back 1.133x too large and with a spurious real part where
-          # the correct value is purely imaginary.
+          # The bin loop above leaves the phantom holding the last sub-spin, a tail
+          # bin of the quadrature with weight ~1e-16, so restore the collapsed
+          # magnetization for anything the caller evaluates afterwards.
           phantom.update_magnetization(Mxy[:, rw.m_storage_idx])
       # The receiver's frequency/phase offsets and any per-sample phase shape.
       signal = rw.demodulate(signal)
