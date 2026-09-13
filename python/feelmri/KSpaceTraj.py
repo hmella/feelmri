@@ -121,7 +121,8 @@ class Trajectory:
         self.LOC = LOC.astype(dtype)           # location, metres
         self.dtype = dtype
 
-    def maxwell_coefficients(self, scanner, t0=None):
+    def maxwell_coefficients(self, scanner, t0=None, carried=None,
+                             t_snapshot=None):
         """Concomitant phase coefficients for this readout, ready for
         ``mri_signal(..., maxwell=...)``.
 
@@ -152,10 +153,27 @@ class Trajectory:
         That is warned about rather than guessed at: the trajectory does not
         know where the excitation was.
 
-        **Caveat specific to CartesianStack.** It models phase encoding as a
-        k-space offset with a single prephaser waveform rather than one
-        waveform per line, so the y-axis products are that prephaser's for
-        every line rather than varying with ky. The readout axis, which
+        ``carried`` closes the one hole this split otherwise has. `Bc` is
+        QUADRATIC in G, so `Bc(G_a + G_b) != Bc(G_a) + Bc(G_b)`: wherever the
+        gradients the solver already integrated still overlap this
+        trajectory's own, computing the two contributions separately drops
+        their cross term. Pass the solver's gradients -- expressed in THIS
+        trajectory's time frame, i.e. measured from the same origin as
+        :attr:`times` -- and the whole field is integrated once and what the
+        solver already applied, `integral` up to ``t_snapshot`` (default
+        :attr:`t_start`) of the carried gradients alone, is subtracted back
+        off. Measured on ``examples/phase_contrast.py``, where the readout
+        prephasers overlap the VENC bipolar by 0.45 ms: the cross term is
+        **15.8%** of the velocity-encoding direction's concomitant readout
+        phase and **0%** of the reference direction's, so it does not cancel in
+        the velocity map -- it lands directly on the quantity the example
+        measures.
+
+        **Caveat specific to CartesianStack.** Both encoding axes are modelled
+        by their LARGEST prephaser rather than one waveform per line and per
+        partition -- the y and z products are the outermost line's and the
+        outermost partition's everywhere, an upper bound that is tight at the
+        edges of k-space and loose at the centre. The readout axis, which
         dominates, is exact.
         """
         from feelmri.PulseqAdapter import (maxwell_moments as _moments,
@@ -169,6 +187,7 @@ class Trajectory:
                 f"CartesianStack does today; feelmri.maxwell_moments_from_kspace "
                 f"is the approximate fallback, and it cannot see a prephaser.")
         t0 = 0.0 if t0 is None else float(t0)
+        carried = [] if carried is None else list(carried)
         earliest = min(float(np.asarray(g.timings.m_as('ms')).min())
                        for g in gradients)
         if earliest < t0 - 1e-9:
@@ -182,7 +201,20 @@ class Trajectory:
                 f"magnetization snapshot, or pass `t0` explicitly.")
         R = np.asarray(self.MPS_ori, dtype=float)
         times = np.asarray(self.times.m_as('ms'), dtype=float).reshape(-1)
-        moments = _moments(gradients, t0, times, rotation=R)
+        if carried:
+            t_snap = (float(self.t_start.m_as('ms')) if t_snapshot is None
+                      else float(t_snapshot))
+            # ONE integration of the summed field, so the cross terms between
+            # the two gradient sets are present; then the constant the solver
+            # has already put on the magnetization is taken back off. After
+            # `t_snap` the carried gradients are over, so this leaves exactly
+            # the readout's own share plus the overlap.
+            moments = (_moments(list(gradients) + carried, t0, times,
+                                rotation=R)
+                       - _moments(carried, t0, np.array([t_snap]),
+                                  rotation=R)[0])
+        else:
+            moments = _moments(gradients, t0, times, rotation=R)
         return _coef(moments, scanner, rotation=R)
 
     def check_ph_enc_lines(self, ph_samples):
@@ -271,7 +303,37 @@ class CartesianStack(Trajectory):
         ph_grad.change_time(enc_time)
         ro_grad0.change_time(enc_time)
 
+        # Partition encode. It exists as a k-space OFFSET further down and had
+        # no waveform at all, so the concomitant moments saw a stack of slices
+        # as though nothing were played along z -- and `Bc` weights `Gz` most
+        # heavily of the three, through `(Gz^2/4)(x^2 + y^2)` and both cross
+        # terms.
+        #
+        # Built at the largest |kz| the stack reaches, which is the same
+        # maximum-prephaser approximation the in-plane phase encode already
+        # makes, and placed to END at `t_start`. Ending rather than starting
+        # with the others is what keeps it out of the readout: its area is set
+        # by the SLAB thickness, so on a thin-slab stack it is comfortably the
+        # longest of the three prephasers and start-aligning it would run it
+        # into the first echo, where the k-space model says nothing is playing.
+        # `enc_time` is untouched either way, so no echo time and no sample
+        # time moves: a single-partition acquisition is bit-identical.
         enc_gradients = []
+        if self.slices > 1:
+            kz_max = np.max(np.abs(self.kz_extent.m_as('1/m')))
+            kz_grad = Gradient(time=Quantity(0.0, 'ms'), scanner=self.scanner)
+            kz_grad.calculate(Quantity(kz_max, '1/m'))
+            kz_grad.change_time(self.t_start - kz_grad.dur)
+            kz_grad.axis = 2
+            if kz_grad.time < Quantity(0.0, 'ms'):
+                warnings.warn(
+                    f"{type(self).__name__}: the partition-encode prephaser is "
+                    f"{kz_grad.dur.m_as('ms'):.4f} ms and `t_start` is only "
+                    f"{self.t_start.m_as('ms'):.4f} ms, so it starts before "
+                    f"the trajectory's own origin and part of it is outside "
+                    f"any forward integration from there.")
+            enc_gradients.append(kz_grad)
+
         ro_gradients = [ro_grad0, ]
         ph_gradients = [ph_grad, ]
         for i in range(self.lines_per_shot):
@@ -415,7 +477,8 @@ class CartesianStack(Trajectory):
             g.axis = 0
         for g in ph_gradients:
             g.axis = 1
-        self.gradients = list(ro_gradients) + list(ph_gradients)
+        self.gradients = (list(ro_gradients) + list(ph_gradients)
+                          + list(enc_gradients))
 
         return (kspace, Quantity(t, 'ms'))
 

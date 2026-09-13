@@ -1087,6 +1087,22 @@ class FEMPhantom:
         be forgotten; measured on a 20 deg tilt, forgetting it is a 31.6%
         error on the concomitant phase.
         """
+        # The assembler CAPTURES the node coordinates in its constructor --
+        # positions, element sizes, the quadrature cache, the mass matrix and
+        # the ownership mask all come from them -- so moving the mesh
+        # afterwards leaves every one of those describing a phantom that no
+        # longer exists. Nothing downstream notices; the signal is simply
+        # computed at the old positions. Measured on a 23 deg tilt, the
+        # solver-to-assembler handoff came apart by 1.46 relative.
+        #
+        # The predicate is the presence of the assembler list, which every
+        # rank builds together, so this cannot fire on some ranks only.
+        collective_raise(
+            f"orient: set_assembler has already been called, and the assembler "
+            f"holds the node coordinates this would move. Orient the phantom "
+            f"BEFORE building the assembler."
+            if getattr(self, 'assembler', None) else '', RuntimeError)
+
         # Kept in float64 whatever the mesh dtype, and taken BEFORE the cast
         # below: it is used to rotate gradients, so its ORTHOGONALITY is what
         # matters, not its agreement with the stored nodes. Rounded to float32
@@ -1114,6 +1130,22 @@ class FEMPhantom:
         LOC : pint.Quantity
             3-element location vector previously passed to :meth:`orient`.
         """
+        # The assembler CAPTURES the node coordinates in its constructor --
+        # positions, element sizes, the quadrature cache, the mass matrix and
+        # the ownership mask all come from them -- so moving the mesh
+        # afterwards leaves every one of those describing a phantom that no
+        # longer exists. Nothing downstream notices; the signal is simply
+        # computed at the old positions. Measured on a 23 deg tilt, the
+        # solver-to-assembler handoff came apart by 1.46 relative.
+        #
+        # The predicate is the presence of the assembler list, which every
+        # rank builds together, so this cannot fire on some ranks only.
+        collective_raise(
+            f"reorient: set_assembler has already been called, and the assembler "
+            f"holds the node coordinates this would move. Reorient the phantom "
+            f"BEFORE building the assembler."
+            if getattr(self, 'assembler', None) else '', RuntimeError)
+
         # Back in the phantom's own frame, so nothing downstream should rotate.
         self._orientation = None
 

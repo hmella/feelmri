@@ -654,10 +654,15 @@ def test_a_zero_or_non_finite_static_field_is_refused(tmp_path):
 # x = z = 10 cm over its 103 ms train.
 
 
-def _maxwell_fixture(tmp_path, name):
+def _maxwell_fixture(tmp_path, name, orientation=None):
   """Five nodes at incommensurate coordinates spread over ~20 cm, so all four
-  Maxwell terms are live and none of them is degenerate."""
+  Maxwell terms are live and none of them is degenerate.
+
+  `orientation` is applied BEFORE `set_assembler`, which is the only valid
+  order: the assembler captures the node coordinates in its constructor.
+  """
   import meshio
+  from pint import Quantity as _Q
   points = np.array([[0.11, -0.03, 0.07],
                      [-0.05, 0.12, 0.02],
                      [0.04, 0.06, -0.10],
@@ -667,6 +672,8 @@ def _maxwell_fixture(tmp_path, name):
   meshio.write(str(path), meshio.Mesh(points, [('tetra', np.array([[0, 1, 2, 3],
                                                                   [1, 2, 4, 3]]))]))
   phantom = FEMPhantom(path=str(path))
+  if orientation is not None:
+    phantom.orient(orientation, _Q(np.zeros(3), 'm'))
   phantom.set_assembler(voxel_size=0.0, lorder=2, horder=4,
                         nodal_approximation=False, lumped=False)
   n = phantom.local_nodes.shape[0]
@@ -812,8 +819,9 @@ def test_the_readout_term_follows_a_moving_phantom(tmp_path):
     f'tell a moving phantom from a still one')
 
 
+@pytest.mark.parametrize('oblique', [False, True], ids=['axial', 'oblique'])
 def test_the_concomitant_term_continues_across_the_solver_to_assembler_handoff(
-        tmp_path):
+        tmp_path, oblique):
   """The acceptance test for carrying concomitant fields into the readout.
 
   Evolving `TA` in the solver and handing the remaining `TB` to the assembler
@@ -830,6 +838,15 @@ def test_the_concomitant_term_continues_across_the_solver_to_assembler_handoff(
   concomitant term does. That cost a wrong alarm here.
 
   Measured: 8.5e-05 relative with the term, 4.9e-01 without it.
+
+  **The oblique case is the one that pins the FRAME.** Run axially, the
+  rotation is the identity and the whole six-coefficient apparatus collapses
+  to the four the field naturally has -- so the axial arm passes whether or not
+  either half knows about `FEMPhantom.orient`. With the phantom tilted, the
+  solver must evaluate `Bc` on physical-frame coordinates and gradients while
+  the assembler works in the imaging frame, and the two must still meet.
+  Measured with the solver made frame-naive again: the axial arm is unmoved
+  and the oblique one reads **3.11e-01**, against the 1e-3 gate.
   """
   pytest.importorskip('meshio')
   from pint import Quantity as Q_
@@ -841,6 +858,13 @@ def test_the_concomitant_term_continues_across_the_solver_to_assembler_handoff(
 
   scanner = Scanner()
   TA, TB, amps = 2.0, 3.0, (14.0, -9.0, 20.0)
+  th = np.deg2rad(23.0)
+  R = (np.array([[np.cos(th), -np.sin(th), 0.0],
+                 [np.sin(th), np.cos(th), 0.0],
+                 [0.0, 0.0, 1.0]])
+       @ np.array([[np.cos(th), 0.0, np.sin(th)],
+                   [0.0, 1.0, 0.0],
+                   [-np.sin(th), 0.0, np.cos(th)]])) if oblique else None
 
   def gradients(duration):
     return [Gradient(timings=Q_(np.array([0.0, duration]), 'ms'),
@@ -849,7 +873,11 @@ def test_the_concomitant_term_continues_across_the_solver_to_assembler_handoff(
             for axis, a in enumerate(amps)]
 
   def solve_to(duration, tag):
-    phantom, _points = _maxwell_fixture(tmp_path, f'handoff_{tag}.vtu')
+    # The solver reads the orientation off the phantom, which is the whole
+    # point: forgetting to pass it is how the frame defect arose.
+    phantom, _points = _maxwell_fixture(
+        tmp_path, f'handoff_{tag}_{"obl" if oblique else "ax"}.vtu',
+        orientation=R)
     block = SequenceBlock(gradients=gradients(duration),
                           dur=Q_(duration, 'ms'), dt=Q_(0.002, 'ms'),
                           empty=False)
@@ -866,7 +894,7 @@ def test_the_concomitant_term_continues_across_the_solver_to_assembler_handoff(
     phantom.update_magnetization(np.ascontiguousarray(mxy))
     points = tuple(np.full((1, 1, 1), v, dtype=np.float32) for v in kvec)
     coef = (None if moments is None
-            else maxwell_phase_coefficients(moments, scanner))
+            else maxwell_phase_coefficients(moments, scanner, rotation=R))
     return complex(np.asarray(phantom.signal_sum(
         points, np.zeros((1, 1, 1), dtype=np.float32), None,
         maxwell=coef)).ravel()[0])
@@ -874,7 +902,7 @@ def test_the_concomitant_term_continues_across_the_solver_to_assembler_handoff(
   leg = Sequence()
   leg.add_block(SequenceBlock(gradients=gradients(TB), dur=Q_(TB, 'ms'),
                               dt=Q_(0.002, 'ms'), empty=False))
-  moments = maxwell_moments(leg, 0.0, np.array([TB]))
+  moments = maxwell_moments(leg, 0.0, np.array([TB]), rotation=R)
   kvec = _gradient_moment_between(leg, 0.0, TB, scanner.gammabar.m_as('Hz/T'))
 
   phantom_a, mxy_a = solve_to(TA, 'split')
@@ -1421,3 +1449,30 @@ def test_a_receive_map_does_not_survive_a_repartition(tmp_path):
                                        dtype=np.complex64))
   pts, t = _dc_inputs()
   assert np.asarray(phantom.signal_sum(pts, t, None)).size == 1
+
+
+def test_orienting_after_set_assembler_is_refused(tmp_path):
+  """The assembler captures the node coordinates in its constructor -- node
+  positions, element sizes, the quadrature cache, the mass matrix and the
+  ownership mask all come from them -- so moving the mesh afterwards leaves
+  every one of them describing a phantom that no longer exists.
+
+  Nothing downstream notices; the signal is simply computed at the old
+  positions. Measured on a 23 deg tilt, the solver-to-assembler handoff came
+  apart by 1.46 relative, which is how this was found.
+  """
+  from pint import Quantity as Q_
+  th = np.deg2rad(23.0)
+  R = np.array([[np.cos(th), 0.0, np.sin(th)],
+                [0.0, 1.0, 0.0],
+                [-np.sin(th), 0.0, np.cos(th)]])
+  phantom, _points = _maxwell_fixture(tmp_path, 'orient_late.vtu')
+  with pytest.raises(RuntimeError, match='set_assembler has already'):
+    phantom.orient(R, Q_(np.zeros(3), 'm'))
+  with pytest.raises(RuntimeError, match='set_assembler has already'):
+    phantom.reorient(R, Q_(np.zeros(3), 'm'))
+
+  # The right order is accepted and leaves the orientation where the solver
+  # and the readout helpers both look for it.
+  ok, _points = _maxwell_fixture(tmp_path, 'orient_early.vtu', orientation=R)
+  assert np.allclose(ok._orientation, R)

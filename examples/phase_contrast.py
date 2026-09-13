@@ -1,3 +1,4 @@
+import copy
 import os
 
 from skimage import data
@@ -130,6 +131,7 @@ if __name__ == '__main__':
   Nb_frames = phantom.Nfr if not FAST_MODE else 1
   Mxy_PC = np.zeros([phantom.local_nodes.shape[0], Nb_frames, enc.nb_directions], dtype=np.complex64)
   conc_coefficients = []
+  imaging_blocks = []
   for d in range(enc.nb_directions):
 
     # Create sequence object and Bloch solver
@@ -158,6 +160,7 @@ if __name__ == '__main__':
     # position. Same helpers the readout uses, integrated over the block's own
     # gradients from the RF centre -- which is where the transverse
     # magnetization is created and so where the clock starts.
+    imaging_blocks.append(imaging)
     conc_coefficients.append(maxwell_phase_coefficients(
         maxwell_moments(imaging.gradients, sp.rf.time.m_as('ms'),
                         np.array([imaging.time_extent[1].m_as('ms')]),
@@ -230,7 +233,32 @@ if __name__ == '__main__':
   # It also applies both rotations implied by the oblique MPS orientation --
   # the gradients are along logical axes while Bc is B0-aligned, and the nodes
   # are in the imaging frame.
-  maxwell = traj.maxwell_coefficients(scanner)
+  #
+  # `carried` is what makes the split exact. `Bc` is QUADRATIC in G, so
+  # `Bc(G_a + G_b) != Bc(G_a) + Bc(G_b)`, and the readout prephasers overlap
+  # the tail of the VENC bipolar by 0.45 ms here -- computing the two halves
+  # independently drops their cross term. Handing the solver's own gradients
+  # over integrates the whole field once and subtracts back what the solver
+  # already applied. Measured: the cross term is 15.8% of the concomitant
+  # readout phase on the encoding direction and exactly 0% on the reference,
+  # so it does NOT cancel in phi_v -- it lands on the quantity this example is
+  # about. It is also constant across the readout (to 2.8e-13), because the
+  # overlap ends at the snapshot.
+  #
+  # The gradients are shifted into the trajectory's own time frame, which runs
+  # from the RF centre.
+  maxwell = []
+  for d in range(enc.nb_directions):
+      carried = []
+      for g in imaging_blocks[d].gradients:
+          g_shifted = copy.deepcopy(g)
+          g_shifted.change_time(g.time - sp.rf.time)
+          carried.append(g_shifted)
+      maxwell.append(traj.maxwell_coefficients(scanner, carried=carried))
+  # The part that does not cancel between the two encodings, as a constant
+  # quadratic form: what the panel below has to include alongside the solver's.
+  readout_bias = [m[0] - traj.maxwell_coefficients(scanner)[0]
+                  for m in maxwell]
 
   # Iterate over cardiac phases
   for fr in range(Nb_frames):
@@ -241,8 +269,9 @@ if __name__ == '__main__':
       # Update timeshift in the POD velocity
       pod_velocity.update_timeshift(fr * parameters.Imaging.TimeSpacing.m_as('ms'))
 
-      # Update magnetization
-      phantom.update_magnetization(Mxy_PC[:, fr, :])
+      # One readout per encoding direction, because `maxwell` now differs
+      # between them: the overlap cross term above is a property of the VENC
+      # bipolar, which is what the two directions differ by.
 
       # Generate 4D flow image
       # Elapsed time since the MAGNETIZATION SNAPSHOT, not since the
@@ -253,10 +282,13 @@ if __name__ == '__main__':
       # imaging block ends. Feeding absolute times applies a spurious
       # exp(-t_start/T2*) and, worse, a SPATIALLY VARYING phi*t_start:
       # measured 1.688 rad peak-to-peak across the object here.
-      K[:,:,:,:,fr] = phantom.mri_signal(traj.points,
-                                         traj.times.m_as('ms') - traj.t_start.m_as('ms'),
-                                         pod_velocity,
-                                         maxwell=maxwell)
+      for d in range(enc.nb_directions):
+          phantom.update_magnetization(Mxy_PC[:, fr, d])
+          K[:,:,:,d:d+1,fr] = phantom.mri_signal(
+              traj.points,
+              traj.times.m_as('ms') - traj.t_start.m_as('ms'),
+              pod_velocity,
+              maxwell=maxwell[d])
 
   # Gather results
   K = gather_data(K)
@@ -293,7 +325,8 @@ if __name__ == '__main__':
   def _quadratic(c):
       return (c[0]*gx*gx + c[1]*gy*gy + c[2]*gz*gz
               + c[3]*gx*gy + c[4]*gx*gz + c[5]*gy*gz)
-  phi_c = _quadratic(conc_coefficients[0]) - _quadratic(conc_coefficients[1])
+  phi_c = (_quadratic(conc_coefficients[0] + readout_bias[0])
+           - _quadratic(conc_coefficients[1] + readout_bias[1]))
   phi_c = np.repeat(phi_c[..., np.newaxis], Im.shape[-1], axis=-1)
   v_err = parameters.VelocityEncoding.VENC.m_as('m/s') / np.pi * phi_c
   MPI_print(f'[concomitant] bias in phi_v over the FOV: '

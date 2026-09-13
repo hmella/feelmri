@@ -387,3 +387,100 @@ def test_gradient_activity_before_the_origin_is_warned_about():
   assert earliest < 0.0, 'this case no longer places activity before 0 ms'
   with pytest.warns(UserWarning, match='before the integration origin'):
     traj.maxwell_coefficients(SCANNER)
+
+
+def test_two_overlapping_gradient_SETS_cannot_be_added_after_squaring():
+  """`Bc` is quadratic in G, so `Bc(G_a + G_b) != Bc(G_a) + Bc(G_b)` wherever
+  the two overlap -- the cross term belongs to neither set.
+
+  This is the control for the `carried` argument below: it shows the split is
+  wrong only in the overlap, and exactly right outside it. Disjoint sets add to
+  0.0e+00; overlapping ones do not.
+  """
+  ts = np.array([0.0, 0.2, 1.2, 1.4])
+  amp = np.array([0.0, 18.0, 18.0, 0.0])
+  # Same support -> the two sets overlap completely.
+  first = _gradient(ts, amp, axis=0)
+  second = _gradient(ts, -0.6 * amp, axis=2)
+  t1 = float(ts[-1])
+  joint = maxwell_moments([first, second], 0.0, np.array([t1]))
+  split = (maxwell_moments([first], 0.0, np.array([t1]))
+           + maxwell_moments([second], 0.0, np.array([t1])))
+  assert np.abs(joint - split).max() > 0.1 * np.abs(joint).max()
+
+  # Shifted clear of each other, the same two sets DO add.
+  shifted = _gradient(ts + t1 + 1.0, -0.6 * amp, axis=2)
+  t2 = float(ts[-1] + t1 + 1.0)
+  joint2 = maxwell_moments([first, shifted], 0.0, np.array([t2]))
+  split2 = (maxwell_moments([first], 0.0, np.array([t2]))
+            + maxwell_moments([shifted], 0.0, np.array([t2])))
+  assert np.abs(joint2 - split2).max() == 0.0
+
+
+def test_carried_gradients_are_integrated_as_one_field_with_the_readout():
+  """The solver integrates its block's gradients and the assembler the
+  trajectory's, so where the two OVERLAP in time their cross term is computed
+  by neither. `carried` closes that: the whole field is integrated once and
+  what the solver already applied is subtracted back off.
+
+  Checked against the definition rather than against the implementation --
+  `moments(union) - moments(carried up to the snapshot)` -- and shown to differ
+  from the naive sum, or the argument would be doing nothing.
+  """
+  traj = _cartesian(t_start_ms=2.0)
+  scanner = SCANNER
+  # A gradient that is still playing when the prephasers start.
+  carried = [_gradient([0.0, 0.4, 1.6, 1.9], [0.0, 22.0, 22.0, 0.0], axis=2)]
+  t_snap = float(traj.t_start.m_as('ms'))
+  times = np.asarray(traj.times.m_as('ms'), dtype=float).reshape(-1)
+  R = np.asarray(traj.MPS_ori, dtype=float)
+
+  got = traj.maxwell_coefficients(scanner, carried=carried)
+  expected = maxwell_phase_coefficients(
+      maxwell_moments(list(traj.gradients) + carried, 0.0, times, rotation=R)
+      - maxwell_moments(carried, 0.0, np.array([t_snap]), rotation=R)[0],
+      scanner, rotation=R)
+  assert np.abs(got - expected).max() < 1e-9 * np.abs(expected).max()
+
+  plain = traj.maxwell_coefficients(scanner)
+  assert np.abs(got - plain).max() > 1e-3 * np.abs(plain).max(), (
+    'this carried set does not overlap the readout, so the argument is '
+    'untested here')
+
+  # The correction is CONSTANT across the window, because the overlap ends at
+  # the snapshot and the carried gradients contribute nothing after it.
+  delta = got - plain
+  assert np.abs(delta - delta[0]).max() < 1e-9 * np.abs(delta).max()
+
+  # A carried set that finishes before the trajectory starts changes nothing.
+  early = [_gradient([-4.0, -3.6, -3.2], [0.0, 22.0, 0.0], axis=2)]
+  assert np.abs(traj.maxwell_coefficients(scanner, carried=early)
+                - plain).max() < 1e-12 * np.abs(plain).max()
+
+
+def test_a_stack_retains_its_partition_encode_gradient():
+  """`CartesianStack` modelled kz as a pure k-space offset with no waveform, so
+  the concomitant moments saw a stack as though nothing were played along z --
+  and `Bc` weights `Gz` most heavily of the three, through `(Gz^2/4)(x^2+y^2)`
+  and both cross terms.
+
+  Timing is unchanged by construction: the partition encode is START-aligned
+  with the other two prephasers, so `enc_time`, the echo time and every sample
+  time are the same as before.
+  """
+  flat = _cartesian(t_start_ms=4.0, res=(16, 4, 1))
+  stack = _cartesian(t_start_ms=4.0, res=(16, 4, 5))
+  assert not any(g.axis == 2 for g in flat.gradients), (
+    'a single partition needs no z encode')
+  assert sum(g.axis == 2 for g in stack.gradients) == 1
+
+  # It carries real second moment: the z column of the moments is non-zero.
+  times = np.asarray(stack.times.m_as('ms'), dtype=float).reshape(-1)
+  with_z = maxwell_moments(stack.gradients, 0.0, times)
+  without_z = maxwell_moments([g for g in stack.gradients if g.axis != 2],
+                              0.0, times)
+  assert without_z[:, 1].max() == 0.0, 'the fixture already had a z gradient'
+  assert with_z[:, 1].max() > 0.0, 'the partition encode contributes nothing'
+
+  assert float(flat.echo_time.m_as('ms')) == pytest.approx(
+      float(stack.echo_time.m_as('ms'))), 'the timing moved'

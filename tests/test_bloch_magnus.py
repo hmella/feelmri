@@ -948,6 +948,84 @@ def test_the_solver_evaluates_bc_in_the_physical_frame(wide_phantom):
     f'a {gap:.3f} rad frame-naive gap')
 
 
+def _spin_echo_phase(phantom, gradients, with_180, dur_ms=4.0):
+  """Concomitant phase accumulated over two gradient lobes, optionally with a
+  refocusing pulse between them. Returned as the on-minus-off phase, so the
+  linear term and the RF itself divide out.
+  """
+  seq_on, seq_off = Sequence(), Sequence()
+  for seq in (seq_on, seq_off):
+    seq.add_block(_gradient_block(gradients[0], dur_ms))
+    if with_180:
+      # NON-SELECTIVE. A slice-selective 180 plays a gradient symmetric about
+      # the pulse, and `Bc` is EVEN in G, so the two halves of that lobe add
+      # instead of cancelling -- which would put concomitant phase into the
+      # very case that is supposed to refocus it.
+      seq.add_block(make_hard_pulse_block(np.pi, dur_ms=0.2))
+    seq.add_block(_gradient_block(gradients[1], dur_ms))
+  out = []
+  for seq, conc in ((seq_on, True), (seq_off, False)):
+    solver = BlochSolver(
+      seq, phantom, T1=Quantity(1e9, 'ms'), T2=Quantity(1e9, 'ms'),
+      initial_Mxy=1.0 + 0.0j, initial_Mz=0.0, perfect_spoiling=False,
+      dtype='float64', method='magnus2', concomitant_fields=conc)
+    Mxy, _ = solver.solve()
+    out.append(Mxy[:, -1])
+  return np.angle(out[0] / out[1])
+
+
+def test_the_spin_echo_trio_separates_the_linear_and_maxwell_terms(wide_phantom):
+  """Three two-lobe experiments whose ONLY difference is the sign of the second
+  lobe and whether a 180 sits between them:
+
+    A  (G,  G) with a 180   linear refocuses   Bc refocuses
+    B  (G, -G) no 180       linear refocuses   Bc DOUBLES
+    C  (G, -G) with a 180   linear DOUBLES     Bc refocuses
+
+  A 180 refocuses any static field, and `Bc(-G) == Bc(G)` because it is a sum
+  of squares -- so the two terms respond oppositely to the same pair of
+  switches. A concomitant phase bolted on as a post-hoc `integral(G^2)` rather
+  than carried through the evolution satisfies the closed-form test that
+  already exists here and fails A and C by exactly 2x, because it has no way
+  to know a 180 happened.
+
+  float64 throughout: the quantity being shown to be zero is ~1 rad at float32
+  round-off ~1e-2.
+  """
+  G = (16.0, -11.0, 19.0)
+  Gm = tuple(-g for g in G)
+  dur_ms = 4.0
+  scanner = Scanner()
+  gamma = scanner.gamma.m_as('rad/ms/mT')
+  nodes = wide_phantom.local_nodes.astype(np.float64)
+  bc = _concomitant_field_mT(nodes, G, scanner.field_strength.m_as('mT'))
+
+  phi_A = _spin_echo_phase(wide_phantom, (G, G), True, dur_ms)
+  phi_B = _spin_echo_phase(wide_phantom, (G, Gm), False, dur_ms)
+  phi_C = _spin_echo_phase(wide_phantom, (G, Gm), True, dur_ms)
+
+  one_lobe = gamma * bc * dur_ms
+  assert one_lobe.max() > 0.5, 'this gradient produces no concomitant phase'
+
+  for tag, phi in (('A', phi_A), ('C', phi_C)):
+    worst = float(np.abs(np.exp(1j * phi) - 1.0).max())
+    assert worst < 1e-5, (
+      f'case {tag}: the 180 did not refocus the concomitant phase; residual '
+      f'{worst:.3e} against {one_lobe.max():.3f} rad per lobe')
+
+  expected = np.exp(-1j * 2.0 * one_lobe)
+  worst = float(np.abs(np.exp(1j * phi_B) - expected).max())
+  assert worst < 1e-5, (
+    f'case B: two lobes of opposite sign must DOUBLE the concomitant phase, '
+    f'not cancel it; off by {worst:.3e}')
+
+  # The control for A and C: the SAME two lobes without the 180 reach the
+  # doubled phase too, so what those two cases show is the refocusing and not
+  # a gradient pair that happened to produce nothing.
+  phi_A_no180 = _spin_echo_phase(wide_phantom, (G, G), False, dur_ms)
+  assert float(np.abs(np.exp(1j * phi_A_no180) - expected).max()) < 1e-5
+
+
 def _shaped_rf_block(scale, dur_ms=1.0, n=64, dt_ms=0.02):
   """A COMPLEX, time-varying pulse. Needed for the order-4 commutator to be
   non-zero: a real hard pulse on resonance makes both correction terms vanish
