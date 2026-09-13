@@ -2611,6 +2611,43 @@ def b0_kspace_shift(field, times_ms, scanner, rotation=None, location=None):
   return dk, gamma * b * t
 
 
+def b0_readout_terms(field, times_ms, scanner, rotation=None, location=None):
+  """Every channel a POLYNOMIAL lab-frame field needs on a readout.
+
+  Returns ``(dk, phase, maxwell)``: the k-space offset to ADD to the samples,
+  a per-sample phase in rad for :func:`feelmri.Bloch.apply_demodulation`, and
+  ``(N, 6)`` quadratic coefficients to ADD to whatever the concomitant term
+  already contributes -- ``None`` below degree 2.
+
+  One call rather than :func:`b0_kspace_shift` plus something else, for the
+  reason `Trajectory.b0_terms` exists: a field split across three channels is
+  a field that can be half-applied, and `b0_kspace_shift` alone cannot carry a
+  quadratic part at all -- it refuses one, which left `simulate_pulseq` unable
+  to simulate a degree-2 field that `B0Field.on_phantom` builds happily.
+
+  A per-node field rides the phantom instead and is refused here by name.
+  """
+  if getattr(field, 'kind', None) == 'nodal':
+    raise TypeError(
+        "b0_readout_terms: this field is a per-node expansion; none of these "
+        "three channels can carry one. It rides the phantom instead -- add "
+        "`B0Field.readout_terms(...).phi_nodal` to `phi_dB0` and pass "
+        "`.node_gradient` to `FEMPhantom.set_b0_gradient`.")
+  b, g, q = field.in_frame_full(rotation=rotation, location=location,
+                                physical=False)
+  t = np.asarray(times_ms, dtype=np.float64)
+  gammabar = scanner.gammabar.m_as('1/ms/mT')
+  gamma = scanner.gamma.m_as('rad/ms/mT')
+  dk = (gammabar * t)[..., None] * g.reshape((1,) * t.ndim + (3,))
+  maxwell = None
+  if np.any(q):
+    # The assembler ADDS `m . monomials` to the phase, and the phase a static
+    # field accrues by time t is `-gamma * dB0 * t`. Laid out
+    # (xx, yy, zz, xy, xz, yz), the order the assembler reads.
+    maxwell = (-gamma * t.reshape(-1, 1)) * np.asarray(q).reshape(1, 6)
+  return dk, gamma * b * t, maxwell
+
+
 def maxwell_moments_from_kspace(kx, ky, kz, times_ms, scanner) -> np.ndarray:
   """:func:`maxwell_moments` for a trajectory given as sampled k(t).
 
@@ -3264,7 +3301,8 @@ def simulate_pulseq(seq_path,
     # `dB0(x0) - g.x0` on `phi_dB0` and the gradient on its own channel, which
     # is what lets the assembler evaluate it at the deformed position.
     b0_field = solver_kwargs.get('b0_field', None)
-    if b0_field is not None and b0_field.is_zero:
+    # Reduced, not rank-local: see `B0Field.is_zero_everywhere`.
+    if b0_field is not None and b0_field.is_zero_everywhere():
       b0_field = None
     b0_nodal = b0_field is not None and b0_field.kind == 'nodal'
     b0_phi_nodal = None
@@ -3387,8 +3425,9 @@ def simulate_pulseq(seq_path,
       # trajectory the reconstruction grids on, and the difference between the
       # two is the distortion the field produces.
       b0_phase = None
+      b0_maxwell = None
       if b0_field is not None and not b0_nodal:
-        dk, b0_phase = b0_kspace_shift(
+        dk, b0_phase, b0_maxwell = b0_readout_terms(
             b0_field, t, scanner,
             rotation=getattr(phantom, '_orientation', None),
             location=getattr(phantom, '_location', None))
@@ -3399,11 +3438,14 @@ def simulate_pulseq(seq_path,
       # factors need, but the POD weights need absolute sequence time, the frame
       # the motion is defined in. `get_weights` adds the trajectory's own
       # `timeshift`, so point it at this window's anchor and restore it after.
-      maxwell = None
+      # A degree-2 lab field rides the same six coefficients the concomitant
+      # term uses, so the two ADD rather than compete for the channel.
+      maxwell = b0_maxwell
       if concomitant_readout and rw.maxwell is not None:
         rotation = getattr(phantom, '_orientation', None)
-        maxwell = maxwell_phase_coefficients(rw.maxwell, scanner,
-                                             rotation=rotation)
+        conc_coef = maxwell_phase_coefficients(rw.maxwell, scanner,
+                                               rotation=rotation)
+        maxwell = conc_coef if maxwell is None else maxwell + conc_coef
         # `Bc` is a quadratic form about ISOCENTRE while the assembler's nodes
         # are measured from the slice centre, so the rest of the expansion --
         # a k-space shift and a uniform phase -- has to travel with the six

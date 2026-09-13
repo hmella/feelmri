@@ -1085,3 +1085,84 @@ def _readout_inputs(adapter, rw):
       rw.kspace[:, 0], rw.kspace[:, 1], rw.kspace[:, 2],
       rw.times - rw.t_anchor, None)
   return list(points), t
+
+
+def test_a_degree_two_b0_field_reaches_the_readout_through_simulate_pulseq(
+        adapter, tmp_path):
+  """`simulate_pulseq` could not carry a degree-2 field at all.
+
+  The polynomial arm went to `b0_kspace_shift`, which reaches `in_frame` and
+  refuses any non-zero quadratic by name -- so a field `B0Field.on_phantom`
+  builds happily raised `NotImplementedError` out of the one-call API, with no
+  message saying the API was the problem rather than the field. The quadratic
+  part rides the six `maxwell` coefficients the same loop already assembles for
+  the concomitant term, and the two ADD.
+
+  Checked against the Lagrangian spelling of the same field, which on a
+  phantom that does not move is the exact answer: the field on `delta_B` for
+  the solver and on `phi_dB0` for the readout.
+  """
+  pytest.importorskip('mpi4py')
+  pytest.importorskip('pymetis')
+  try:
+    from feelmri.Phantom import FEMPhantom
+  except ImportError as exc:
+    pytest.skip(f'feelmri C++ extensions not available: {exc}')
+  from feelmri import B0Field
+  from feelmri.MRObjects import Scanner
+  from _phantom_fixtures import make_cube_mesh
+
+  seq_path = DATA_DIR / 'gre_v15.seq'
+  skip_if_pypulseq_too_old(seq_path)
+
+  scanner = Scanner()
+  gamma = scanner.gamma.m_as('rad/ms/mT')
+  path, _vol = make_cube_mesh(tmp_path / 'quad_b0.vtu', 'tetra', n=2, scale=6e-2)
+
+  def fresh():
+    ph = FEMPhantom(path=str(path))
+    # NODAL, because the reference writes the field per node on `phi_dB0`
+    # while the channel under test evaluates the monomials where the assembler
+    # samples them: on a quadrature path those are genuinely different
+    # quantities and the comparison becomes a 1.3e-03 interpolation gap rather
+    # than an identity.
+    ph.set_assembler(voxel_size=1e3, lorder=2,
+                     nodal_approximation=True, lumped=True)
+    return ph
+
+  # Degree 2 in every slot, so no coefficient is zero by luck.
+  expr = lambda p: 1.0e-3 * (0.3 + 2.0 * p[:, 0] - 1.5 * p[:, 2]
+                             + 5.0 * p[:, 0] ** 2 - 4.0 * p[:, 1] ** 2
+                             + 2.5 * p[:, 2] ** 2 + 1.7 * p[:, 0] * p[:, 1]
+                             - 3.1 * p[:, 0] * p[:, 2] + 2.2 * p[:, 1] * p[:, 2])
+
+  phantom = fresh()
+  n = phantom.local_nodes.shape[0]
+  T2 = np.full(n, 1e9, dtype=np.float32)
+  phantom.set_static_fields(T2=T2, phi_dB0=np.zeros(n, dtype=np.float32))
+  field = B0Field.on_phantom(expr, phantom, collective=False)
+  assert field.order == 2 and field.kind == 'polynomial'
+  nodal_mT = B0Field._sample(expr, B0Field._scanner_nodes(phantom))
+
+  kw = dict(scanner=scanner, M0=1.0, T1=Quantity(1e9, 'ms'),
+            T2=Quantity(1e9, 'ms'), dtype='float64')
+  got = np.asarray(adapter.simulate_pulseq(seq_path, phantom, b0_field=field,
+                                           **kw).kspace[0]).reshape(-1)
+
+  ref = fresh()
+  ref.set_static_fields(T2=T2, phi_dB0=(gamma * nodal_mT).astype(np.float32))
+  want = np.asarray(adapter.simulate_pulseq(
+      seq_path, ref, delta_B=nodal_mT.reshape(-1, 1), **kw).kspace[0]).reshape(-1)
+
+  scale = np.abs(want).max()
+  assert np.abs(got - want).max() <= 1e-5 * scale, (
+      'the split channels disagree with the per-node field on a static phantom')
+
+  # Not vacuous: the field has to change the readout by far more than the
+  # agreement above, or the two arms could both be ignoring it.
+  plain = fresh()
+  plain.set_static_fields(T2=T2, phi_dB0=np.zeros(n, dtype=np.float32))
+  bare = np.asarray(adapter.simulate_pulseq(seq_path, plain, **kw).kspace[0]
+                    ).reshape(-1)
+  assert np.abs(bare - want).max() > 100.0 * np.abs(got - want).max(), (
+      'this field barely changes the readout, so the test cannot see it')

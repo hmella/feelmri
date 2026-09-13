@@ -237,10 +237,40 @@ class B0Field:
         return (self.offset_mT == 0.0 and not np.any(self.gradient_mT_per_m)
                 and not np.any(self.coefficients))
 
+    def is_zero_everywhere(self, collective=True):
+        """:attr:`is_zero`, agreed across every rank.
+
+        For a per-node field :attr:`is_zero` inspects the LOCAL slice, so a
+        rank whose own nodes all sit where the field vanishes answers True
+        while its peers answer False -- measured on a rod split four ways under
+        a shim residual confined to half of it, 1 of 4 ranks disagreed. That
+        predicate decides which kernel channels exist, so it has to be reduced
+        before anything branches on it.
+        """
+        local = bool(self.is_zero)
+        if not collective:
+            return local
+        from feelmri.MPIUtilities import MPI_comm
+        from mpi4py import MPI as _MPI
+        return bool(MPI_comm.allreduce(local, op=_MPI.LAND))
+
     def __call__(self, points_m):
-        """Evaluate the expansion at scanner-frame positions, in mT."""
+        """Evaluate the expansion at scanner-frame positions, in mT.
+
+        The WHOLE expansion, not its linear part. Reading `offset + g . x` off
+        an object that also carries a quadratic form returns a number that is
+        not the field anywhere: measured on a degree-2 fixture, 4.8e-20 mT
+        where the field is 2.5e-06. A per-node field is refused rather than
+        answered with the zeros it was constructed with -- every other accessor
+        on this class refuses, and this is the one a caller reaches for first.
+        """
+        if self.kind == 'nodal':
+            raise TypeError(
+                "B0Field.__call__: this field is a per-node expansion, which "
+                "has no closed form to evaluate at arbitrary points. Read it "
+                "at the nodes it was sampled on with `nodal_mT(phantom)`.")
         p = np.asarray(points_m, dtype=np.float64).reshape(-1, 3)
-        return self.offset_mT + p @ self.gradient_mT_per_m
+        return self._design(p, self.order) @ self.coefficients
 
     def in_frame(self, rotation=None, location=None, physical=False):
         """The same field rewritten for the coordinates a caller works in.
@@ -456,15 +486,38 @@ class B0Field:
                 f"{p.shape[0]} points; it must map (N, 3) positions to (N,).")
 
         max_order = cls.MAX_ORDER if max_order is None else int(max_order)
+        # The fit is done on the field with its MEAN REMOVED, and the mean is
+        # put back on the constant coefficient at the end. Two things follow,
+        # and both are needed for a field written the way a B0 map is written
+        # -- a large uniform offset plus a small spatial term:
+        #
+        #  * the yardstick becomes the RMS of the VARIATION. Scored against the
+        #    RMS of the values, `1.0 + 1e-3 z` over +-0.1 m fitted at order 0
+        #    with gradient [0, 0, 0], discarding the entire linear term because
+        #    5.99e-05 / 1.0 is under rtol. The constant monomial carries the
+        #    offset exactly at every order, so it cannot belong in the measure
+        #    of what is left to fit.
+        #  * the residual stops cancelling. It is formed from the reduced
+        #    `f.f - 2 c.b + c.A.c`, and against an uncentred 1e3 mT offset
+        #    those are ~1e8 while the answer is ~1e-7: the degree-2 fit of a
+        #    linear field then reported a residual of 1.9e-05 mT that is pure
+        #    round-off.
         n_tot = float(p.shape[0])
-        ff = float(f @ f)
+        fs = float(f.sum())
         if collective:
             n_tot = MPI_comm.allreduce(n_tot, op=MPI.SUM)
+            fs = MPI_comm.allreduce(fs, op=MPI.SUM)
+        mean = fs / n_tot if n_tot else 0.0
+        f = f - mean
+        ff = float(f @ f)
+        if collective:
             ff = MPI_comm.allreduce(ff, op=MPI.SUM)
-        rms = np.sqrt(ff / n_tot) if n_tot else 0.0
+        scale = np.sqrt(ff / n_tot) if n_tot else 0.0
 
         best = None
-        resid_by_order = {}
+        # Why the search stopped early, for the message below: a higher degree
+        # was refused by the point count or by the rank of its design.
+        blocked = None
         for order in range(0, max_order + 1):
             # An underdetermined fit is exact and meaningless: 20 monomials
             # through 5 points reproduces them all and says nothing about the
@@ -472,6 +525,9 @@ class B0Field:
             # since the normal equations are reduced across ranks.
             n_terms = len(cls._monomial_exponents(order))
             if order > 0 and n_terms >= n_tot:
+                blocked = (order, f"{n_terms} monomials through "
+                                  f"{int(n_tot):d} points is exact and says "
+                                  f"nothing about the field between them")
                 break
             basis = cls._design(p, order)
             # Normal equations, reduced BEFORE the solve so every rank solves
@@ -481,32 +537,45 @@ class B0Field:
             if collective:
                 A = MPI_comm.allreduce(A, op=MPI.SUM)
                 b = MPI_comm.allreduce(b, op=MPI.SUM)
-            coef = np.linalg.lstsq(A, b, rcond=None)[0]
+            coef, _res, rank, _sv = np.linalg.lstsq(A, b, rcond=None)
+            # The point count is not enough: monomials that are linearly
+            # dependent ON THESE POINTS make the fit exact and arbitrary off
+            # the sampled manifold. Measured on a coplanar z = 0 cloud,
+            # `x^2 + z^2` fitted at order 2 with residual 0.000e+00 and a zz
+            # coefficient of 0.0 against a truth of 1.0e-03.
+            if rank < n_terms:
+                blocked = (order, f"the degree-{order} monomials are linearly "
+                                  f"dependent on these points (rank {rank} of "
+                                  f"{n_terms}), so the fit would be exact on "
+                                  f"them and arbitrary anywhere else")
+                break
             # |f - Phi c|^2 = f.f - 2 c.b + c.A.c, from the reduced pieces.
             resid = max(ff - 2.0 * float(coef @ b) + float(coef @ A @ coef), 0.0)
             resid_rms = np.sqrt(resid / n_tot) if n_tot else 0.0
-            resid_by_order[order] = resid_rms
             best = (order, coef, resid_rms)
             # Two stopping rules, and the first is the one that matters. A
             # residual at round-off means the expression IS this polynomial --
             # every shim is -- so it is carried exactly and there is nothing to
             # gain from a higher degree. `rtol` is the weaker rule for a field
             # that is only well approximated.
-            if (resid_rms <= cls.EXACT_RTOL * rms or rms == 0.0
-                    or resid_rms <= rtol * rms):
+            if (scale == 0.0 or resid_rms <= rtol * scale):
                 break
 
         order, coef, resid_rms = best
-        if resid_rms > rtol * rms and rms > 0.0:
+        if resid_rms > rtol * scale and scale > 0.0:
             raise ValueError(
                 f"B0Field.fit: degree {order} still leaves a residual of "
-                f"{resid_rms:.4g} mT against a field RMS of {rms:.4g} mT "
-                f"({resid_rms / rms:.1%}), above rtol={rtol:g}. No polynomial "
-                f"up to the degree {int(n_tot):d} points can support "
-                f"represents this field, so it needs the per-node expansion "
-                f"instead of the global one -- build it with "
-                f"`B0Field.on_phantom`, which falls back to that.")
+                f"{resid_rms:.4g} mT against a spatial variation of "
+                f"{scale:.4g} mT ({resid_rms / scale:.1%}), above "
+                f"rtol={rtol:g}. " +
+                (f"Degree {blocked[0]} was not attempted: {blocked[1]}. "
+                 if blocked else "") +
+                f"This field needs the per-node expansion instead of the "
+                f"global one -- build it with `B0Field.on_phantom`, which "
+                f"falls back to that.")
 
+        coef = np.asarray(coef, dtype=np.float64).copy()
+        coef[0] += mean
         gradient = np.zeros(3)
         if order >= 1:
             gradient = coef[1:4]
@@ -567,9 +636,19 @@ class B0Field:
         ordering that produced it, and `distribute_mesh` / `enable_dual_partition`
         change both. Cheap enough to re-check at every use.
         """
-        nodes = np.asarray(phantom.local_nodes)
-        return (getattr(phantom, '_active_partition', None), nodes.shape,
-                float(nodes[0, 0]), float(nodes[-1, -1]))
+        nodes = np.asarray(phantom.local_nodes, dtype=np.float64)
+        part = getattr(phantom, '_active_partition', None)
+        if nodes.size == 0:
+            # A rank may legitimately own no nodes; indexing one here would
+            # raise from inside every per-node accessor instead.
+            return (part, nodes.shape, 0.0, 0.0)
+        # The first and last coordinate alone miss a rigid translation -- a
+        # pure shift along y left the stamp bit-identical while every node had
+        # moved, which is exactly the pairing the stamp exists to refuse. The
+        # two moments below move under any translation, rotation or reordering.
+        flat = nodes.reshape(-1)
+        return (part, nodes.shape, float(nodes.sum(axis=0).sum()),
+                float(flat @ flat))
 
     @staticmethod
     def _sample(expression, points):

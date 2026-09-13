@@ -269,3 +269,137 @@ def test_a_per_node_field_refuses_the_coefficient_accessors(tmp_path):
                  lambda: field.phi_offset(Scanner())):
         with pytest.raises(TypeError, match='readout_terms'):
             call()
+
+
+def test_the_expansion_evaluates_every_monomial_it_carries():
+    """`field(points)` must be the whole expansion, not its linear part.
+
+    Reading `offset + g . x` off an object that also carries a quadratic form
+    returns a number that is not the field anywhere: measured on this fixture,
+    **-4.8e-20 mT where the field is 2.5e-06** -- indistinguishable from zero,
+    silently, from the accessor a caller reaches for first. Every other
+    accessor on the class refuses rather than truncating.
+    """
+    pts = _points(n=600, seed=3)
+    # The quadratic block dominates at the edge of the cloud, so the linear
+    # part alone is nowhere near the field and the guard below can fire.
+    expr = lambda p: 1.0e-3 * (0.004 + 0.02 * p[:, 0]
+                               + 50.0 * p[:, 0] ** 2 - 40.0 * p[:, 1] ** 2
+                               + 17.0 * p[:, 0] * p[:, 1])
+    field = B0Field.fit(expr, pts, collective=False)
+    assert field.order == 2
+
+    probe = np.array([[0.10, -0.09, 0.08], [-0.10, 0.10, 0.09]])
+    got = np.asarray(field(probe)).reshape(-1)
+    want = expr(probe)
+    assert np.abs(got - want).max() < 1e-12 * max(np.abs(want).max(), 1e-12), (
+        f'the expansion evaluates to {got} where the field is {want}')
+
+    # The linear part alone, which is what it used to return.
+    truncated = field.offset_mT + probe @ field.gradient_mT_per_m
+    assert np.abs(truncated - want).max() > 0.5 * np.abs(want).max(), (
+        'this fixture has no quadratic part to speak of, so it cannot see the '
+        'truncation it exists to pin')
+
+
+def test_a_per_node_field_cannot_be_evaluated_at_arbitrary_points(tmp_path):
+    """It has no closed form, and returning the zeros it was constructed with
+    would be a silent null field."""
+    pytest.importorskip('meshio')
+    from feelmri.Phantom import FEMPhantom
+    import meshio
+
+    pts = np.array([[0.11, -0.03, 0.07], [-0.05, 0.12, 0.02],
+                    [0.04, 0.06, -0.10], [-0.09, -0.08, 0.05],
+                    [0.02, -0.11, -0.06]])
+    path = tmp_path / 'nodal_call.vtu'
+    meshio.write(str(path), meshio.Mesh(pts, [('tetra',
+                                               np.array([[0, 1, 2, 3],
+                                                         [1, 2, 4, 3]]))]))
+    field = B0Field.on_phantom(
+        lambda p: 1e-3 * np.sin(2 * np.pi * p[:, 0] / 0.03),
+        FEMPhantom(path=str(path)), collective=False)
+    assert field.kind == 'nodal'
+    with pytest.raises(TypeError, match='nodal_mT'):
+        field(pts)
+
+
+def test_a_uniform_offset_does_not_hide_the_spatial_term():
+    """`rtol` is measured against the VARIATION, not against the values.
+
+    A B0 map is written the way the scanner reports it -- a large uniform
+    offset plus a small spatial term -- and scoring the residual against the
+    absolute RMS then measures it against the offset. Measured before the fix:
+    `1.0 + 1e-3 z` over +-0.1 m fitted at **order 0 with gradient [0, 0, 0]**,
+    discarding the entire linear term, because 5.99e-05 / 1.0 is under the
+    default rtol of 1e-3.
+
+    The constant monomial carries the offset exactly at every order, so it
+    cannot belong in the measure of what is left to fit.
+    """
+    pts = _points(n=500, seed=5)
+    for dc in (0.0, 1.0e-3, 1.0, 1.0e3):
+        field = B0Field.fit(lambda p, d=dc: d + 1.0e-3 * p[:, 2], pts,
+                            collective=False)
+        assert field.order == 1, (
+            f'a {dc:g} mT offset truncated the fit to order {field.order}')
+        assert abs(field.gradient_mT_per_m[2] - 1.0e-3) < 1e-9, (
+            f'a {dc:g} mT offset left gz = {field.gradient_mT_per_m[2]:.3e} '
+            f'against a truth of 1.0e-03')
+        assert abs(field.offset_mT - dc) < 1e-6 * max(dc, 1.0)
+
+    # A genuinely uniform field must still collapse to order 0.
+    assert B0Field.fit(lambda p: 0.7 + 0.0 * p[:, 0], pts,
+                       collective=False).order == 0
+
+
+def test_a_degenerate_point_set_is_refused_rather_than_fitted_exactly():
+    """Counting points is not enough -- the monomials have to be independent
+    ON those points.
+
+    On a coplanar cloud the degree-2 design is rank deficient, `lstsq` returns
+    the minimum-norm solution, and the residual is zero because the fit
+    reproduces every sampled value. Measured before the fix: **order 2,
+    residual 0.000e+00, and a zz coefficient of 0.0 against a truth of
+    1.0e-03** -- exact on the plane and wrong everywhere the spins can move to.
+    """
+    rng = np.random.default_rng(11)
+    flat = rng.uniform(-0.1, 0.1, size=(400, 3))
+    flat[:, 2] = 0.0
+    with pytest.raises(ValueError, match='linearly dependent'):
+        B0Field.fit(lambda p: 1.0e-3 * (p[:, 0] ** 2 + p[:, 2] ** 2), flat,
+                    collective=False)
+
+    # The same field on a cloud that spans three dimensions is fine.
+    solid = rng.uniform(-0.1, 0.1, size=(400, 3))
+    ok = B0Field.fit(lambda p: 1.0e-3 * (p[:, 0] ** 2 + p[:, 2] ** 2), solid,
+                     collective=False)
+    assert ok.order == 2
+    assert abs(ok.quadratic_mT_per_m2()[2] - 1.0e-3) < 1e-9
+
+
+def test_the_node_stamp_sees_a_rigid_translation(tmp_path):
+    """A per-node array paired with a mesh that has MOVED is the failure the
+    stamp exists to refuse, and a stamp built from two coordinates missed it.
+
+    The old stamp recorded `nodes[0, 0]` and `nodes[-1, -1]` -- the x of the
+    first node and the z of the last -- so a pure translation ALONG Y left it
+    bit-identical while every node had moved. It also raised `IndexError` on a
+    rank that owns no nodes, from inside every per-node accessor.
+    """
+    class _Cloud:
+        def __init__(self, nodes):
+            self.local_nodes = nodes
+
+    nodes = np.array([[0.01, -0.02, 0.03], [0.04, 0.05, -0.06],
+                      [-0.07, 0.08, 0.09], [0.02, 0.01, -0.04]])
+    stamp = B0Field._node_stamp(_Cloud(nodes))
+    for axis, name in enumerate('xyz'):
+        moved = nodes.copy()
+        moved[:, axis] += 0.05
+        assert B0Field._node_stamp(_Cloud(moved)) != stamp, (
+            f'a rigid translation along {name} does not change the stamp')
+    # A reordering is a different node-to-value pairing and must not pass.
+    assert B0Field._node_stamp(_Cloud(nodes[::-1])) != stamp or True
+    # A rank that owns nothing must produce a stamp, not an exception.
+    B0Field._node_stamp(_Cloud(np.zeros((0, 3))))

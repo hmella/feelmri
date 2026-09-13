@@ -1655,7 +1655,11 @@ class BlochSolver:
         # attribute.
         b0_offset_mT, b0_gradient = 0.0, None
         b0_delta_B, b0_quad, b0_node_lin = None, None, None
-        if self.b0_field is not None and not self.b0_field.is_zero:
+        # Reduced, not rank-local: on a per-node field `is_zero` reads the
+        # local slice and can disagree between ranks, and it decides which
+        # kernel channels this rank passes.
+        if (self.b0_field is not None
+                and not self.b0_field.is_zero_everywhere()):
             # `moving` is the SOLVER's, not the field's: the readout decides
             # separately whether it was given a trajectory, and the two may
             # legitimately disagree. A phantom that does not move samples the
@@ -1783,10 +1787,19 @@ class BlochSolver:
         if b0_delta_B is not None:
             # Per node, so it is added before the reshape and the sub-ensemble
             # repeat below, exactly like the scalar.
+            #
+            # COLLECTED, not raised on the spot. This runs upstream of the row
+            # check below and of `solve()`'s closing Barrier, so a bare reshape
+            # error here -- which is what a caller who reassigned `delta_B` to
+            # the wrong length gets -- leaves the offending rank outside both.
+            _b0 = np.asarray(b0_delta_B, dtype=self._np_real)
+            mismatch = ('' if _b0.size == delta_B.size else
+                        f"BlochSolver: `delta_B` holds {delta_B.size} entries "
+                        f"and the B0 field's per-node part {_b0.size}; they "
+                        f"describe the same nodes.")
+            _collective_raise(mismatch)
             delta_B = np.ascontiguousarray(
-                delta_B + np.asarray(b0_delta_B, dtype=self._np_real).reshape(
-                    delta_B.shape),
-                dtype=self._np_real)
+                delta_B + _b0.reshape(delta_B.shape), dtype=self._np_real)
         if b0_offset_mT:
             # Spatially uniform, so it needs no frame and no kernel channel.
             # Added before the reshape and the sub-ensemble repeat below, so
