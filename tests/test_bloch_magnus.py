@@ -2099,3 +2099,38 @@ def test_a_caller_set_timeshift_still_reaches_the_cardiac_phase(rod_phantom):
   assert apart > 1e-3, (
     f'half a cycle of timeshift moved the phase by only {apart:.2e} rad, so '
     f'the caller\'s shift is being discarded')
+
+
+def test_a_partial_solve_is_quiet_on_a_natively_built_sequence(minimal_phantom):
+  """`solve(start=-N)` inside a per-shot loop is the documented incremental
+  steady-state idiom, and the warning about column numbering is about
+  `ReadoutWindow.m_storage_idx`, which only an imported sequence carries. A
+  native sequence has no such index, so it must not warn -- under MPI the
+  message was emitted once per rank on every run of `free_running.py`,
+  `gradient_spoiling.py` and both water/fat examples.
+  """
+  seq = Sequence()
+  solver = BlochSolver(seq, minimal_phantom, T1=Quantity(1e9, 'ms'),
+                       T2=Quantity(1e9, 'ms'), perfect_spoiling=False,
+                       dtype='float64')
+  assert seq.from_pulseq is False
+  with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter('always')
+    for _ in range(3):
+      block = make_hard_pulse_block(0.1, dur_ms=0.2)
+      block.store_magnetization = True
+      seq.add_block(block)
+      seq.add_block(make_empty_block(1.0))
+      solver.solve(start=-2)
+  assert not [w for w in caught if 'm_storage_idx' in str(w.message)]
+
+  # The same loop on a sequence carrying the Pulseq bookkeeping DOES warn,
+  # so the guard is gated rather than removed.
+  seq.from_pulseq = True
+  solver._warned_start_storage = False
+  with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter('always')
+    seq.add_block(make_hard_pulse_block(0.1, dur_ms=0.2))
+    seq.add_block(make_empty_block(1.0))
+    solver.solve(start=-2)
+  assert [w for w in caught if 'm_storage_idx' in str(w.message)]

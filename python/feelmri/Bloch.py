@@ -657,6 +657,11 @@ class Sequence:
         # Mxy between blocks on top of them. Set by import_pulseq; see
         # BlochSolver's perfect_spoiling argument.
         self.explicit_spoiling = False
+        # True for the sequences import_pulseq returns. Their readout
+        # bookkeeping (ReadoutWindow.m_storage_idx) counts store_magnetization
+        # blocks from block 0, so a partial solve has to be warned about; a
+        # natively built sequence has no such index and must not be.
+        self.from_pulseq = False
         self.time_extent = self._get_extent()
         self.dur = self.time_extent[1] - self.time_extent[0]
         self.non_empty = [~block.empty for block in self.blocks if block is not None]
@@ -1618,12 +1623,14 @@ class BlochSolver:
         # bookkeeping in PulseqAdapter counts store_magnetization blocks over
         # the WHOLE sequence. The two agree only for a whole-sequence solve.
         store_indices = [i for i, block in enumerate(blocks) if block.store_magnetization]
-        # Once per solver, not once per call: the incremental steady-state
-        # idiom (`solve(start=-2)` inside a per-shot loop) is legitimate and
-        # would otherwise emit this on every shot. Testing the NORMALISED start
-        # matters -- a negative start is the only non-zero start anywhere in
-        # examples/, so guarding on the raw argument meant it never fired.
-        if (start > 0 and not getattr(self, '_warned_start_storage', False)
+        # Only for an imported sequence, which is the only thing that carries
+        # a ReadoutWindow to disagree with -- the per-shot `solve(start=-2)`
+        # idiom on a natively built sequence is correct and must stay quiet.
+        # Once per solver and on rank 0 only, and the NORMALISED start is what
+        # is tested: a negative start is the only non-zero start in examples/.
+        if (start > 0 and MPI_rank == 0
+                and getattr(self.sequence, 'from_pulseq', False)
+                and not getattr(self, '_warned_start_storage', False)
                 and any(b.store_magnetization
                         for b in self.sequence.blocks[:start])):
             self._warned_start_storage = True

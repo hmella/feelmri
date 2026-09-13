@@ -2748,6 +2748,7 @@ def import_pulseq(
   # destroy the coherence pathways an EPI train, a FLASH or a bSSFP depends
   # on. BlochSolver reads this flag when perfect_spoiling is left at None.
   feelmri_seq.explicit_spoiling = True
+  feelmri_seq.from_pulseq = True
 
   # Triggers are hardware handshakes with no simulated counterpart. A WAIT
   # trigger stalls the scanner for an unknown time, so the simulated timeline
@@ -2949,6 +2950,7 @@ def import_pulseq(
   readout_set = set(int(v) for v in readout_set_values)
   feelmri_sim_seq = feelmriSequence()
   feelmri_sim_seq.explicit_spoiling = True
+  feelmri_sim_seq.from_pulseq = True
   readout_sim_block_indices: List[int] = []
   for i, blk in enumerate(feelmri_seq.blocks):
     set_value = block_labels[i].get('SET') if i < len(block_labels) else None
