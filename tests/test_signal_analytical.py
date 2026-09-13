@@ -1077,3 +1077,317 @@ def test_a_bad_receive_map_is_refused(tmp_path, bad, match):
     C = C.reshape(n, 2, 1)
   with pytest.raises(ValueError, match=match):
     phantom.set_receive_sensitivity(C)
+
+
+# ---------------------------------------------------------------------------
+# The six-monomial sweep, the null line, and the paths the readout term had
+# never been driven through.
+#
+# Written during audit 5. The `xy` coefficient was multiplied by zero in every
+# existing test -- a gradient held on one axis gives |p3|/max|p| == 0.000
+# exactly -- so `m3 * mxy` in all three kernels was executed by nothing.
+# `signal_nodal` with `maxwell` had no test at all, and that gap was hiding a
+# read of uninitialised memory.
+
+
+def _maxwell_phantom(tmp_path, name, *, nodal, lumped=False):
+  """The `_maxwell_fixture` node cloud, assembled either way.
+
+  `nodal=True` gives `nodal_approximation`, which is what builds the
+  mass-matrix projection `signal_nodal` reads; `nodal=False` is the quadrature
+  configuration every other test here uses. `lumped` makes that projection
+  DIAGONAL, which is what lets the nodal identity below be exact -- a
+  consistent mass matrix couples neighbouring nodes, so applying the phase to
+  the magnetization and letting the kernel apply it at the node are then
+  genuinely different quantities.
+  """
+  import meshio
+  points = np.array([[0.11, -0.03, 0.07],
+                     [-0.05, 0.12, 0.02],
+                     [0.04, 0.06, -0.10],
+                     [-0.09, -0.08, 0.05],
+                     [0.02, -0.11, -0.06]])
+  path = tmp_path / name
+  meshio.write(str(path), meshio.Mesh(points, [('tetra',
+                                                np.array([[0, 1, 2, 3],
+                                                          [1, 2, 4, 3]]))]))
+  phantom = FEMPhantom(path=str(path))
+  phantom.set_assembler(voxel_size=1e3 if nodal else 0.0, lorder=2, horder=4,
+                        nodal_approximation=nodal, lumped=lumped)
+  n = phantom.local_nodes.shape[0]
+  phantom.set_static_fields(T2=np.full(n, 1e9, dtype=np.float32),
+                            phi_dB0=np.zeros(n, dtype=np.float32))
+  return phantom, points
+
+
+def _six_coefficients():
+  """A full quadratic form: all six monomials live, none degenerate.
+
+  Hand-written rather than taken from a gradient, because a gradient whose
+  direction is fixed in time produces `p3 == 0` identically -- which is exactly
+  why the `xy` branch had no coverage.
+  """
+  # Scaled so the phase spans a few radians over this 20 cm cloud: the
+  # coefficients are rad/m^2 and the coordinates are ~0.1 m.
+  return 100.0 * np.array([[7.0, -4.0, 11.0, 5.0, -8.0, 3.0]],
+                          dtype=np.float64)
+
+
+def _monomial_phase(coef_row, points):
+  x, y, z = points[:, 0], points[:, 1], points[:, 2]
+  return (coef_row[0] * x ** 2 + coef_row[1] * y ** 2 + coef_row[2] * z ** 2
+          + coef_row[3] * x * y + coef_row[4] * x * z + coef_row[5] * y * z)
+
+
+def _dc_inputs():
+  zero = np.zeros((1, 1, 1), dtype=np.float32)
+  return (zero.copy(), zero.copy(), zero.copy()), zero.copy()
+
+
+@pytest.mark.parametrize('path_name', ['signal_sum', 'signal_nodal'])
+@pytest.mark.parametrize('n_coils', [0, 3], ids=['no_coils', 'three_coils'])
+def test_every_maxwell_monomial_reaches_both_nodal_paths(tmp_path, path_name,
+                                                         n_coils):
+  """On a NODAL path the phase is evaluated at the node, so applying it to the
+  magnetization instead must give the identical signal.
+
+  `signal_nodal` is driven with a LUMPED mass matrix here, because that is
+  what makes the projection diagonal in the node index. With the consistent
+  matrix the two sides are different quantities -- `sum_n (M Mxy)_n e^(i phi_n)`
+  against `sum_n (M (Mxy e^(i phi)))_n` -- and the linearity test below is what
+  covers that configuration instead.
+
+  The identity needs no knowledge of the mass matrix and no quadrature
+  reference, and it is sharp: it fixes the sign, the factor and the position
+  index of every one of the six monomials independently. The mutation below
+  drives the point -- negating the `xy` coefficient alone has to be visible,
+  and before this nothing in the suite multiplied `m3` by anything but zero.
+
+  The coil arm runs the same identity per channel, which is the first test of
+  `maxwell` together with `nv > 1`.
+  """
+  nodal = path_name == 'signal_nodal'
+  phantom, points = _maxwell_phantom(tmp_path, f'{path_name}_{n_coils}.vtu',
+                                     nodal=nodal, lumped=nodal)
+  n = points.shape[0]
+  coef = _six_coefficients()
+  phase = _monomial_phase(coef[0], points)
+  assert np.abs(phase).max() > 0.5, 'this form produces no phase to speak of'
+
+  rng = np.random.default_rng(41)
+  Mxy = (rng.normal(size=(n, 2))
+         + 1j * rng.normal(size=(n, 2))).astype(np.complex64)
+  if n_coils:
+    C = (rng.normal(size=(n, n_coils))
+         + 1j * rng.normal(size=(n, n_coils))).astype(np.complex64)
+    phantom.set_receive_sensitivity(C)
+
+  call = getattr(phantom, path_name)
+  pts, t = _dc_inputs()
+
+  phantom.update_magnetization(Mxy)
+  got = np.asarray(call(pts, t, None, maxwell=coef)).reshape(-1)
+
+  # The same phase, applied to the magnetization before the handoff.
+  phantom.update_magnetization(
+      np.ascontiguousarray(Mxy * np.exp(1j * phase)[:, None],
+                           dtype=np.complex64))
+  expected = np.asarray(call(pts, t, None)).reshape(-1)
+
+  scale = float(np.abs(expected).max())
+  assert got.size == 2 * max(n_coils, 1)
+  assert float(np.abs(got - expected).max()) < 3e-6 * scale, (
+    f'{path_name}: the kernel phase disagrees with the same phase applied to '
+    f'the magnetization')
+
+  # Not vacuous: each coefficient on its own has to change the answer.
+  phantom.update_magnetization(Mxy)
+  for j in range(6):
+    flipped = coef.copy()
+    flipped[0, j] = -flipped[0, j]
+    moved = np.asarray(call(pts, t, None, maxwell=flipped)).reshape(-1)
+    assert float(np.abs(moved - got).max()) > 1e-3 * scale, (
+      f'{path_name}: coefficient {j} of the quadratic form changes nothing, '
+      f'so this test cannot see it')
+
+
+def test_every_maxwell_monomial_reaches_the_quadrature_path(tmp_path):
+  """The quadrature path evaluates the phase AT the quadrature points, so the
+  nodal identity above does not hold for it -- `exp(i phi)` interpolated from
+  the nodes is not `exp(i phi)` integrated over the element, and at these
+  element sizes the two differ by tens of percent.
+
+  What is checkable exactly is that the term is still LINEAR in the nodal
+  magnetization and factorises over the coil axis, which is what the fold and
+  the `nv` bookkeeping have to get right, plus that all six coefficients are
+  read.
+  """
+  phantom, points = _maxwell_phantom(tmp_path, 'quad_maxwell.vtu', nodal=False)
+  n = points.shape[0]
+  coef = _six_coefficients()
+  pts, t = _dc_inputs()
+
+  rng = np.random.default_rng(43)
+  C = (rng.normal(size=(n, 3)) + 1j * rng.normal(size=(n, 3))).astype(np.complex64)
+  phantom.set_receive_sensitivity(C)
+
+  # Weights of the quadratic-phase functional, measured off the assembler one
+  # node at a time: w[j, c] = integral of N_j exp(i phi) C[j, c].
+  w = np.zeros((n, 3), dtype=np.complex128)
+  for j in range(n):
+    unit = np.zeros((n, 1), dtype=np.complex64)
+    unit[j, 0] = 1.0
+    phantom.update_magnetization(unit)
+    w[j] = np.asarray(phantom.signal(pts, t, None, maxwell=coef)).reshape(-1)
+
+  Mxy = (rng.normal(size=(n, 2))
+         + 1j * rng.normal(size=(n, 2))).astype(np.complex64)
+  phantom.update_magnetization(Mxy)
+  got = np.asarray(phantom.signal(pts, t, None, maxwell=coef)).reshape(-1)
+  predicted = np.array([(w[:, c] * Mxy[:, e]).sum()
+                        for e in range(2) for c in range(3)])
+  scale = float(np.abs(predicted).max())
+  assert float(np.abs(got - predicted).max()) < 1e-5 * scale
+
+  # The measured weights must differ across nodes, or the mesh is too regular
+  # for a mispaired row to show.
+  assert float(np.abs(w[:, 0]).max() / np.abs(w[:, 0]).min()) > 2.0
+
+  for j in range(6):
+    flipped = coef.copy()
+    flipped[0, j] = -flipped[0, j]
+    moved = np.asarray(phantom.signal(pts, t, None,
+                                      maxwell=flipped)).reshape(-1)
+    assert float(np.abs(moved - got).max()) > 1e-3 * scale, (
+      f'coefficient {j} changes nothing on the quadrature path')
+
+
+def test_signal_nodal_refuses_a_phantom_that_never_built_its_projection(tmp_path):
+  """`signal_nodal` reads `f_M_Mxy_nodes_`, which only
+  `update_nodal_magnetization` writes -- and Python calls that only when the
+  assembler was built with `nodal_approximation=True`.
+
+  `Phantom.signal_nodal` is public and unconditional, so on a phantom built
+  the other way every read was a `middleRows` on a 0 x 0 matrix multiplied
+  against a `q_count`-long row -- a dimension mismatch that only `eigen_assert`
+  would catch, and `-DNDEBUG` compiles that out. Measured on this build it
+  returned `0+0j` on every run: a silently EMPTY k-space rather than a crash,
+  which is the worst of the available outcomes.
+  """
+  phantom, _points = _maxwell_phantom(tmp_path, 'no_projection.vtu',
+                                      nodal=False)
+  n = phantom.local_nodes.shape[0]
+  phantom.update_magnetization(np.ones((n, 1), dtype=np.complex64))
+  pts, t = _dc_inputs()
+  with pytest.raises(RuntimeError, match='update_nodal_magnetization'):
+    phantom.signal_nodal(pts, t, None)
+
+
+def test_the_signal_paths_refuse_an_assembler_with_no_magnetization(tmp_path):
+  """`nv_` is set by the magnetization updaters and was uninitialised in the
+  constructor, so a signal call before any update sized its output matrix from
+  whatever was on the stack."""
+  phantom, _points = _maxwell_phantom(tmp_path, 'no_magnetization.vtu',
+                                      nodal=False)
+  pts, t = _dc_inputs()
+  for name in ('signal_sum', 'signal', 'signal_nodal'):
+    with pytest.raises(RuntimeError, match='no magnetization'):
+      getattr(phantom, name)(pts, t, None)
+
+
+def _rod_along(path, direction, length=0.24, n_segments=6, width=1e-4):
+  """The pseudo-1D rod of `_phantom_fixtures`, pointed along `direction`."""
+  import meshio
+  d = np.asarray(direction, dtype=np.float64)
+  d = d / np.linalg.norm(d)
+  # Any two unit vectors orthogonal to d; the rod's cross-section is 1e-4 m, so
+  # nothing about the choice is observable.
+  helper = np.array([0.0, 0.0, 1.0]) if abs(d[2]) < 0.9 else np.array([1.0, 0.0, 0.0])
+  e1 = np.cross(d, helper); e1 /= np.linalg.norm(e1)
+  e2 = np.cross(d, e1)
+  s = np.linspace(-0.5 * length, 0.5 * length, n_segments + 1)
+  h = 0.5 * width
+  pts = np.zeros((4 * (n_segments + 1), 3))
+  for i, si in enumerate(s):
+    c = si * d
+    pts[4 * i + 0] = c - h * e1 - h * e2
+    pts[4 * i + 1] = c + h * e1 - h * e2
+    pts[4 * i + 2] = c + h * e1 + h * e2
+    pts[4 * i + 3] = c - h * e1 + h * e2
+  cells = []
+  for i in range(n_segments):
+    a, b = 4 * i, 4 * (i + 1)
+    cells += [[a + 0, a + 1, a + 2, b + 0], [a + 2, a + 3, a + 0, b + 0],
+              [a + 2, b + 0, b + 1, b + 2], [a + 2, a + 3, b + 0, b + 3],
+              [a + 2, b + 0, b + 2, b + 3]]
+  meshio.write(str(path), meshio.Mesh(pts, [('tetra', np.array(cells))]))
+  phantom = FEMPhantom(path=str(path))
+  phantom.set_assembler(voxel_size=0.0, lorder=2, horder=4,
+                        nodal_approximation=False, lumped=False)
+  n = phantom.local_nodes.shape[0]
+  phantom.set_static_fields(T2=np.full(n, 1e9, dtype=np.float32),
+                            phi_dB0=np.zeros(n, dtype=np.float32))
+  phantom.update_magnetization(np.ones(n, dtype=np.complex64))
+  return phantom
+
+
+def test_the_concomitant_phase_vanishes_on_its_null_line(tmp_path):
+  """`Bc = [(u.r)^2 + (v.r)^2] / (2 B0)` with `u = (-Gz/2, 0, Gx)` and
+  `v = (0, -Gz/2, Gy)`, so its matrix is `(u u^T + v v^T)/(2 B0)`: rank at most
+  two, positive semidefinite, and identically zero along `(2Gx, 2Gy, Gz)`.
+
+  This is the ONLY property that can catch a cross-term sign error. Negating
+  `Gx*Gz*x*z` turns `(Gx z - Gz x/2)^2` into `(Gx z + Gz x/2)^2` -- still a sum
+  of squares with the same eigenvalues, because the flip is conjugation by
+  `diag(1, 1, -1)`, an orthogonal similarity. No rank, determinant or
+  "can only retard" test can see it; what moves is the null LINE. Measured on
+  this rod, where the correct form gives 5.6e-17 rad: negating the `xz`
+  coefficient puts 0.801 rad on it and negating `yz` 0.331 rad.
+  """
+  from feelmri.MRObjects import Scanner
+
+  scanner = Scanner()
+  G = (14.0, -9.0, 20.0)
+  times, coef = _constant_gradient_coefficients(G, 3.0, scanner)
+  null = np.array([2.0 * G[0], 2.0 * G[1], G[2]])
+
+  phantom = _rod_along(tmp_path / 'nullrod.vtu', null)
+  nodes = phantom.local_nodes.astype(np.float64)
+  on_line = _monomial_phase(coef[1], nodes)
+  # The residual is the rod's own CROSS-SECTION, not the algebra: the form is
+  # PSD and stationary on the line, so an offset `h` off it costs order
+  # `lambda h^2` -- 3.2e-07 rad at the 1e-4 m width used here, and it does not
+  # grow along the rod. On the line itself the form is zero to 5.6e-17.
+  assert float(np.abs(on_line).max()) < 1e-6, (
+    f'the analytic form is not zero on its own null line: '
+    f'{np.abs(on_line).max():.3e} rad')
+  exact = _monomial_phase(coef[1], np.outer(np.linspace(-0.12, 0.12, 7),
+                                            null / np.linalg.norm(null)))
+  assert float(np.abs(exact).max()) < 1e-15
+
+  zero3 = np.zeros((2, 1, 1), dtype=np.float32)
+  t3 = times.reshape(2, 1, 1).astype(np.float32)
+  pts = (zero3.copy(), zero3.copy(), zero3.copy())
+  plain = np.asarray(phantom.signal(pts, t3, None)).reshape(-1)
+  with_term = np.asarray(phantom.signal(pts, t3, None,
+                                        maxwell=coef)).reshape(-1)
+  scale = float(np.abs(plain).max())
+  assert float(np.abs(with_term - plain).max()) < 1e-5 * scale, (
+    'the readout term is not zero along the null line')
+
+  # A cross-term sign error moves the null line, and this is where it shows.
+  for j in (4, 5):
+    flipped = coef.copy()
+    flipped[:, j] = -flipped[:, j]
+    moved = np.asarray(phantom.signal(pts, t3, None,
+                                      maxwell=flipped)).reshape(-1)
+    assert float(np.abs(moved - plain).max()) > 0.1 * scale, (
+      f'negating coefficient {j} leaves the null line where it was')
+
+  # A rod along a DIFFERENT direction must see a large phase, or the fixture
+  # would pass with the whole term switched off.
+  off = _rod_along(tmp_path / 'offrod.vtu', np.array([1.0, 0.0, 0.0]))
+  off_phase = _monomial_phase(coef[1], off.local_nodes.astype(np.float64))
+  assert float(np.abs(off_phase).max()) > 0.1, (
+    'the same coefficients produce no phase anywhere, so a rod that reads zero '
+    'proves nothing')

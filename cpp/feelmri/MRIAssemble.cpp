@@ -47,6 +47,12 @@ public:
 
         nb_nodes_ = nodes.rows(); // Total number of nodes in the mesh
 
+        // nv_ is set by the magnetization updaters and was left uninitialised
+        // here, so a signal_* call before any update sized kspace_mat(S, nv_)
+        // from whatever was on the stack. Zero is the honest value and the
+        // guards in the signal paths turn it into a message.
+        nv_ = 0;
+
         // Every node counts until told otherwise, which reproduces the serial
         // result exactly and leaves single-rank runs unchanged.
         f_node_owned_ = Eigen::Array<T, Eigen::Dynamic, 1>::Ones(nb_nodes_);
@@ -252,6 +258,17 @@ public:
         ensure_full_magnetization();
     }
 
+    // Every signal path sizes its output from nv_, which only a magnetization
+    // update can set.
+    void require_magnetization(const char* who) const
+    {
+        if (nv_ <= 0 || f_Mxy_nodes_.rows() != nb_nodes_)
+            throw std::runtime_error(
+                std::string(who) + ": no magnetization has been set on this "
+                "assembler, so there is nothing to integrate. Call "
+                "update_magnetization (or update_nodal_magnetization) first.");
+    }
+
     // Marks which nodes this rank is responsible for in the raw nodal sum.
     //
     // A rank owns every node its elements touch, so nodes on a partition boundary
@@ -324,6 +341,8 @@ public:
         bool has_traj,
         const std::vector<Tensor3> &maxwell)
     {
+        require_magnetization("signal_sum");
+
         const C i1(T(0), T(1));
         const T two_pi  = T(2) * T(M_PI);
 
@@ -538,6 +557,20 @@ public:
     {
         // This function is structurally identical to signal_sum, except it integrates 
         // using the pre-computed mass-matrix projection (f_M_Mxy_nodes_) instead of raw Mxy.
+        require_magnetization("signal_nodal");
+        // f_M_Mxy_nodes_ is written ONLY by update_nodal_magnetization, which
+        // the Python side calls only when nodal_approximation=True -- while
+        // Phantom.signal_nodal is public and unconditional. Every read below is
+        // a middleRows(q_start, q_count) that -DNDEBUG does not bounds-check,
+        // so on a phantom built the other way this indexed a 0 x 0 matrix.
+        if (f_M_Mxy_nodes_.rows() != nb_nodes_) {
+            throw std::runtime_error(
+                "signal_nodal: the mass-matrix projection holds " +
+                std::to_string(f_M_Mxy_nodes_.rows()) + " rows against " +
+                std::to_string(nb_nodes_) + " nodes. It is built by "
+                "update_nodal_magnetization; a phantom assembled with "
+                "nodal_approximation=False never calls it.");
+        }
         const C i1(T(0), T(1));
         const T two_pi  = T(2) * T(M_PI);
 
@@ -757,6 +790,7 @@ public:
     {
         // Only path that reads f_Mxy_, so the nodal -> quadrature projection is
         // performed here rather than on every magnetization update.
+        require_magnetization("signal");
         ensure_full_magnetization();
 
         const C i1(T(0), T(1));
