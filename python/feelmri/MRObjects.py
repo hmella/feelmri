@@ -6,6 +6,7 @@ gyromagnetic ratio). :class:`Gradient` represents a trapezoidal or
 user-defined gradient waveform. :class:`RF` generates analytic or
 user-defined RF excitation pulses with flip-angle normalization.
 """
+import collections
 import copy
 import itertools
 import warnings
@@ -66,6 +67,17 @@ class Scanner:
         self.adc_dead_time = adc_dead_time
         self.gammabar = Quantity(42.58e6, 'Hz/T')
         self.gamma = Quantity(42.58e6*2*np.pi, 'rad*Hz/T')
+
+
+#: What `BlochSolver` needs from a :class:`B0Field`. A NamedTuple rather than a
+#: bare tuple so a consumer that has not been taught about a new channel fails
+#: with an AttributeError instead of silently unpacking the wrong thing.
+SolverTerms = collections.namedtuple(
+    'SolverTerms', 'offset_mT delta_B gradient quadratic node_gradient')
+
+#: The same for the signal evaluator, with the rates already in rad/ms.
+ReadoutTerms = collections.namedtuple(
+    'ReadoutTerms', 'phi_uniform phi_nodal gradient quadratic node_gradient')
 
 
 class B0Field:
@@ -144,6 +156,7 @@ class B0Field:
         # stamp records which node set it was built on -- a per-node array
         # means nothing under a different partition or ordering.
         self._nodal_mT = None
+        self._nodal_grad = None
         self._nodal_stamp = None
         self._expression = None
         self._mesh_residual_mT = 0.0
@@ -328,16 +341,23 @@ class B0Field:
                 M = self._quad_matrix(q)
                 vals = (b + x @ g
                         + np.einsum('ij,jk,ik->i', x, M, x))
-                return 0.0, vals.reshape(-1, 1), None, None
-            return (b, None, (g if np.any(g) else None),
-                    (q if np.any(q) else None))
+                return SolverTerms(0.0, vals.reshape(-1, 1), None, None, None)
+            return SolverTerms(b, None, (g if np.any(g) else None),
+                               (q if np.any(q) else None), None)
         nodal = self.nodal_mT(phantom)
         if not moving:
-            return 0.0, nodal.reshape(-1, 1), None, None
-        raise NotImplementedError(
-            "B0Field: a per-node field on a MOVING phantom needs the Eulerian "
-            "per-node channel, which is not wired yet. Solve without a "
-            "`pod_trajectory`, or give a field a polynomial can represent.")
+            return SolverTerms(0.0, nodal.reshape(-1, 1), None, None, None)
+        # Eulerian, to first order in the displacement. Writing
+        #   dB0(x0 + u) ~= [dB0(x0) - g.x0] + curr . g
+        # puts the bracket on `delta_B`, where it costs nothing, and leaves a
+        # per-node vector the kernel adds to the gradient scalars it already
+        # hoists. `g` follows the same frame rule as the polynomial gradient.
+        g = self.node_gradient(phantom, rotation=rotation, physical=physical)
+        x = np.asarray(phantom.local_nodes, dtype=np.float64)
+        if physical and rotation is not None:
+            x = x @ np.asarray(rotation, dtype=np.float64).T
+        bracket = nodal - np.einsum('ij,ij->i', x, g)
+        return SolverTerms(0.0, bracket.reshape(-1, 1), None, None, g)
 
     def readout_terms(self, phantom, scanner, moving, rotation=None,
                       location=None):
@@ -351,14 +371,17 @@ class B0Field:
         gamma = scanner.gamma.m_as('rad/ms/mT')
         if self.kind != 'nodal':
             b, g, q = self.in_frame_full(rotation=rotation, location=location)
-            return (gamma * b, None, (g if np.any(g) else None),
-                    (q if np.any(q) else None))
+            return ReadoutTerms(gamma * b, None, (g if np.any(g) else None),
+                                (q if np.any(q) else None), None)
         nodal = self.nodal_mT(phantom)
         if not moving:
-            return 0.0, gamma * nodal, None, None
-        raise NotImplementedError(
-            "B0Field: a per-node field under a readout trajectory needs the "
-            "Eulerian per-node channel, which is not wired yet.")
+            return ReadoutTerms(0.0, gamma * nodal, None, None, None)
+        # The assembler's nodes are always the imaging ones, so `physical` has
+        # no meaning here and the gradient always takes R^T.
+        g = self.node_gradient(phantom, rotation=rotation, physical=False)
+        x = np.asarray(phantom.local_nodes, dtype=np.float64)
+        bracket = nodal - np.einsum('ij,ij->i', x, g)
+        return ReadoutTerms(0.0, gamma * bracket, None, None, gamma * g)
 
     def phi_offset(self, scanner, location=None):
         """The uniform part as an off-resonance rate in rad/ms, to add to
@@ -460,7 +483,8 @@ class B0Field:
                    coefficients=coef)
 
     @classmethod
-    def on_phantom(cls, expression, phantom, *, nodal='auto', **kwargs):
+    def on_phantom(cls, expression, phantom, *, nodal='auto',
+                   gradient=None, fd_step=None, **kwargs):
         """Build the cheapest representation of `expression` this phantom needs.
 
         The phantom's `local_nodes` are imaging-frame and measured from the
@@ -482,6 +506,9 @@ class B0Field:
                 raise
         field = cls(coefficients=np.zeros(1))
         field._nodal_mT = cls._sample(expression, nodes)
+        field._nodal_grad = cls._sample_gradient(
+            expression, nodes, gradient=gradient, fd_step=fd_step,
+            collective=kwargs.get('collective', True))
         field._nodal_stamp = cls._node_stamp(phantom)
         field._expression = expression
         field._mesh_residual_mT = cls._mesh_residual(expression, phantom, nodes)
@@ -524,6 +551,83 @@ class B0Field:
                 f"{points.shape[0]} points; it must map (N, 3) positions to "
                 f"(N,).")
         return f
+
+    def node_gradient(self, phantom, rotation=None, physical=False):
+        """The per-node field gradient, in the frame the caller works in.
+
+        Built once and cached on the field, and checked against the node set it
+        was sampled on for the same reason :meth:`nodal_mT` is.
+        """
+        if self._nodal_grad is None:
+            raise TypeError(
+                f"B0Field.node_gradient: this field is a {self.kind} expansion, "
+                f"which has no per-node gradient.")
+        stamp = self._node_stamp(phantom)
+        if stamp != self._nodal_stamp:
+            raise ValueError(
+                f"B0Field.node_gradient: sampled on a different node set "
+                f"({self._nodal_stamp}) from the one asking for it ({stamp}).")
+        g = self._nodal_grad
+        if not physical and rotation is not None:
+            g = g @ np.asarray(rotation, dtype=np.float64)
+        return np.ascontiguousarray(g, dtype=np.float64)
+
+    @classmethod
+    def _sample_gradient(cls, expression, points, gradient=None, fd_step=None,
+                         collective=True):
+        """grad(expression) at `points`, in mT/m, in SCANNER coordinates.
+
+        An analytic `gradient` is used when given. Otherwise central
+        differences, with the step CHECKED rather than assumed: a finite
+        difference of a callable that is not differentiable produces a
+        confident number that is entirely wrong, and that is exactly the input
+        this class refuses in prose. Comparing the estimate at `h` against the
+        one at `2h` separates the two -- a smooth field moves by its O(h^2)
+        truncation, a kink or a lookup moves by the order of the gradient
+        itself.
+        """
+        from feelmri.MPIUtilities import MPI_comm, collective_raise
+
+        if gradient is not None:
+            g = gradient(points)
+            if isinstance(g, Quantity):
+                g = g.m_as('mT/m')
+            g = np.asarray(g, dtype=np.float64).reshape(-1, 3)
+            if g.shape[0] != points.shape[0]:
+                raise ValueError(
+                    f"B0Field: the gradient returned {g.shape[0]} rows for "
+                    f"{points.shape[0]} points; it must map (N, 3) to (N, 3).")
+            return g
+
+        h = 1.0e-4 if fd_step is None else float(fd_step)
+
+        def central(step):
+            out = np.empty(points.shape, dtype=np.float64)
+            for axis in range(3):
+                e = np.zeros(3, dtype=np.float64)
+                e[axis] = step
+                out[:, axis] = (cls._sample(expression, points + e)
+                                - cls._sample(expression, points - e)) / (2 * step)
+            return out
+
+        g = central(h)
+        drift = float(np.abs(g - central(2.0 * h)).max())
+        scale = float(np.abs(g).max())
+        if collective:
+            drift = MPI_comm.allreduce(drift, op=MPI.MAX)
+            scale = MPI_comm.allreduce(scale, op=MPI.MAX)
+        problem = None
+        if scale > 0.0 and drift > 0.01 * scale:
+            problem = (
+                f"B0Field: the finite-difference gradient of this expression "
+                f"moves by {drift / scale:.1%} between a step of {h:g} m and "
+                f"one of {2 * h:g} m. A smooth field moves by its truncation "
+                f"error, which is far smaller; this much means the expression "
+                f"is not differentiable -- a lookup, a step, or interpolated "
+                f"data. Pass an analytic `gradient=`, or put the field on "
+                f"`delta_B`, which needs no derivative.")
+        collective_raise(problem, ValueError)
+        return g
 
     @classmethod
     def _mesh_residual(cls, expression, phantom, nodes):

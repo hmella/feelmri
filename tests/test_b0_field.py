@@ -182,13 +182,21 @@ def test_a_field_no_polynomial_can_carry_falls_back_to_the_nodes(tmp_path):
     assert np.abs(got - want).max() == 0.0
 
     # And a static solver gets it as `delta_B`, with no gradient channel.
-    offset, delta_B, gradient, quad = field.solver_terms(phantom, moving=False)
-    assert offset == 0.0 and gradient is None and quad is None
-    assert np.abs(delta_B.reshape(-1) - want).max() == 0.0
+    terms = field.solver_terms(phantom, moving=False)
+    assert terms.offset_mT == 0.0
+    assert terms.gradient is None and terms.quadratic is None
+    assert terms.node_gradient is None
+    assert np.abs(terms.delta_B.reshape(-1) - want).max() == 0.0
 
-    # A moving phantom is refused by name rather than silently approximated.
-    with pytest.raises(NotImplementedError, match='not wired yet'):
-        field.solver_terms(phantom, moving=True)
+    # A moving phantom gets the Eulerian expansion instead: the bracket on
+    # `delta_B` and a per-node gradient for the kernel. At zero displacement
+    # the two must reconstruct the same field.
+    moving = field.solver_terms(phantom, moving=True)
+    assert moving.node_gradient is not None
+    x = np.asarray(phantom.local_nodes, dtype=np.float64)
+    rebuilt = (moving.delta_B.reshape(-1)
+               + np.einsum('ij,ij->i', x, moving.node_gradient))
+    assert np.abs(rebuilt - want).max() < 1e-12 * np.abs(want).max()
 
     # `nodal=False` keeps the older, stricter behaviour for anyone who wants it.
     with pytest.raises(ValueError, match='needs the per-node expansion'):

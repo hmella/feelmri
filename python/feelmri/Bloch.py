@@ -1654,19 +1654,23 @@ class BlochSolver:
         # because `concomitant_fields` decides the frame and is a plain
         # attribute.
         b0_offset_mT, b0_gradient = 0.0, None
-        b0_delta_B, b0_quad = None, None
+        b0_delta_B, b0_quad, b0_node_lin = None, None, None
         if self.b0_field is not None and not self.b0_field.is_zero:
             # `moving` is the SOLVER's, not the field's: the readout decides
             # separately whether it was given a trajectory, and the two may
             # legitimately disagree. A phantom that does not move samples the
             # field at x0 for the whole solve, so anything above degree 1 folds
             # into `delta_B` there and needs no kernel channel.
-            b0_offset_mT, b0_delta_B, b0_gradient, b0_quad = (
-                self.b0_field.solver_terms(
-                    self.phantom, self.pod_trajectory is not None,
-                    rotation=self._orientation,
-                    location=getattr(self.phantom, '_location', None),
-                    physical=R_phys is not None))
+            _terms = self.b0_field.solver_terms(
+                self.phantom, self.pod_trajectory is not None,
+                rotation=self._orientation,
+                location=getattr(self.phantom, '_location', None),
+                physical=R_phys is not None)
+            b0_offset_mT = _terms.offset_mT
+            b0_delta_B = _terms.delta_B
+            b0_gradient = _terms.gradient
+            b0_quad = _terms.quadratic
+            b0_node_lin = _terms.node_gradient
 
         # `orient` measures the nodes from the slice centre, so `Bc` -- which is
         # centred on isocentre -- is evaluated at the wrong origin. Only when
@@ -1694,6 +1698,11 @@ class BlochSolver:
         # the phantom is static, where it has already folded into `delta_B`.
         field_quad = (np.empty(0, dtype=self._np_real) if b0_quad is None
                       else np.ascontiguousarray(b0_quad, dtype=self._np_real))
+
+        # Per node, so it rides every expansion below -- the sub-ensemble repeat
+        # and the isochromat one -- exactly as `delta_B` and `b1_map` do.
+        node_lin = (np.empty((0, 3), dtype=self._np_real) if b0_node_lin is None
+                    else np.ascontiguousarray(b0_node_lin, dtype=self._np_real))
 
         # Empty means "absent"; the kernel branches on size, not on content.
         conc_offset_none = np.empty(0, dtype=self._np_real)
@@ -1836,6 +1845,9 @@ class BlochSolver:
             delta_B = np.ascontiguousarray(delta_B, dtype=self._np_real)
             if b1_map.size:
                 b1_map = np.ascontiguousarray(np.repeat(b1_map, n_bins, axis=0))
+            if node_lin.size:
+                node_lin = np.ascontiguousarray(
+                    np.repeat(node_lin, n_bins, axis=0))
             Bz_old = np.ascontiguousarray(
                 np.repeat(Bz_old.reshape(-1), n_bins, axis=0),
                 dtype=self._np_real)
@@ -1879,7 +1891,8 @@ class BlochSolver:
             (('x', x, 3), ('T1', T1, 1), ('T2', T2, 1),
              ('delta_B', delta_B, 1), ('Bz_old', Bz_old, None),
              ('initial_Mxy', initial_Mxy, 1), ('initial_Mz', initial_Mz, 1))
-            + ((('b1_map', b1_map, None),) if b1_map.size else ()),
+            + ((('b1_map', b1_map, None),) if b1_map.size else ())
+            + ((('node_lin', node_lin, 3),) if node_lin.size else ()),
             nb_nodes * n_bins,
             f"{nb_nodes} nodes x {n_bins} bins" if n_bins > 1
             else f"{nb_nodes} nodes")
@@ -1989,7 +2002,13 @@ class BlochSolver:
                 # bare G0.
                 G0_lin = G0 if b0_gradient is None else G0 + b0_gradient
                 c0_conc = c0 if conc_location is None else c0 + conc_location
-                Bz_old = (c0 @ G0_lin + delta_B.reshape(-1)
+                # The per-node gradient adds to the hoisted scalars in the
+                # kernel, so the seed has to contract it against the same
+                # positions or magnus2 averages the block's opening field
+                # against one that is missing the term.
+                Bz_node = (0.0 if not node_lin.size
+                           else np.einsum('ij,ij->i', c0, node_lin))
+                Bz_old = (c0 @ G0_lin + delta_B.reshape(-1) + Bz_node
                           + _field_quad_mT(c0, b0_quad)
                           + _concomitant_mT(c0_conc, G0, self._B0_mT)).astype(
                     self._np_real, copy=False)
@@ -2045,6 +2064,15 @@ class BlochSolver:
                 # Re-derive the Magnus seed from the jittered positions. np.repeat(Bz_old,
                 # K) copies a field computed at the node centres, which carries none of the
                 # intra-voxel dephasing this block exists to produce.
+                # Same consecutive-duplicate ordering: the gradient is a
+                # property of the NODE, so all K isochromats share it. The
+                # kernel multiplies it by the JITTERED position, so each one
+                # picks up g . jitter -- the correct first-order variation of
+                # the field across the dephasing sphere, for free.
+                node_lin_big = (node_lin if node_lin.size == 0
+                                else np.ascontiguousarray(
+                                    np.repeat(node_lin, K, axis=0)))
+
                 if self._order > 0:
                     if has_traj and weights.size > 0:
                         c0b = x_big + (modes_big @ weights[0]).reshape(-1, 3)
@@ -2054,8 +2082,10 @@ class BlochSolver:
                     G0b_lin = G0b if b0_gradient is None else G0b + b0_gradient
                     c0b_conc = (c0b if conc_location is None
                                 else c0b + conc_location)
+                    Bz_node_big = (0.0 if not node_lin_big.size
+                                   else np.einsum('ij,ij->i', c0b, node_lin_big))
                     Bz_old_big = np.ascontiguousarray(
-                        c0b @ G0b_lin + deltaB_big.reshape(-1)
+                        c0b @ G0b_lin + deltaB_big.reshape(-1) + Bz_node_big
                         + _field_quad_mT(c0b, b0_quad)
                         + _concomitant_mT(c0b_conc, G0b, self._B0_mT),
                         dtype=self._np_real)
@@ -2077,7 +2107,7 @@ class BlochSolver:
                     modes_big, weights, has_traj,
                     self._order, Bz_old_big, rf_old,
                     False, self._B0_mT, b1_big, step_lin, conc_offset,
-                    field_quad,
+                    field_quad, node_lin_big,
                 )
                 self.bloch_elapsed += time.perf_counter() - t_call
 
@@ -2110,7 +2140,7 @@ class BlochSolver:
                     modes, weights, has_traj,
                     self._order, Bz_old, rf_old,
                     False, self._B0_mT, b1_map, step_lin, conc_offset,
-                    field_quad,
+                    field_quad, node_lin,
                 )
                 self.bloch_elapsed += time.perf_counter() - t_call
 

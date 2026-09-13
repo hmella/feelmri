@@ -2347,3 +2347,120 @@ def test_a_moving_spin_samples_a_quadratic_field_where_it_moves_to(wide_phantom)
   assert frozen > 0.5, (
       f'this geometry only moves the phase by {frozen:.3f}, so it cannot tell '
       f'the Eulerian answer from the Lagrangian one')
+
+
+def test_a_rough_field_follows_a_moving_spin_to_first_order(wide_phantom):
+  """The rung no polynomial can reach: an arbitrary analytic field on a phantom
+  that moves.
+
+  `dB0(x0 + u) ~= [dB0(x0) - g.x0] + curr . g` puts the bracket on `delta_B`,
+  where it costs nothing, and leaves a per-node vector the kernel adds to the
+  gradient scalars it already hoists. Exact for a linear field; first order in
+  the displacement otherwise, which is what the tolerance below reflects.
+
+  Two guards, and the test is worthless without them: the FROZEN answer -- what
+  `delta_B` alone gives -- must be far outside the tolerance, and the closed
+  form must not be reachable by a polynomial, or this would be testing rung B.
+  """
+  dur_ms = 4.0
+  scanner = Scanner()
+  gamma = scanner.gamma.m_as('rad/ms/mT')
+
+  P = wide_phantom.local_nodes.astype(np.float64)
+  cells = np.asarray(wide_phantom.local_elements)
+  shift = np.array([0.004, -0.003, 0.005])           # 7.1 mm
+
+  # A 0.25 m sine: smooth, so the expansion is valid, but no polynomial up to
+  # the cap represents it -- `B0Field.fit` refuses it, which is the point.
+  n = np.array([0.6, -0.5, 0.62]); n /= np.linalg.norm(n)
+  amp = 2.0e-3
+  rough = lambda p: amp * np.sin(2 * np.pi * (p @ n) / 0.25)
+
+  ref = _phantom_from_points(P, cells, 'rough_ref')
+  with pytest.raises(ValueError, match='needs the per-node expansion'):
+    B0Field.fit(rough, B0Field._scanner_nodes(ref), collective=False)
+
+  blk = _gradient_block((0.0, 0.0, 0.0), dur_ms)
+
+  def solve(tag, moving):
+    phantom = _phantom_from_points(P, cells, tag)
+    field = B0Field.on_phantom(rough, phantom, collective=False)
+    assert field.kind == 'nodal'
+    pod = (_constant_displacement_pod(phantom.local_nodes.shape[0], shift,
+                                      dur_ms=dur_ms) if moving else None)
+    return _precess(phantom, blk, b0_field=field, pod_trajectory=pod)
+
+  still, moved = solve('rough_still', False), solve('rough_moved', True)
+
+  nodes = np.asarray(ref.local_nodes, dtype=np.float64)
+  want_still = -gamma * rough(nodes) * dur_ms
+  want_moved = -gamma * rough(nodes + shift) * dur_ms
+
+  at_rest = float(np.abs(np.exp(1j * np.angle(still))
+                         - np.exp(1j * want_still)).max())
+  assert at_rest < 1e-6, (
+      f'at rest the per-node field should be EXACT, off by {at_rest:.3e}')
+
+  after = float(np.abs(np.exp(1j * np.angle(moved))
+                       - np.exp(1j * want_moved)).max())
+  frozen = float(np.abs(np.exp(1j * want_still)
+                        - np.exp(1j * want_moved)).max())
+  assert after < 0.1 * frozen, (
+      f'the moved spin is off by {after:.3e}, not much better than freezing '
+      f'the field to the node ({frozen:.3e})')
+  assert frozen > 0.2, (
+      f'freezing the field only costs {frozen:.3f}, so this geometry cannot '
+      f'tell the Eulerian answer from the Lagrangian one')
+
+
+@pytest.mark.parametrize('spoiler', [False, True], ids=['plain', 'spoiler'])
+def test_the_per_node_field_reaches_both_magnus_seeds(wide_phantom, spoiler):
+  """The per-node gradient has three mirror sites -- the kernel and the two
+  Magnus seeds -- and a seed that disagrees with the kernel leaves an O(dt)
+  error at every block boundary, silently.
+
+  `cayley_klein` never reads a seed, so under a field that is CONSTANT IN TIME
+  the trapezoidal rule is exact and `magnus2` must reproduce it. The POD here
+  has zero displacement, which keeps the per-node channel live -- the solver
+  only takes it when a trajectory is present -- while holding the field still.
+  A coarse raster is what makes the O(dt) term visible; at the fine dt the rest
+  of this file uses it hides under the tolerance.
+
+  The spoiler arm is the one that is easy to miss: that seed is derived from
+  the K-fold JITTERED positions, so it only fires under `spoiler=True` and no
+  ordinary test reaches it.
+
+  Measured with the term dropped from each seed in turn: **6.52e-01** plain and
+  **3.98e-01** spoiler, against the 1e-9 gate below. Neither is visible to the
+  moving-spin test above, which runs at a fine raster where the O(dt) term
+  hides -- that is why this probe exists separately.
+  """
+  dur_ms = 6.0
+  P = wide_phantom.local_nodes.astype(np.float64)
+  cells = np.asarray(wide_phantom.local_elements)
+
+  n = np.array([0.6, -0.5, 0.62]); n /= np.linalg.norm(n)
+  rough = lambda p: 2.0e-3 * np.sin(2 * np.pi * (p @ n) / 0.25)
+
+  def solve(tag, method):
+    phantom = _phantom_from_points(P, cells, tag)
+    field = B0Field.on_phantom(rough, phantom, collective=False)
+    # A CONSTANT displacement: the channel is live (the solver only takes it
+    # with a trajectory present) but `curr` never changes, so the field is
+    # constant in time and the trapezoidal rule is exact. A zero displacement
+    # would be refused -- a POD with no energy is undefined.
+    pod = _constant_displacement_pod(phantom.local_nodes.shape[0],
+                                     np.array([0.004, -0.003, 0.005]),
+                                     dur_ms=dur_ms)
+    blk = _gradient_block((0.0, 0.0, 0.0), dur_ms, dt_ms=0.75)
+    blk.spoiler = spoiler
+    return _precess(phantom, blk, method=method, b0_field=field,
+                    pod_trajectory=pod, isochromat_K=4, isochromat_seed=0)
+
+  m2 = solve(f'seed_m2_{spoiler}', 'magnus2')
+  ck = solve(f'seed_ck_{spoiler}', 'cayley_klein')
+  gap = float(np.abs(m2 - ck).max())
+  assert gap < 1e-9, (
+      f'the {"spoiler" if spoiler else "plain"} Magnus seed disagrees with the '
+      f'kernel by {gap:.3e}: under a field constant in time the trapezoidal '
+      f'rule is exact, so magnus2 must reproduce cayley_klein')

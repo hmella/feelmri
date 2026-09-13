@@ -72,7 +72,8 @@ MagnetizationState<T> solve_mri_impl(
   Eigen::Ref<const Matrix<std::complex<T>, Dynamic, 1>> b1_map,
   Eigen::Ref<const Matrix<T, Dynamic, 3>> static_lin,
   Eigen::Ref<const Matrix<T, Dynamic, 1>> conc_offset,
-  Eigen::Ref<const Matrix<T, Dynamic, 1>> field_quad
+  Eigen::Ref<const Matrix<T, Dynamic, 1>> field_quad,
+  Eigen::Ref<const Matrix<T, Dynamic, 3, RowMajor>> node_lin
 ){
   // The caller's rf!=0 mask is redundant: the kernel derives the rf-free
   // condition from rf_all itself, so a stale or wrong mask cannot corrupt
@@ -134,6 +135,17 @@ MagnetizationState<T> solve_mri_impl(
   const T qxy = has_field_quad ? field_quad(3) : T(0);
   const T qxz = has_field_quad ? field_quad(4) : T(0);
   const T qyz = has_field_quad ? field_quad(5) : T(0);
+
+  // A per-node field gradient: the first-order Eulerian expansion of a field
+  // no polynomial represents. RowMajor to match `r0` and `curr`, so it is one
+  // contiguous 3-float stream per node read alongside the position -- the
+  // ColMajor spelling `static_lin` uses would give three strided streams and
+  // forfeit the locality this term's cost rests on.
+  const bool has_node_lin = (node_lin.rows() != 0);
+  if (has_node_lin && node_lin.rows() != n_pos) {
+    throw std::invalid_argument(
+        "solve_mri: node_lin must be empty or have one row per node");
+  }
 
   const bool has_b1 = (b1_map.size() != 0);
   if (has_b1 && b1_map.size() != n_pos) {
@@ -340,6 +352,12 @@ MagnetizationState<T> solve_mri_impl(
                       + T(0.25) * Gz*Gz * (px*px + py*py)
                       - Gx*Gz*px*pz - Gy*Gz*py*pz) * inv_2B0;
           }
+        } else if (has_node_lin) {
+          // Grouped as curr*(G + g), 3 mul + 3 add rather than 6 mul + 5 add.
+          Bz_new = curr(p, 0)*(Gx_lin + node_lin(p, 0))
+                 + curr(p, 1)*(Gy_lin + node_lin(p, 1))
+                 + curr(p, 2)*(Gz_lin + node_lin(p, 2))
+                 + delta_B(p);
         } else {
           if (has_field_quad) {
             Bz_new = curr(p, 0)*Gx_lin + curr(p, 1)*Gy_lin + curr(p, 2)*Gz_lin
@@ -531,7 +549,8 @@ MagnetizationState<T> solve_mri_dispatch(
   Eigen::Ref<const Matrix<std::complex<T>, Dynamic, 1>> b1_map,
   Eigen::Ref<const Matrix<T, Dynamic, 3>> static_lin,
   Eigen::Ref<const Matrix<T, Dynamic, 1>> conc_offset,
-  Eigen::Ref<const Matrix<T, Dynamic, 1>> field_quad
+  Eigen::Ref<const Matrix<T, Dynamic, 1>> field_quad,
+  Eigen::Ref<const Matrix<T, Dynamic, 3, RowMajor>> node_lin
 ){
   // Constant T1/T2 across nodes is the common case (phantoms built from scalar
   // relaxation times); it lets the relaxation exponentials stay in registers.
@@ -545,7 +564,7 @@ MagnetizationState<T> solve_mri_dispatch(
         r0, T1, T2, delta_B, M0, gamma, rf_all, G_all, dt, regime_idx,         \
         Mxy_initial, Mz_initial, modes, weights,                               \
         has_traj, Bz_old_init, rf_old_init, store_history, B0, b1_map,         \
-        static_lin, conc_offset, field_quad)
+        static_lin, conc_offset, field_quad, node_lin)
 
   switch (order) {
     case 0:
@@ -591,14 +610,15 @@ PYBIND11_MODULE(BlochSimulator, m) {
        Modes_f32 modes, MatDyn_f32 weights, bool has_traj,
        int order, Vec_f32 Bz_old_init, std::complex<f32> rf_old_init,
        bool store_history, const f32 &B0, CVec_f32 b1_map,
-       Mat3_f32 static_lin, Vec_f32 conc_offset, Vec_f32 field_quad) {
+       Mat3_f32 static_lin, Vec_f32 conc_offset, Vec_f32 field_quad,
+       R0_f32 node_lin) {
       return solve_mri_dispatch<f32>(order, r0, T1, T2, delta_B, M0, gamma,
                                      rf_all, G_all, dt, regime_idx,
                                      Mxy_initial, Mz_initial,
                                      modes, weights, has_traj,
                                      Bz_old_init, rf_old_init, store_history, B0,
                                      b1_map, static_lin, conc_offset,
-                                     field_quad);
+                                     field_quad, node_lin);
     },
     py::arg("r0"), py::arg("T1"), py::arg("T2"), py::arg("delta_B"),
     py::arg("M0"), py::arg("gamma"), py::arg("rf_all"), py::arg("G_all"),
@@ -614,7 +634,9 @@ PYBIND11_MODULE(BlochSimulator, m) {
     py::arg("static_lin") = Matrix<f32, Dynamic, 3>(),
     py::arg("conc_offset") = Matrix<f32, Dynamic, 1>(),
     // Empty by default: no quadratic lab-frame field.
-    py::arg("field_quad") = Matrix<f32, Dynamic, 1>());
+    py::arg("field_quad") = Matrix<f32, Dynamic, 1>(),
+    // Empty by default: no per-node field gradient.
+    py::arg("node_lin") = Matrix<f32, Dynamic, 3, RowMajor>());
 
   m.def("solve_mri_f64",
     [](R0_f64 r0, Vec_f64 T1, Vec_f64 T2, Vec_f64 delta_B,
@@ -624,14 +646,15 @@ PYBIND11_MODULE(BlochSimulator, m) {
        Modes_f64 modes, MatDyn_f64 weights, bool has_traj,
        int order, Vec_f64 Bz_old_init, std::complex<f64> rf_old_init,
        bool store_history, const f64 &B0, CVec_f64 b1_map,
-       Mat3_f64 static_lin, Vec_f64 conc_offset, Vec_f64 field_quad) {
+       Mat3_f64 static_lin, Vec_f64 conc_offset, Vec_f64 field_quad,
+       R0_f64 node_lin) {
       return solve_mri_dispatch<f64>(order, r0, T1, T2, delta_B, M0, gamma,
                                      rf_all, G_all, dt, regime_idx,
                                      Mxy_initial, Mz_initial,
                                      modes, weights, has_traj,
                                      Bz_old_init, rf_old_init, store_history, B0,
                                      b1_map, static_lin, conc_offset,
-                                     field_quad);
+                                     field_quad, node_lin);
     },
     py::arg("r0"), py::arg("T1"), py::arg("T2"), py::arg("delta_B"),
     py::arg("M0"), py::arg("gamma"), py::arg("rf_all"), py::arg("G_all"),
@@ -647,5 +670,7 @@ PYBIND11_MODULE(BlochSimulator, m) {
     py::arg("static_lin") = Matrix<f64, Dynamic, 3>(),
     py::arg("conc_offset") = Matrix<f64, Dynamic, 1>(),
     // Empty by default: no quadratic lab-frame field.
-    py::arg("field_quad") = Matrix<f64, Dynamic, 1>());
+    py::arg("field_quad") = Matrix<f64, Dynamic, 1>(),
+    // Empty by default: no per-node field gradient.
+    py::arg("node_lin") = Matrix<f64, Dynamic, 3, RowMajor>());
 }
