@@ -1432,8 +1432,16 @@ class FEMPhantom:
         susceptibility -- while a main-field imperfection belongs to the bore,
         so a spin that moves must sample it where it has moved to. This gradient
         is what lets the readout do that: the phase becomes
-        ``-(phi_dB0 + g . x(t)) * t``, with ``phi_dB0`` carrying the bracket
-        ``dB0(x0) - g . x0`` so the sum is the field at the current position.
+        ``-(phi_dB0 + g . (x(t) - x0)) * t``, i.e. the expansion is written
+        against the DISPLACEMENT and ``phi_dB0`` carries the field itself.
+
+        **That is not how the SOLVER spells it**, and the difference is
+        load-bearing. The kernel's gradient scalars multiply the absolute
+        position, so there ``delta_B`` carries the bracket ``dB0(x0) - g . x0``.
+        Spelling the readout the same way costs a real error: the shape
+        functions then interpolate a PRODUCT of two nodal fields and leave
+        ``(sum N_a g_a).x_q - sum N_a (g_a . x_a)``, which has nothing to do
+        with the motion -- 6.7e-02 of the signal against 2.5e-03 this way.
 
         ``B0Field.solver_terms`` / ``readout_terms`` build both halves together;
         do not assemble one of them by hand. ``None`` clears it, and clearing
@@ -1444,7 +1452,11 @@ class FEMPhantom:
         from ``phantom.local_nodes`` and redistributed once into the signal
         layout, where the assemblers live.
         """
+        # Remembered in the layout the CALLER passed, for the same reason
+        # `set_static_fields` remembers its arrays: `simulate_pulseq` installs
+        # a temporary field of its own and has to put back whatever was there.
         if gradient is None:
+            self._b0_gradient = None
             empty = np.zeros((0, 3), dtype=np.float64)
             return self._set_b0_gradient_local(empty)
 
@@ -1467,6 +1479,7 @@ class FEMPhantom:
                        f"turns every k-space sample into NaN.")
         collective_raise(problem)
 
+        self._b0_gradient = np.array(g, copy=True)
         if getattr(self, '_dual', False) and self._active_partition != 'signal':
             g = self.redistribute_nodal(np.ascontiguousarray(g), 'bloch', 'signal')
             with self._using('signal'):

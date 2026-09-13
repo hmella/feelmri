@@ -3286,6 +3286,10 @@ def simulate_pulseq(seq_path,
   b0_phi_nodal = None
   b0_static_set = False
   remembered = None
+  # The caller may already have installed a gradient of their own. Saved the
+  # way `previous_sensitivity` is, so a temporary one put on here is removed
+  # and theirs comes back rather than being cleared to None.
+  previous_gradient = getattr(phantom, '_b0_gradient', None)
 
   # The temporary sensitivity map is removed in the finally below, so a
   # readout that raises does not leave it on the caller's phantom.
@@ -3297,9 +3301,12 @@ def simulate_pulseq(seq_path,
     # The scanner field belongs to the bore, so a spin sees it wherever it has
     # moved to rather than where it started. A field a polynomial can carry
     # reaches the readout as a shift of the sample's k, below; one that needs a
-    # per-node expansion rides the PHANTOM instead -- the bracket
-    # `dB0(x0) - g.x0` on `phi_dB0` and the gradient on its own channel, which
-    # is what lets the assembler evaluate it at the deformed position.
+    # per-node expansion rides the PHANTOM instead -- the field itself on
+    # `phi_dB0` and the gradient on its own channel, which the assembler
+    # applies against the DISPLACEMENT `x(t) - x0`. (The solver spells the same
+    # expansion against the absolute position and puts the bracket
+    # `dB0(x0) - g.x0` on `delta_B`; the two differ deliberately, see
+    # `FEMPhantom.set_b0_gradient`.)
     b0_field = solver_kwargs.get('b0_field', None)
     # Reduced, not rank-local: see `B0Field.is_zero_everywhere`.
     if b0_field is not None and b0_field.is_zero_everywhere():
@@ -3510,8 +3517,8 @@ def simulate_pulseq(seq_path,
   finally:
     if b0_phi_nodal is not None:
       # Cleared unconditionally: a stale per-node gradient left on the phantom
-      # is a wrong image with no symptom.
-      phantom.set_b0_gradient(None)
+      # is a wrong image with no symptom. The caller's own is then restored.
+      phantom.set_b0_gradient(previous_gradient)
       if b0_static_set:
         phantom.set_static_fields(*remembered)
     if sensitivity_set:

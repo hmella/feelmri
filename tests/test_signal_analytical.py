@@ -1899,10 +1899,11 @@ def test_a_rough_field_follows_a_moving_spin_through_the_readout(tmp_path,
   """A field no polynomial can carry still has to be sampled where the spin is.
 
   The readout's Eulerian channel is a per-node gradient: `phi_dB0` carries the
-  bracket `dB0(x0) - g.x0` and `set_b0_gradient` carries `g`, so the kernel
-  forms `phi + g.x(t)` at the DEFORMED position. That is the field at `x(t)` to
-  first order in the displacement, against the frozen value the Lagrangian
-  channel would keep.
+  field itself and `set_b0_gradient` carries `g`, so the kernel forms
+  `phi + g.(x(t) - x0)` -- written against the DISPLACEMENT, unlike the
+  solver, which has no choice but the absolute position. That is the field at
+  `x(t)` to first order, against the frozen value the Lagrangian channel would
+  keep.
 
   Scored against the exact answer -- the same mesh built at the displaced
   position with the field written there per node -- because the model is an

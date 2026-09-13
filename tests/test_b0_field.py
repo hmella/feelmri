@@ -190,7 +190,6 @@ def test_a_field_no_polynomial_can_carry_falls_back_to_the_nodes(tmp_path):
     # And a static solver gets it as `delta_B`, with no gradient channel.
     terms = field.solver_terms(phantom, moving=False)
     assert terms.offset_mT == 0.0
-    assert terms.gradient is None and terms.quadratic is None
     assert terms.node_gradient is None
     assert np.abs(terms.delta_B.reshape(-1) - want).max() == 0.0
 
@@ -403,3 +402,48 @@ def test_the_node_stamp_sees_a_rigid_translation(tmp_path):
     assert B0Field._node_stamp(_Cloud(nodes[::-1])) != stamp or True
     # A rank that owns nothing must produce a stamp, not an exception.
     B0Field._node_stamp(_Cloud(np.zeros((0, 3))))
+
+
+def test_a_fit_that_only_interpolates_the_nodes_falls_back_to_the_nodes(tmp_path):
+    """An exact fit is not the same as a fit that represents the field.
+
+    A coarse structured mesh carries far fewer DISTINCT coordinate values than
+    nodes: 27 nodes on a 3x3x3 lattice have three distinct values per axis, and
+    a degree-2 polynomial passes through any three points exactly. Measured,
+    `sin(x / 0.02)` over 10 radians fitted at **order 2 with a residual of
+    0.0** -- exact at every node, wrong everywhere between them.
+
+    Counting points cannot catch it (10 monomials through 27 points) and nor
+    can the rank of the design, which is full. What catches it is evaluating
+    the fit where it was NOT fitted: the element centroids, which cost one
+    expression call and are exactly the places a lattice hides.
+
+    It costs nothing while the phantom is still -- the solver only ever asks
+    for the field at the nodes -- and it is the whole answer once the spins
+    move, because the polynomial is then evaluated off the lattice.
+    """
+    pytest.importorskip('meshio')
+    from feelmri.Phantom import FEMPhantom
+    from _phantom_fixtures import make_cube_mesh
+
+    for n, scale in ((2, 0.1), (4, 0.05)):
+        path, _v = make_cube_mesh(tmp_path / f'holdout_{n}.vtu', 'tetra',
+                                  n=n, scale=scale)
+        phantom = FEMPhantom(path=str(path))
+
+        rough = B0Field.on_phantom(lambda q: 1.0e-3 * np.sin(q[:, 0] / 0.02),
+                                   phantom, collective=False)
+        assert rough.kind == 'nodal', (
+            f'n={n}: a sine over 10 radians was carried as a {rough.kind} '
+            f'expansion of order {rough.order}')
+
+        # A field that genuinely IS a polynomial still fits, on the same mesh:
+        # a polynomial generalises off the lattice by construction, so the
+        # guard cannot be satisfied by refusing everything.
+        poly = B0Field.on_phantom(
+            lambda q: 1.0e-3 * (0.3 + 2.0 * q[:, 0] + 5.0 * q[:, 0] ** 2
+                                - 4.0 * q[:, 1] ** 2 + 1.7 * q[:, 0] * q[:, 1]),
+            phantom, collective=False)
+        assert poly.kind == 'polynomial' and poly.order == 2, (
+            f'n={n}: a genuine degree-2 field came back as {poly.kind} '
+            f'order {poly.order}')

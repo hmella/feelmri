@@ -76,8 +76,22 @@ SolverTerms = collections.namedtuple(
     'SolverTerms', 'offset_mT delta_B gradient quadratic node_gradient')
 
 #: The same for the signal evaluator, with the rates already in rad/ms.
+#: What the readout needs from a PER-NODE field. Two fields, not five: unlike
+#: the solver, which has one entry point and carries every representation
+#: through it, the readout has a dedicated function per trajectory type for
+#: anything a polynomial can carry (`Trajectory.b0_terms`,
+#: `PulseqAdapter.b0_readout_terms`). The five-field version carried a
+#: `gradient` in mT/m and a `quadratic` in mT/m^2 inside a tuple whose other
+#: entries were rad/ms, and no caller anywhere read either.
 ReadoutTerms = collections.namedtuple(
-    'ReadoutTerms', 'phi_uniform phi_nodal gradient quadratic node_gradient')
+    'ReadoutTerms', 'phi_nodal node_gradient')
+
+
+class NoPolynomialFits(ValueError):
+    """Raised by :meth:`B0Field.fit` when no polynomial up to the cap
+    represents the expression. Its own exception type, so `on_phantom` falls
+    back to the per-node rung for THAT and not for a `LinAlgError` (which is a
+    `ValueError` subclass) or for the expression-shape contract error."""
 
 
 class B0Field:
@@ -91,21 +105,27 @@ class B0Field:
     moves through this field samples a different value; a spin that moves
     through ``delta_B`` does not.
 
-    The field is given as an expression of position and carried as a
-    low-order expansion:
+    The field is given as an expression of position and carried as whichever
+    of three representations it actually needs -- :attr:`kind` says which:
 
-        dB0(x) = offset + gradient . x        [mT]
+        'uniform' / 'linear'  dB0(x) = c0 + g . x                    [mT]
+        'polynomial'          every monomial up to :attr:`MAX_ORDER`
+        'nodal'               one value and one gradient PER NODE
 
     with ``x`` in metres, in the SCANNER frame, measured from isocentre -- not
     the imaging frame, and not relative to the slice location.
-    :meth:`in_frame` converts to whatever frame a caller works in.
+    :meth:`in_frame` converts to whatever frame a caller works in, and refuses
+    a per-node field, which has no closed form to convert.
 
-    Why an expansion is not a compromise here: a static field in a
+    Why a polynomial is not a compromise here: a static field in a
     current-free bore satisfies Laplace's equation, so it IS a solid-harmonic
-    series, and that is the basis shim hardware is specified in. Truncation
-    order is the only approximation, and :attr:`residual_rms` reports it.
-    Anything the series cannot represent is not a smooth scanner field -- it is
-    tissue structure, and it belongs on ``delta_B``.
+    series, and that is the basis shim hardware is specified in. Every shim is
+    a polynomial, so the fit is exact and costs no per-node memory --
+    :attr:`residual_rms_mT` reports what it could not represent. A field no
+    polynomial up to the cap represents falls back to the per-node expansion,
+    which is EXACT on a phantom that does not move (the nodal value is the
+    Eulerian answer there) and first order in the displacement on one that
+    does.
 
     Parameters
     ----------
@@ -114,7 +134,12 @@ class B0Field:
     gradient : Quantity
         Linear part, mT/m, a 3-vector in the scanner frame.
     order : int, optional
-        Expansion order this object carries (0 or 1).
+        Polynomial degree this object carries, 0 to :attr:`MAX_ORDER`. The
+        coefficient vector must match it; see :meth:`fit`.
+    coefficients : np.ndarray, optional
+        Every monomial in the order `_monomial_exponents` lays out, which for
+        degree 2 is ``(1 | x y z | xx yy zz xy xz yz)``. Defaults to the
+        constant and the gradient, zero-padded to the declared order.
     residual_rms : Quantity, optional
         What :meth:`fit` could not represent, mT. Zero for a hand-built field.
     """
@@ -134,6 +159,11 @@ class B0Field:
     #: `pod-motion.md` records a 1.5e-8 floor for the method of snapshots.
     #: Measured separation is seven orders -- a true polynomial lands at 0 to
     #: 1e-8, the nearest miss (a degree-4 field fitted at degree 3) at 4.7e-01.
+    # Kept as the documented floor of the fit rather than as a stopping rule:
+    # the normal equations square the condition number, so a residual below
+    # `sqrt(eps)` of the variation means the expression IS that polynomial and
+    # nothing finer is measurable. It was written as a second `or` clause
+    # beside `rtol` and was unreachable for any `rtol >= 1e-7`.
     EXACT_RTOL = 1.0e-7
 
     def __init__(self, offset=Quantity(0.0, 'mT'),
@@ -155,17 +185,29 @@ class B0Field:
         # constant and linear parts are mirrored on `offset_mT` and
         # `gradient_mT_per_m` because those two are what the free kernel path
         # consumes; everything above degree 1 is only readable here.
+        n_terms = len(self._monomial_exponents(self.order))
         if coefficients is None:
-            coefficients = np.concatenate(([self.offset_mT], g))[
-                :len(self._monomial_exponents(self.order))]
+            # Only the constant and the gradient are known here, so a declared
+            # order above 1 is padded rather than truncated: truncating built a
+            # length-4 vector that called itself degree 2, and
+            # `quadratic_mT_per_m2` then raised a broadcast error from inside
+            # `BlochSolver` rather than at the constructor.
+            coefficients = np.zeros(n_terms, dtype=np.float64)
+            coefficients[:min(4, n_terms)] = np.concatenate(
+                ([self.offset_mT], g))[:min(4, n_terms)]
         self.coefficients = np.asarray(coefficients, dtype=np.float64).reshape(-1)
+        if self.coefficients.size != n_terms:
+            raise ValueError(
+                f"B0Field: order {self.order} has {n_terms} monomials but "
+                f"{self.coefficients.size} coefficients were given. A vector "
+                f"that does not match its order is not a polynomial, and it "
+                f"fails later inside the solver rather than here.")
         # Per-node fallback, set by `on_phantom` when no polynomial fits. The
         # stamp records which node set it was built on -- a per-node array
         # means nothing under a different partition or ordering.
         self._nodal_mT = None
         self._nodal_grad = None
         self._nodal_stamp = None
-        self._expression = None
         # How much of the field varies WITHIN one element, in mT. A per-node
         # field reaches the readout through the shape functions, so whatever it
         # does between nodes is not represented at all -- a separate limit from
@@ -213,15 +255,27 @@ class B0Field:
         Zeros when the field carries no quadratic part, so a caller may add
         them unconditionally.
         """
+        if self.order >= 3:
+            raise NotImplementedError(
+                f"B0Field.quadratic_mT_per_m2: this field is degree "
+                f"{self.order}, and monomials 4:10 of it are not its quadratic "
+                f"form -- returning them would drop every higher term "
+                f"silently. Read `coefficients` instead.")
         out = np.zeros(6, dtype=np.float64)
         if self.order >= 2:
             out[:] = self.coefficients[4:10]
         return out
 
     def __repr__(self):
-        return (f"B0Field(offset={self.offset_mT:.6g} mT, "
-                f"gradient={np.round(self.gradient_mT_per_m, 9)} mT/m, "
-                f"order={self.order})")
+        # A per-node field carries a zero coefficient vector, so the polynomial
+        # spelling below renders it as an indistinguishable null field.
+        if self.kind == 'nodal':
+            return (f"B0Field(kind='nodal', nodes={self._nodal_mT.size}, "
+                    f"peak={np.abs(self._nodal_mT).max():.6g} mT, "
+                    f"within-element residual={self.mesh_residual_mT:.3g} mT)")
+        return (f"B0Field(kind={self.kind!r}, order={self.order}, "
+                f"offset={self.offset_mT:.6g} mT, "
+                f"gradient={np.round(self.gradient_mT_per_m, 9)} mT/m)")
 
     @property
     def is_zero(self):
@@ -371,7 +425,8 @@ class B0Field:
                      physical=False):
         """What `BlochSolver` needs from this field, in the frame it works in.
 
-        Returns ``(offset_mT, delta_B_mT, gradient, quadratic)``: a uniform
+        Returns ``(offset_mT, delta_B_mT, gradient, quadratic, node_gradient)``:
+        a uniform
         part to fold into `delta_B`, a per-node array to fold into it instead, a
         3-vector for the hoisted gradient scalars, and the six quadratic
         coefficients. `delta_B_mT` and `gradient` are never both set.
@@ -420,19 +475,28 @@ class B0Field:
                       location=None):
         """What the signal evaluator needs, in the imaging frame it works in.
 
-        Returns ``(phi_uniform, phi_nodal, gradient, quadratic)`` with the
-        off-resonance rates in rad/ms and the quadratic still in mT/m^2. The
+        Returns ``(phi_nodal, node_gradient)`` in rad/ms and rad/ms/m: the
+        field at each node, and its gradient there, which
+        :meth:`FEMPhantom.set_b0_gradient` takes. ``node_gradient`` is ``None``
+        on a phantom that does not move, where the nodal value IS the Eulerian
+        answer. A field a polynomial can carry is REFUSED -- see the message.
+        The
         assembler's nodes are always the imaging ones, so unlike the solver
         there is no physical-frame case here.
         """
         gamma = scanner.gamma.m_as('rad/ms/mT')
         if self.kind != 'nodal':
-            b, g, q = self.in_frame_full(rotation=rotation, location=location)
-            return ReadoutTerms(gamma * b, None, (g if np.any(g) else None),
-                                (q if np.any(q) else None), None)
+            raise TypeError(
+                f"B0Field.readout_terms: this is a {self.kind} field, which "
+                f"the readout carries as a k-space shift, a uniform phase and "
+                f"the six `maxwell` coefficients rather than per node. Use "
+                f"`Trajectory.b0_terms` for a native trajectory or "
+                f"`PulseqAdapter.b0_readout_terms` for an imported one; both "
+                f"return all three together, because a field split across "
+                f"channels is a field that can be half-applied.")
         nodal = self.nodal_mT(phantom)
         if not moving:
-            return ReadoutTerms(0.0, gamma * nodal, None, None, None)
+            return ReadoutTerms(gamma * nodal, None)
         # Unlike the solver's, this expansion is written against the
         # DISPLACEMENT rather than the absolute position:
         #   dB0(x0 + u) ~= dB0(x0) + g . u
@@ -444,7 +508,7 @@ class B0Field:
         # at rest. The assembler's nodes are always the imaging ones, so
         # `physical` has no meaning here and the gradient always takes R^T.
         g = self.node_gradient(phantom, rotation=rotation, physical=False)
-        return ReadoutTerms(0.0, gamma * nodal, None, None, gamma * g)
+        return ReadoutTerms(gamma * nodal, gamma * g)
 
     def phi_offset(self, scanner, location=None):
         """The uniform part as an off-resonance rate in rad/ms, to add to
@@ -563,7 +627,7 @@ class B0Field:
 
         order, coef, resid_rms = best
         if resid_rms > rtol * scale and scale > 0.0:
-            raise ValueError(
+            raise NoPolynomialFits(
                 f"B0Field.fit: degree {order} still leaves a residual of "
                 f"{resid_rms:.4g} mT against a spatial variation of "
                 f"{scale:.4g} mT ({resid_rms / scale:.1%}), above "
@@ -602,8 +666,32 @@ class B0Field:
         """
         nodes = cls._scanner_nodes(phantom)
         try:
-            return cls.fit(expression, nodes, **kwargs)
-        except ValueError:
+            fitted = cls.fit(expression, nodes, **kwargs)
+            gap, span = cls._holdout_residual(expression, phantom, nodes, fitted,
+                                              kwargs.get('collective', True))
+            rtol = float(kwargs.get('rtol', 1.0e-3))
+            if span > 0.0 and gap > max(rtol, cls.EXACT_RTOL) * span:
+                # The fit reproduces every node and does not generalise. A
+                # coarse structured mesh is the ordinary way in: 27 nodes on a
+                # 3 x 3 x 3 lattice carry only THREE distinct values per axis,
+                # and a degree-2 polynomial passes through any three points
+                # exactly -- so `sin(x / 0.02)` over 10 radians fitted with a
+                # residual of 0.0. Exact at the nodes, wrong everywhere else,
+                # which costs nothing while the phantom is still and is the
+                # whole answer once it moves.
+                raise NoPolynomialFits(
+                    f"B0Field.on_phantom: the degree-{fitted.order} fit "
+                    f"reproduces every node but leaves {gap:.4g} mT at the "
+                    f"element centroids, against a field variation of "
+                    f"{span:.4g} mT. It is interpolating this node set rather "
+                    f"than representing the field, so the per-node expansion "
+                    f"is used instead.")
+            return fitted
+        except NoPolynomialFits:
+            # Only this one. A bare `except ValueError` also swallows the
+            # expression-shape contract error and `numpy.linalg.LinAlgError`,
+            # which is a ValueError subclass -- turning a caller's bug into a
+            # silent per-node fallback.
             if not nodal:
                 raise
         field = cls(coefficients=np.zeros(1))
@@ -612,7 +700,6 @@ class B0Field:
             expression, nodes, gradient=gradient, fd_step=fd_step,
             collective=kwargs.get('collective', True))
         field._nodal_stamp = cls._node_stamp(phantom)
-        field._expression = expression
         field.mesh_residual_mT = cls._mesh_residual(expression, phantom, nodes)
         return field
 
@@ -711,7 +798,15 @@ class B0Field:
                     f"{points.shape[0]} points; it must map (N, 3) to (N, 3).")
             return g
 
-        h = 1.0e-4 if fd_step is None else float(fd_step)
+        # Scaled to the cloud, not absolute. A fixed 1e-4 m is a tenth of a
+        # sub-millimetre domain and a millionth of a bore-sized one, and at a
+        # boundary node the perturbed points always sit outside the mesh --
+        # harmless for an analytic expression, meaningless for anything with a
+        # support.
+        span = float(np.abs(points).max()) if points.size else 0.0
+        if collective:
+            span = MPI_comm.allreduce(span, op=MPI.MAX)
+        h = (max(1.0e-6 * span, 1.0e-9) if fd_step is None else float(fd_step))
 
         def central(step):
             out = np.empty(points.shape, dtype=np.float64)
@@ -723,11 +818,19 @@ class B0Field:
             return out
 
         g = central(h)
-        drift = float(np.abs(g - central(2.0 * h)).max())
-        scale = float(np.abs(g).max())
+        coarse = central(2.0 * h)
+        # POINTWISE, against a floor tied to the global peak. Comparing the two
+        # global maxima instead hides a kink wherever the gradient is small
+        # against the largest gradient anywhere -- which is most of a localised
+        # defect, and exactly the input this class refuses in prose.
+        scale = float(np.abs(g).max()) if g.size else 0.0
+        if collective:
+            scale = MPI_comm.allreduce(scale, op=MPI.MAX)
+        floor = 1.0e-3 * scale
+        local = np.abs(g - coarse) / np.maximum(np.abs(g), floor)
+        drift = float(local.max()) * scale if local.size else 0.0
         if collective:
             drift = MPI_comm.allreduce(drift, op=MPI.MAX)
-            scale = MPI_comm.allreduce(scale, op=MPI.MAX)
         problem = None
         if scale > 0.0 and drift > 0.01 * scale:
             problem = (
@@ -740,6 +843,35 @@ class B0Field:
                 f"`delta_B`, which needs no derivative.")
         collective_raise(problem, ValueError)
         return g
+
+    @classmethod
+    def _holdout_residual(cls, expression, phantom, nodes, fitted, collective):
+        """How badly a fit does at points it was NOT fitted on.
+
+        The element centroids are the cheapest such set: they are inside the
+        mesh, they need no new geometry, and on a structured mesh they are
+        exactly the places the nodes cannot see. Counting points is not enough
+        to catch this -- the design can be full rank and the fit exact while
+        the polynomial is interpolating the lattice.
+
+        Returns ``(worst residual, field variation)``, both in mT and both
+        reduced across ranks so every rank reaches the same verdict.
+        """
+        from feelmri.MPIUtilities import MPI_comm
+
+        elems = getattr(phantom, 'local_elements', None)
+        if elems is None or len(elems) == 0:
+            return 0.0, 0.0
+        centroids = nodes[np.asarray(elems)].mean(axis=1)
+        truth = cls._sample(expression, centroids)
+        gap = float(np.abs(truth - np.asarray(fitted(centroids)).reshape(-1)).max())
+        lo = float(truth.min()) if truth.size else 0.0
+        hi = float(truth.max()) if truth.size else 0.0
+        if collective:
+            gap = MPI_comm.allreduce(gap, op=MPI.MAX)
+            lo = MPI_comm.allreduce(lo, op=MPI.MIN)
+            hi = MPI_comm.allreduce(hi, op=MPI.MAX)
+        return gap, hi - lo
 
     @classmethod
     def _mesh_residual(cls, expression, phantom, nodes):
