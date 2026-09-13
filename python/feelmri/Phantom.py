@@ -1072,10 +1072,12 @@ class FEMPhantom:
 
         Notes
         -----
-        The matrix is stored as ``_orientation``: the node coordinates are in
-        the imaging frame after this call, and a field that is not
-        frame-invariant needs the rotation back to the physical frame.
-        ``BlochSolver`` reads it for the concomitant term.
+        The matrix is stored as ``_orientation`` and the offset as
+        ``_location``: the node coordinates are in the imaging frame and
+        measured from the slice centre after this call, so a field that is not
+        frame-invariant needs both to get back to physical coordinates measured
+        from isocentre. ``BlochSolver`` reads them for the concomitant term and
+        for a lab-frame B0 field.
         """
         # The assembler stores the node coordinates, the element sizes, the
         # quadrature cache and the mass matrix, so moving the mesh afterwards
@@ -1089,14 +1091,21 @@ class FEMPhantom:
         # Kept in float64 whatever the mesh dtype, and taken before the cast
         # below: it rotates gradients, so it has to stay orthogonal.
         self._orientation = np.array(MPS_ori, dtype=np.float64)
+        # x_imaging = MPS_ori.T @ (x_physical - LOC), so a lab-frame field
+        # needs the offset as well as the rotation to reach isocentre.
+        #
+        # Converted to metres rather than taken as a raw magnitude: the mesh is
+        # in metres, and several examples pass `planning.LOC` straight from a
+        # PVSM that declares cm.
+        self._location = np.asarray(LOC.m_as('m'), dtype=np.float64).reshape(3)
 
         # Get orientation
         MPS_ori = MPS_ori.astype(self.dtype)
-        LOC = LOC.astype(self.dtype)
+        loc_m = self._location.astype(self.dtype)
 
         # Translate and rotate
-        self.global_nodes = (self.global_nodes - LOC.m) @ MPS_ori
-        self.local_nodes = (self.local_nodes - LOC.m) @ MPS_ori
+        self.global_nodes = (self.global_nodes - loc_m) @ MPS_ori
+        self.local_nodes = (self.local_nodes - loc_m) @ MPS_ori
 
     def reorient(self, MPS_ori: np.ndarray, LOC: Quantity):
         """Undo :meth:`orient`, restoring nodes to the original phantom coordinate system.
@@ -1117,16 +1126,18 @@ class FEMPhantom:
             f"BEFORE building the assembler."
             if getattr(self, 'assembler', None) else '', RuntimeError)
 
-        # Back in the phantom's own frame, so nothing downstream should rotate.
+        # Back in the phantom's own frame, so nothing downstream should rotate
+        # or translate.
         self._orientation = None
+        self._location = None
 
         # Get orientation
         MPS_ori = MPS_ori.astype(self.dtype)
-        LOC = LOC.astype(self.dtype)
+        loc_m = np.asarray(LOC.m_as('m'), dtype=self.dtype).reshape(3)
 
         # Translate and rotate
-        self.global_nodes = self.global_nodes @ MPS_ori.T + LOC.m
-        self.local_nodes = self.local_nodes @ MPS_ori.T + LOC.m
+        self.global_nodes = self.global_nodes @ MPS_ori.T + loc_m
+        self.local_nodes = self.local_nodes @ MPS_ori.T + loc_m
 
     def mass_matrix(self, lumped=False, quadrature_order=2):
         """Assemble the finite element mass matrix on the local mesh partition.

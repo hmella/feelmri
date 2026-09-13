@@ -14,7 +14,7 @@ import numpy as np
 from pint import Quantity
 from scipy.interpolate import interp1d
 
-from feelmri.MPIUtilities import MPI_print, MPI_rank
+from feelmri.MPIUtilities import MPI, MPI_print, MPI_rank
 
 
 class Scanner:
@@ -64,6 +64,219 @@ class Scanner:
         self.adc_dead_time = adc_dead_time
         self.gammabar = Quantity(42.58e6, 'Hz/T')
         self.gamma = Quantity(42.58e6*2*np.pi, 'rad*Hz/T')
+
+
+class B0Field:
+    """Scanner-fixed B0 inhomogeneity, sampled at the spin's CURRENT position.
+
+    This is the lab-frame counterpart of ``BlochSolver(delta_B=)`` and
+    ``FEMPhantom.set_static_fields(phi_dB0=)``. Those are one value per mesh
+    node, frozen onto the node, so they travel with the tissue -- right for
+    chemical shift and local susceptibility, wrong for a shim residual or a
+    main-field imperfection, which stay where the magnet put them. A spin that
+    moves through this field samples a different value; a spin that moves
+    through ``delta_B`` does not.
+
+    The field is given as an expression of position and carried as a
+    low-order expansion:
+
+        dB0(x) = offset + gradient . x        [mT]
+
+    with ``x`` in metres, in the SCANNER frame, measured from isocentre -- not
+    the imaging frame, and not relative to the slice location.
+    :meth:`in_frame` converts to whatever frame a caller works in.
+
+    Why an expansion is not a compromise here: a static field in a
+    current-free bore satisfies Laplace's equation, so it IS a solid-harmonic
+    series, and that is the basis shim hardware is specified in. Truncation
+    order is the only approximation, and :attr:`residual_rms` reports it.
+    Anything the series cannot represent is not a smooth scanner field -- it is
+    tissue structure, and it belongs on ``delta_B``.
+
+    Parameters
+    ----------
+    offset : Quantity
+        Uniform part, mT.
+    gradient : Quantity
+        Linear part, mT/m, a 3-vector in the scanner frame.
+    order : int, optional
+        Expansion order this object carries (0 or 1).
+    residual_rms : Quantity, optional
+        What :meth:`fit` could not represent, mT. Zero for a hand-built field.
+    """
+
+    MAX_ORDER = 2
+
+    def __init__(self, offset=Quantity(0.0, 'mT'),
+                 gradient=Quantity(np.zeros(3), 'mT/m'),
+                 *, order=None, residual_rms=Quantity(0.0, 'mT')):
+        self.offset_mT = float(Quantity(offset).m_as('mT'))
+        g = np.asarray(Quantity(gradient).m_as('mT/m'), dtype=np.float64).reshape(-1)
+        if g.size != 3:
+            raise ValueError(
+                f"B0Field: gradient must be a 3-vector in mT/m, got {g.size} "
+                f"entries.")
+        self.gradient_mT_per_m = g
+        self.residual_rms_mT = float(Quantity(residual_rms).m_as('mT'))
+        if order is None:
+            order = 1 if np.any(g) else 0
+        self.order = int(order)
+
+    def __repr__(self):
+        return (f"B0Field(offset={self.offset_mT:.6g} mT, "
+                f"gradient={np.round(self.gradient_mT_per_m, 9)} mT/m, "
+                f"order={self.order})")
+
+    @property
+    def is_zero(self):
+        """True when the field is identically zero, so callers can skip it."""
+        return self.offset_mT == 0.0 and not np.any(self.gradient_mT_per_m)
+
+    def __call__(self, points_m):
+        """Evaluate the expansion at scanner-frame positions, in mT."""
+        p = np.asarray(points_m, dtype=np.float64).reshape(-1, 3)
+        return self.offset_mT + p @ self.gradient_mT_per_m
+
+    def in_frame(self, rotation=None, location=None, physical=False):
+        """The same field rewritten for the coordinates a caller works in.
+
+        ``FEMPhantom.orient`` leaves ``x_used = M.T @ (x_scanner - LOC)``, and
+        ``BlochSolver`` rotates back to ``x_scanner - LOC`` when it evaluates
+        the concomitant term. Substituting either into ``b + g . x_scanner``
+        gives the same constant and a rotated gradient:
+
+            b_used = b + g . LOC
+            g_used = g           (physical=True, x_used = x_scanner - LOC)
+                   = M.T @ g     (physical=False, x_used = M.T (x_scanner - LOC))
+
+        So the slice offset lands entirely in the constant -- a linear field is
+        origin-correct without any change to the node array.
+
+        Returns ``(offset_mT, gradient_mT_per_m)``.
+        """
+        g = self.gradient_mT_per_m
+        b = self.offset_mT
+        if location is not None:
+            b = b + float(np.dot(g, np.asarray(location, dtype=np.float64).reshape(3)))
+        if not physical and rotation is not None:
+            g = np.asarray(rotation, dtype=np.float64).T @ g
+        return b, np.ascontiguousarray(g, dtype=np.float64)
+
+    def phi_offset(self, scanner):
+        """The uniform part as an off-resonance rate in rad/ms, to add to
+        ``phi_dB0``. Spatially uniform, so it needs no frame."""
+        return float(self.offset_mT * scanner.gamma.m_as('rad/ms/mT'))
+
+    @classmethod
+    def fit(cls, expression, points_m, *, rtol=1.0e-3, max_order=None,
+            collective=True):
+        """Expand ``expression`` into the lowest order that represents it.
+
+        ``expression`` takes an ``(N, 3)`` array of SCANNER-frame positions in
+        metres and returns ``(N,)`` in mT, or a pint Quantity. Orders 0, 1, 2
+        are tried in turn and the first whose residual RMS falls below
+        ``rtol`` times the field RMS is kept.
+
+        Under MPI the normal equations are accumulated locally and reduced, so
+        every rank solves the same system and gets a bit-identical field.
+        Fitting a gathered map per rank would let ranks disagree and the solve
+        would be silently inconsistent.
+        """
+        from feelmri.MPIUtilities import MPI_comm
+
+        p = np.asarray(points_m, dtype=np.float64).reshape(-1, 3)
+        values = expression(p)
+        if isinstance(values, Quantity):
+            values = values.m_as('mT')
+        f = np.asarray(values, dtype=np.float64).reshape(-1)
+        if f.size != p.shape[0]:
+            raise ValueError(
+                f"B0Field.fit: the expression returned {f.size} values for "
+                f"{p.shape[0]} points; it must map (N, 3) positions to (N,).")
+
+        max_order = cls.MAX_ORDER if max_order is None else int(max_order)
+        n_tot = float(p.shape[0])
+        ff = float(f @ f)
+        if collective:
+            n_tot = MPI_comm.allreduce(n_tot, op=MPI.SUM)
+            ff = MPI_comm.allreduce(ff, op=MPI.SUM)
+        rms = np.sqrt(ff / n_tot) if n_tot else 0.0
+
+        best = None
+        resid_by_order = {}
+        for order in range(0, max_order + 1):
+            basis = cls._design(p, order)
+            # Normal equations, reduced BEFORE the solve so every rank solves
+            # an identical system.
+            A = basis.T @ basis
+            b = basis.T @ f
+            if collective:
+                A = MPI_comm.allreduce(A, op=MPI.SUM)
+                b = MPI_comm.allreduce(b, op=MPI.SUM)
+            coef = np.linalg.lstsq(A, b, rcond=None)[0]
+            # |f - Phi c|^2 = f.f - 2 c.b + c.A.c, from the reduced pieces.
+            resid = max(ff - 2.0 * float(coef @ b) + float(coef @ A @ coef), 0.0)
+            resid_rms = np.sqrt(resid / n_tot) if n_tot else 0.0
+            resid_by_order[order] = resid_rms
+            best = (order, coef, resid_rms)
+            if resid_rms <= rtol * rms or rms == 0.0:
+                break
+
+        order, coef, resid_rms = best
+        if resid_rms > rtol * rms and rms > 0.0:
+            raise ValueError(
+                f"B0Field.fit: order {order} still leaves a residual of "
+                f"{resid_rms:.4g} mT against a field RMS of {rms:.4g} mT "
+                f"({resid_rms / rms:.1%}), above rtol={rtol:g}. A field this "
+                f"rough is not a smooth scanner field: a static field in a "
+                f"current-free bore is a solid-harmonic series. Put the rough "
+                f"part on `delta_B` / `phi_dB0`, which is per node.")
+        if order > 1:
+            # Report what order 1 would LOSE, which is the number that decides
+            # whether truncating is acceptable, not the residual at the order
+            # that finally fitted.
+            lost = resid_by_order.get(1, resid_rms)
+            raise NotImplementedError(
+                f"B0Field.fit: this expression needs order {order}. Truncating "
+                f"at order 1 would leave {lost:.4g} mT against a field RMS of "
+                f"{rms:.4g} mT ({lost / rms:.1%}). Only the constant and linear "
+                f"terms are carried through the solver and the readout today, "
+                f"because those are the orders that cost nothing.")
+
+        gradient = np.zeros(3)
+        if order >= 1:
+            gradient = coef[1:4]
+        return cls(Quantity(float(coef[0]), 'mT'),
+                   Quantity(gradient, 'mT/m'),
+                   order=order, residual_rms=Quantity(resid_rms, 'mT'))
+
+    @classmethod
+    def on_phantom(cls, expression, phantom, **kwargs):
+        """:meth:`fit` against a phantom's own nodes, in SCANNER coordinates.
+
+        The phantom's `local_nodes` are imaging-frame and measured from the
+        slice centre once `orient` has run, so they are mapped back with the
+        stored `_orientation` and `_location` before the expression sees them.
+        """
+        nodes = np.asarray(phantom.local_nodes, dtype=np.float64)
+        rotation = getattr(phantom, '_orientation', None)
+        location = getattr(phantom, '_location', None)
+        if rotation is not None:
+            nodes = nodes @ np.asarray(rotation, dtype=np.float64).T
+        if location is not None:
+            nodes = nodes + np.asarray(location, dtype=np.float64).reshape(3)
+        return cls.fit(expression, nodes, **kwargs)
+
+    @staticmethod
+    def _design(points, order):
+        """Monomials up to `order`, as columns: 1 | x y z | x^2 y^2 z^2 xy xz yz."""
+        x, y, z = points[:, 0], points[:, 1], points[:, 2]
+        cols = [np.ones_like(x)]
+        if order >= 1:
+            cols += [x, y, z]
+        if order >= 2:
+            cols += [x * x, y * y, z * z, x * y, x * z, y * z]
+        return np.stack(cols, axis=1)
 
 
 class Gradient:

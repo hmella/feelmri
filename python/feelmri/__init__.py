@@ -6,7 +6,7 @@ except PackageNotFoundError:
     __version__ = "0.0.0"
 
 # MR objects (scanner hardware, gradients, RF pulses)
-from feelmri.MRObjects import Gradient, RF, Scanner
+from feelmri.MRObjects import B0Field, Gradient, RF, Scanner
 
 # Bloch simulation
 from feelmri.Bloch import (
@@ -93,7 +93,7 @@ __all__ = [
     # Version
     "__version__",
     # MR objects
-    "Scanner", "Gradient", "RF",
+    "Scanner", "Gradient", "RF", "B0Field",
     # Bloch simulation
     "ADC", "SequenceBlock", "Sequence", "BlochSolver",
     "create_multi_isochromats", "collapse_isochromats",
