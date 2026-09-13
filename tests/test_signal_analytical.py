@@ -1391,3 +1391,33 @@ def test_the_concomitant_phase_vanishes_on_its_null_line(tmp_path):
   assert float(np.abs(off_phase).max()) > 0.1, (
     'the same coefficients produce no phase anywhere, so a rod that reads zero '
     'proves nothing')
+
+
+def test_a_receive_map_does_not_survive_a_repartition(tmp_path):
+  """The map is one value per LOCAL node, so a repartition invalidates it.
+
+  `set_receive_sensitivity` did not mark the partition as bound, so
+  `enable_dual_partition`'s own refusal never fired, and `distribute_mesh` did
+  not clear the map either. At one rank the row counts coincide and nothing
+  shows; at several ranks the map is silently paired with the wrong nodes, or
+  raises a bare numpy broadcast error from inside
+  `_update_magnetization_local` -- which is AFTER an `Alltoallv`, the hang
+  shape this module works hard to avoid.
+  """
+  phantom, _points = _maxwell_phantom(tmp_path, 'repart.vtu', nodal=False)
+  n = phantom.local_nodes.shape[0]
+  phantom.set_receive_sensitivity(np.ones((n, 2), dtype=np.complex64))
+  assert phantom._partition_bound is True
+
+  # Refused up front, rather than left to fail inside a collective later.
+  with pytest.raises(RuntimeError, match='already in use'):
+    phantom.enable_dual_partition(voxel_size=0.0, lorder=2, horder=4,
+                                  nodal_approximation=False)
+
+  # And a repartition that does go ahead drops it rather than mispairing it.
+  phantom.distribute_mesh(graph_type='nodal')
+  assert phantom._receive_sensitivity is None
+  phantom.update_magnetization(np.ones(phantom.local_nodes.shape[0],
+                                       dtype=np.complex64))
+  pts, t = _dc_inputs()
+  assert np.asarray(phantom.signal_sum(pts, t, None)).size == 1

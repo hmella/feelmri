@@ -447,6 +447,19 @@ class FEMPhantom:
         # `local_to_global_nodes` or `local_nodes` must set this, so a later
         # repartition can refuse rather than silently invalidate it.
         self._partition_bound = False
+        # A receive map is indexed by LOCAL node and the layout just changed,
+        # so keeping it would pair every coil with the wrong nodes. It cannot
+        # be repaired here -- the map was built against a partition that no
+        # longer exists -- so it is dropped and said so. Left in place, the
+        # failure was a bare numpy broadcast error raised from inside
+        # `_update_magnetization_local`, i.e. AFTER an Alltoallv, and only on
+        # the ranks whose node counts happened to differ.
+        if getattr(self, '_receive_sensitivity', None) is not None:
+            self._receive_sensitivity = None
+            MPI_print("[FEMPhantom] WARNING: the receive sensitivity map was "
+                      "built against the previous partition and has been "
+                      "cleared. Call set_receive_sensitivity again after "
+                      "repartitioning.")
         # The ownership mask and the redistribution schedule are both derived
         # from the layout that just changed. Leaving them cached let
         # set_assembler pass a stale, wrong-length mask to set_node_ownership
@@ -1477,6 +1490,11 @@ class FEMPhantom:
         if getattr(self, '_dual', False) and self._active_partition != 'signal':
             arr = self.redistribute_nodal(arr, 'bloch', 'signal')
         self._receive_sensitivity = arr
+        # The map is one value per LOCAL node, so it is bound to this partition
+        # exactly as a POD trajectory is. Saying so is what lets
+        # `enable_dual_partition` refuse the wrong call order up front, instead
+        # of the map surviving into a layout it does not describe.
+        self._partition_bound = True
 
     def _apply_receive_sensitivity(self, Mxy):
         """Fold the stored map into ``Mxy``, giving ``nv = n_enc * n_coils``.
