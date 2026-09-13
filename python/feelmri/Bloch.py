@@ -54,6 +54,16 @@ RF_EDGE_GUARD_MS = 1e-5
 # error converges as O(dt^2) in this step.
 CONCOMITANT_DT_GR_MS = 0.01
 
+# Largest raster step, in ms, while a spatially varying scanner-fixed field and
+# a trajectory are BOTH live. `Bz = curr . (G + g) + q . monomials(curr)`, so a
+# moving spin sees a changing field even where `G = 0` and the trapezoidal
+# Omega_1 has an O(dt^2) error with nothing to anchor it: measured on a 20 ms
+# gradient-free block under a 12 mm sinusoidal displacement and a 3 mT/m lab
+# gradient, 1.72e-01 rad at dt = 10 ms against 1.27e-03 at 1 ms, and exactly
+# 0.000e+00 at every raster with the field off. Raster cost, paid only when
+# both are on: x1.00 on `epi_v142`, x1.10 on `gre_v15`, x1.75 on `flash_tr_v15`.
+B0_MOTION_DT_MS = 1.0
+
 
 def demodulation_phase(times_ms, freq_offset_hz=0.0, phase_offset_rad=0.0,
                        phase_modulation=None):
@@ -1635,6 +1645,42 @@ class BlochSolver:
         lo, hi = float(times_ms[0]), float(times_ms[-1])
         return merged[(merged >= lo - tol) & (merged <= hi + tol)]
 
+    def _motion_raster(self, block, times_ms):
+        """The block's raster with no step longer than ``B0_MOTION_DT_MS``.
+
+        Only called when a spatially varying `b0_field` and a
+        `pod_trajectory` are both live. A gradient-free delay is exact under
+        any subdivision when the field is per-node constant -- which is why
+        the adapter builds one at `dt = 10 ms` -- and stops being so the
+        moment the spins move through a field that varies in space.
+
+        Built LOCALLY and never written back, for the reason `_ramp_raster`
+        gives. A block whose own `dt` is already at or below the cap is left
+        alone: the caller has chosen a raster.
+        """
+        t = np.asarray(times_ms, dtype=np.float64)
+        if t.size < 2:
+            return times_ms
+        try:
+            if float(block.dt.m_as('ms')) <= B0_MOTION_DT_MS:
+                return times_ms
+        except AttributeError:
+            pass
+        tol = _raster_tolerance(block.dt.m_as('ms'), block.dt_rf.m_as('ms'),
+                                B0_MOTION_DT_MS)
+        gaps = np.diff(t)
+        if float(gaps.max()) <= B0_MOTION_DT_MS + tol:
+            return times_ms
+        extra = []
+        for a, b, gap in zip(t[:-1], t[1:], gaps):
+            n_sub = int(np.ceil(gap / B0_MOTION_DT_MS))
+            if n_sub > 1:
+                extra.append(np.linspace(a, b, n_sub + 1)[1:-1])
+        if not extra:
+            return times_ms
+        return _collapse_near_duplicates(
+            np.sort(np.concatenate([t] + extra)), tol)
+
     def solve(self, start: int = 0, end: int = None):
         # Current machine time
         t0 = time.perf_counter()
@@ -1675,6 +1721,11 @@ class BlochSolver:
             b0_gradient = _terms.gradient
             b0_quad = _terms.quadratic
             b0_node_lin = _terms.node_gradient
+        # A field that is uniform in space folds into `delta_B` and is constant
+        # in time however the spins move; one that varies does not, and the
+        # raster has to resolve the motion rather than only the waveform.
+        b0_varies_in_space = (b0_gradient is not None or b0_quad is not None
+                              or b0_node_lin is not None)
 
         # `orient` measures the nodes from the slice centre, so `Bc` -- which is
         # centred on isocentre -- is evaluated at the wrong origin. Only when
@@ -1923,6 +1974,8 @@ class BlochSolver:
             discrete_times = block.discrete_times.m_as('ms')
             if self.concomitant_fields:
                 discrete_times = self._ramp_raster(block, discrete_times)
+            if b0_varies_in_space and self.pod_trajectory is not None:
+                discrete_times = self._motion_raster(block, discrete_times)
             dt = np.diff(discrete_times, prepend=0).astype(self._np_real, copy=False)
 
             # Precompute RF and gradients

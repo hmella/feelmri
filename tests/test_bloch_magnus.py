@@ -2543,3 +2543,221 @@ def test_the_shim_channels_survive_the_concomitant_branch():
   assert frozen_gap > 10.0 * err(off, want_moved), (
       f'this geometry only separates the Eulerian answer from the frozen one '
       f'by {frozen_gap:.3e}, so it cannot tell them apart')
+
+
+def _wobble_pod(n_nodes, dur_ms, amps=(0.012, -0.008, 0.010)):
+  """A smooth displacement that is NOT zero at the coarse raster points.
+
+  The obvious `sin(2 pi t / dur)` is degenerate here: it vanishes at 0, dur/2
+  and dur, which is exactly where a dt = 10 ms raster samples a 20 ms block,
+  so the trapezoid is accidentally exact and the probe reads 3e-15. The
+  non-integer period and the phase offsets remove that coincidence.
+  """
+  from feelmri.Motion import POD
+  n_frames = 24
+  ts = np.linspace(0.0, dur_ms, n_frames)
+  data = np.zeros((n_nodes, 3, n_frames), dtype=np.float32)
+  for axis, amp in enumerate(amps):
+    data[:, axis, :] = amp * np.sin(2 * np.pi * 1.37 * ts / dur_ms
+                                    + 0.6 + 0.4 * axis)
+  return POD(data=data, times=ts, n_modes=6)
+
+
+def test_a_gradient_free_block_resolves_the_motion_under_a_lab_field():
+  """`G = 0` no longer means the block composes exactly.
+
+  A delay integrating at `dt = 10 ms` -- what the Pulseq adapter builds for
+  every event-free block -- is exact under any subdivision while `Bz` is per
+  node constant, because the rotation and the relaxation both compose. With a
+  scanner-fixed field the kernel forms `curr . (G + g)`, so a MOVING spin sees
+  a changing field even at `G = 0`, and the trapezoidal Omega_1 has an ordinary
+  O(dt^2) error with a 10 ms step to pay it with.
+
+  Measured against a converged raster, on a 20 ms gradient-free block with a
+  12 mm displacement and a 3 mT/m lab gradient:
+
+  | dt (ms) | before | after |
+  |---|---|---|
+  | 10 | **1.72e-01** | 1.27e-03 |
+  | 5 | 3.02e-02 | 1.27e-03 |
+  | 1 | 1.27e-03 | 1.27e-03 |
+  | 0.2 | 4.48e-05 | 4.48e-05 |
+
+  The last row is the other half of the contract: a caller who chose a raster
+  finer than the cap keeps it. The control below is what makes this a finding
+  rather than a re-derivation of the Magnus order -- with the field off the
+  same rasters agree to **exactly 0.000e+00**, so it really is the field and
+  the motion together, not the step size alone.
+  """
+  pytest.importorskip('meshio')
+  import meshio
+  import tempfile
+  from feelmri import B0Field
+  from _phantom_fixtures import make_cube_mesh
+
+  dur_ms = 20.0
+  path, _v = make_cube_mesh(Path(tempfile.mkdtemp()) / 'delay_motion.vtu',
+                            'tetra', n=2, scale=0.12)
+  mesh = meshio.read(str(path))
+  P = np.asarray(mesh.points, dtype=np.float64)
+  cells = mesh.cells_dict['tetra']
+  field = B0Field(gradient=Quantity(np.array([3.0e-3, -2.0e-3, 2.5e-3]), 'mT/m'))
+
+  def run(dt_ms, with_field):
+    phantom = _phantom_from_points(P, cells, f'dm_{dt_ms}_{with_field}')
+    block = _gradient_block((0.0, 0.0, 0.0), dur_ms, dt_ms=dt_ms)
+    pod = _wobble_pod(phantom.local_nodes.shape[0], dur_ms)
+    kwargs = {'b0_field': field} if with_field else {}
+    return _precess(phantom, block, pod_trajectory=pod, **kwargs)
+
+  def gap(a, b):
+    return float(np.abs(np.angle(a * np.conj(b))).max())
+
+  converged = run(0.01, True)
+  for dt_ms in (10.0, 5.0, 1.0):
+    assert gap(run(dt_ms, True), converged) < 5e-3, (
+        f'at dt = {dt_ms} ms the block leaves '
+        f'{gap(run(dt_ms, True), converged):.3e} rad against a converged '
+        f'raster; the motion is not being resolved')
+
+  # A caller who asked for a finer raster than the cap keeps it.
+  assert gap(run(0.2, True), converged) < 1e-4
+
+  # The control: with no field the claim the adapter relies on still holds
+  # exactly, so nothing is densified and nothing is paid for.
+  converged_off = run(0.01, False)
+  for dt_ms in (10.0, 1.0):
+    assert gap(run(dt_ms, False), converged_off) == 0.0, (
+        'a gradient-free block with no lab field must compose exactly under '
+        'any subdivision, and it no longer does')
+
+
+def _linear_displacement_pod(n_nodes, shift, n_frames=6, dur_ms=5.0):
+  """A displacement that ramps LINEARLY from zero to `shift` over the block,
+  so the spin moves at a constant velocity and the phase has a closed form."""
+  from feelmri.Motion import POD
+  ts = np.linspace(0.0, dur_ms, n_frames)
+  data = np.zeros((n_nodes, 3, n_frames), dtype=np.float32)
+  for axis in range(3):
+    data[:, axis, :] = shift[axis] * ts / dur_ms
+  return POD(data=data, times=ts, n_modes=2)
+
+
+def test_a_spin_moving_at_constant_velocity_integrates_the_field_it_crosses():
+  """The closed form for the whole channel, with no second solve to lean on.
+
+  A spin at `x0` moving at constant `v` through `dB0 = g . x` accrues
+
+      phi(T) = -gamma [ (g . x0) T + (g . v) T^2 / 2 ]
+
+  and the `T^2 / 2` is the part that only a correct TIME INTEGRATION produces.
+  Freezing the field to the node drops it entirely; sampling the field at the
+  END of the window instead of integrating doubles it. The solver steps through
+  the block, so it must land on the closed form, and the two wrong answers
+  below are what the test is against.
+  """
+  pytest.importorskip('meshio')
+  import meshio
+  import tempfile
+  from feelmri import B0Field
+  from _phantom_fixtures import make_cube_mesh
+
+  scanner = Scanner()
+  gamma = scanner.gamma.m_as('rad/ms/mT')
+  dur_ms = 6.0
+  g = np.array([4.0e-3, -3.0e-3, 2.0e-3])          # mT/m
+  shift = np.array([0.024, -0.016, 0.020])         # 35 mm over the block
+
+  path, _v = make_cube_mesh(Path(tempfile.mkdtemp()) / 'const_v.vtu',
+                            'tetra', n=2, scale=0.12)
+  mesh = meshio.read(str(path))
+  P = np.asarray(mesh.points, dtype=np.float64)
+  cells = mesh.cells_dict['tetra']
+
+  phantom = _phantom_from_points(P, cells, 'const_v')
+  nodes = np.asarray(phantom.local_nodes, dtype=np.float64)
+  pod = _linear_displacement_pod(phantom.local_nodes.shape[0], shift,
+                                 dur_ms=dur_ms)
+  got = _precess(phantom, _gradient_block((0.0, 0.0, 0.0), dur_ms),
+                 b0_field=B0Field(gradient=Quantity(g, 'mT/m')),
+                 pod_trajectory=pod)
+
+  v = shift / dur_ms
+  want = -gamma * ((nodes @ g) * dur_ms + (v @ g) * dur_ms ** 2 / 2.0)
+  frozen = -gamma * (nodes @ g) * dur_ms                       # no motion term
+  endpoint = -gamma * ((nodes + shift) @ g) * dur_ms           # doubles it
+
+  def err(phase):
+    return float(np.abs(np.exp(1j * np.angle(got)) - np.exp(1j * phase)).max())
+
+  assert err(want) < 1e-5, (
+      f'the solver leaves {err(want):.3e} against the closed form')
+  # Both wrong answers have to be far away, or the tolerance above is doing
+  # the work rather than the physics.
+  assert err(frozen) > 100.0 * err(want)
+  assert err(endpoint) > 100.0 * err(want)
+
+
+@pytest.mark.parametrize('placement', ['axial', 'oblique+offset'])
+def test_a_per_node_field_is_the_same_field_however_the_phantom_is_placed(
+        placement):
+  """The per-node rung under an oblique orientation and a slice offset.
+
+  `node_gradient` maps the scanner-frame gradient into the imaging frame as
+  `g @ R`, and the nodal values are sampled at `R x + LOC`. Neither had ever
+  been exercised: both per-node tests in the suite build their phantom without
+  calling `orient`, so the rotation ran with `rotation=None` every time.
+
+  Scored against a truth built from SCANNER coordinates and nothing the class
+  owns. Measured: **7.7e-03** on the oblique arm, the same first-order Taylor
+  residual the axial arm shows, against **9.4e-01** for an answer that forgets
+  the frame -- a factor of 121, so a dropped `R` cannot hide in the tolerance.
+  """
+  pytest.importorskip('meshio')
+  import meshio
+  import tempfile
+  from feelmri import B0Field
+  from _phantom_fixtures import make_cube_mesh
+
+  scanner = Scanner()
+  gamma = scanner.gamma.m_as('rad/ms/mT')
+  dur_ms = 5.0
+  shift = np.array([0.018, -0.012, 0.015])
+  rough = lambda q: 1.0e-3 * (np.sin(q[:, 0] / 0.25) * np.cos(q[:, 1] / 0.30)
+                              * np.exp(q[:, 2] / 0.9))
+
+  if placement == 'axial':
+    R, LOC = np.eye(3), np.zeros(3)
+  else:
+    R, LOC = _rotation_zyx(0.37, -0.21, 0.15), np.array([0.031, -0.047, 0.062])
+
+  path, _v = make_cube_mesh(Path(tempfile.mkdtemp()) / f'place_{placement}.vtu',
+                            'tetra', n=3, scale=0.16)
+  mesh = meshio.read(str(path))
+  P = np.asarray(mesh.points, dtype=np.float64)
+  cells = mesh.cells_dict['tetra']
+
+  phantom = _phantom_from_points(P, cells, f'place_{placement}')
+  phantom.orient(R, Quantity(LOC, 'm'))
+  field = B0Field.on_phantom(rough, phantom, collective=False)
+  assert field.kind == 'nodal'
+
+  pod = _constant_displacement_pod(phantom.local_nodes.shape[0], shift,
+                                   dur_ms=dur_ms)
+  got = _precess(phantom, _gradient_block((0.0, 0.0, 0.0), dur_ms),
+                 b0_field=field, pod_trajectory=pod, scanner=scanner)
+
+  x_local = np.asarray(phantom.local_nodes, dtype=np.float64)
+  want = -gamma * rough((x_local + shift) @ np.asarray(R).T + LOC) * dur_ms
+  naive = -gamma * rough(x_local + shift + LOC) * dur_ms      # no rotation
+
+  def err(phase):
+    return float(np.abs(np.exp(1j * np.angle(got)) - np.exp(1j * phase)).max())
+
+  assert err(want) < 2e-2, (
+      f'[{placement}] the field disagrees with its scanner-frame truth by '
+      f'{err(want):.3e}')
+  if placement != 'axial':
+    assert err(naive) > 20.0 * err(want), (
+        f'[{placement}] a frame-naive answer is only {err(naive):.3e} away, '
+        f'so this orientation cannot see a dropped rotation')

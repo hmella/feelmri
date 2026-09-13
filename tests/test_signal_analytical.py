@@ -2079,3 +2079,94 @@ def test_a_bad_b0_gradient_is_refused_rather_than_read_out_of_bounds(tmp_path):
   # Clearing is legal and is what the readout does on its way out.
   phantom.set_b0_gradient(np.zeros((n, 3)))
   phantom.set_b0_gradient(None)
+
+
+def test_a_quadratic_field_follows_a_moving_phantom_through_the_readout(tmp_path):
+  """`b0_terms` claims the assembler evaluates the six monomials at the
+  DEFORMED position, "so it follows the tissue for free". Every test of that
+  channel ran with `pod=None`, so the claim was never exercised.
+
+  Scored against the exact Eulerian answer -- the same mesh built where the
+  spins end up, with the field written there per node. Measured: the split
+  channels (k-shift + `phi_dB0` + `maxwell`) reproduce it to **1.8e-06**, while
+  freezing the field onto the node leaves **1.6e-02**, a separation of 8700.
+  """
+  pytest.importorskip('meshio')
+  pytest.importorskip('mpi4py')
+  import meshio
+  from pint import Quantity as Q_
+  from feelmri import B0Field, CartesianStack
+  from feelmri.Motion import POD
+  from feelmri.MRObjects import Scanner
+  from _phantom_fixtures import make_cube_mesh
+
+  scanner = Scanner()
+  gamma = scanner.gamma.m_as('rad/ms/mT')
+  seed, _v = make_cube_mesh(tmp_path / 'quad_move.vtu', 'tetra', n=2,
+                            scale=0.12)
+  mesh = meshio.read(str(seed))
+  P = np.asarray(mesh.points, dtype=np.float64)
+  cells = mesh.cells_dict['tetra']
+  n = P.shape[0]
+  shift = np.array([0.020, -0.013, 0.017])
+
+  # Degree 2 in every slot, and scaled so the quadratic part dominates the
+  # displacement term -- otherwise the linear k-shift alone would pass.
+  expr = lambda q: 1.0e-3 * (0.3 + 2.0 * q[:, 0] - 1.5 * q[:, 2]
+                             + 60.0 * q[:, 0] ** 2 - 50.0 * q[:, 1] ** 2
+                             + 30.0 * q[:, 2] ** 2 + 20.0 * q[:, 0] * q[:, 1]
+                             - 25.0 * q[:, 0] * q[:, 2]
+                             + 15.0 * q[:, 1] * q[:, 2])
+
+  def build(nodes, tag):
+    path = tmp_path / tag
+    meshio.write(str(path), meshio.Mesh(nodes, [('tetra', cells)]))
+    ph = FEMPhantom(path=str(path))
+    ph.set_assembler(voxel_size=1e3, lorder=2,
+                     nodal_approximation=True, lumped=True)
+    return ph
+
+  traj = CartesianStack(FOV=Q_(np.array([0.2, 0.2, 0.01]), 'm'),
+                        res=np.array([8, 4, 1]), oversampling=1,
+                        lines_per_shot=1, scanner=scanner, t_start=Q_(1.5, 'ms'))
+  t = traj.times.m_as('ms') - traj.t_start.m_as('ms')
+  T2 = np.full(n, 1e9, dtype=np.float32)
+  Mxy = np.ones(n, dtype=np.complex64)
+
+  data = np.zeros((n, 3, 4), dtype=np.float32)
+  for axis in range(3):
+    data[:, axis, :] = shift[axis]
+  pod = POD(data=data, times=np.linspace(0.0, float(t.max()) + 1.0, 4),
+            n_modes=1)
+
+  truth_ph = build(P + shift, 'quad_truth.vtu')
+  truth_ph.set_static_fields(
+      T2=T2, phi_dB0=(gamma * B0Field._sample(expr, P + shift)).astype(np.float32))
+  truth_ph.update_magnetization(Mxy)
+  truth = np.asarray(truth_ph.mri_signal(traj.points, t, None)).reshape(-1)
+
+  ph = build(P, 'quad_run.vtu')
+  field = B0Field.on_phantom(expr, ph, collective=False)
+  assert field.order == 2 and field.kind == 'polynomial'
+  points, phi_u, maxwell = traj.b0_terms(field, scanner)
+  if maxwell is not None:
+    maxwell = maxwell.reshape(-1, 6)
+  ph.set_static_fields(T2=T2, phi_dB0=np.full(n, phi_u, dtype=np.float32))
+  ph.update_magnetization(Mxy)
+  got = np.asarray(ph.mri_signal(list(points), t, pod,
+                                 maxwell=maxwell)).reshape(-1)
+
+  frozen_ph = build(P, 'quad_frozen.vtu')
+  frozen_ph.set_static_fields(
+      T2=T2, phi_dB0=(gamma * B0Field._sample(expr, P)).astype(np.float32))
+  frozen_ph.update_magnetization(Mxy)
+  frozen = np.asarray(frozen_ph.mri_signal(traj.points, t, pod)).reshape(-1)
+
+  scale = np.abs(truth).max()
+  eulerian = np.abs(got - truth).max() / scale
+  lagrangian = np.abs(frozen - truth).max() / scale
+  assert eulerian < 1e-4, (
+      f'the split channels leave {eulerian:.3e} against the Eulerian truth')
+  assert lagrangian > 100.0 * eulerian, (
+      f'freezing the field costs only {lagrangian:.3e}, so this geometry '
+      f'cannot tell the two descriptions apart')
