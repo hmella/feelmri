@@ -119,7 +119,14 @@ class B0Field:
         What :meth:`fit` could not represent, mT. Zero for a hand-built field.
     """
 
-    MAX_ORDER = 3
+    #: The highest degree the SOLVER AND READOUT can carry, not the highest the
+    #: fit could find. The kernel's quadratic channel is six coefficients and
+    #: the assembler's `maxwell` channel is six monomials, so degree 2 is the
+    #: ceiling; detecting a cubic here would only let it be truncated to a
+    #: quadratic silently, which measured as losing 100% of a Z3 shim. A field
+    #: above the cap falls through to the per-node expansion instead, which is
+    #: exact on a static phantom and first order on a moving one.
+    MAX_ORDER = 2
     #: A residual this far below the field RMS means the expression IS a
     #: polynomial of that degree, not merely well approximated by one, so the
     #: search stops there rather than at `rtol`. The floor is sqrt(eps), not
@@ -296,6 +303,14 @@ class B0Field:
         Returns ``(offset_mT, gradient_mT_per_m, quadratic_mT_per_m2)`` with the
         quadratic as ``(xx, yy, zz, xy, xz, yz)``, all zeros below degree 2.
         """
+        if self.order >= 3:
+            raise NotImplementedError(
+                f"B0Field.in_frame_full: this field is degree {self.order}, and "
+                f"a constant, a gradient and a quadratic form are not it -- "
+                f"returning them would drop every higher monomial. Measured on "
+                f"a Z3 shim, that is 100% of the field. Build it with "
+                f"`B0Field.on_phantom`, which falls back to the per-node "
+                f"expansion above the degree the channels can carry.")
         b = self.offset_mT
         g = np.asarray(self.gradient_mT_per_m, dtype=np.float64).copy()
         Q = self._quad_matrix(self.quadratic_mT_per_m2())

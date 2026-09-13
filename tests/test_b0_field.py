@@ -88,10 +88,16 @@ def test_a_polynomial_field_is_carried_at_the_degree_it_actually_has():
     want = 1e-3 * (pts[:, 0] ** 2 - pts[:, 2] ** 2)
     assert np.abs(got - want).max() < 1e-12 * np.abs(want).max()
 
-    cubic = B0Field.fit(
-        lambda p: 1e-3 * p[:, 2] * (2 * p[:, 2] ** 2 - 3 * p[:, 0] ** 2),
-        _points(), collective=False)
-    assert cubic.order == 3
+    # Degree 3 is ABOVE what the solver and readout channels carry, so it is
+    # not detected by default -- detecting it would only let it be truncated to
+    # a quadratic. Asked for explicitly, the frame adapter refuses it by name
+    # rather than dropping the cubic monomials: measured on a Z3 shim that is
+    # 100% of the field.
+    Z3 = lambda p: 1e-3 * p[:, 2] * (2 * p[:, 2] ** 2 - 3 * p[:, 0] ** 2)
+    with pytest.raises(ValueError, match='needs the per-node expansion'):
+        B0Field.fit(Z3, _points(), collective=False)
+    with pytest.raises(NotImplementedError, match='drop every higher monomial'):
+        B0Field.fit(Z3, _points(), collective=False, max_order=3).in_frame_full()
 
 
 def test_a_polynomial_field_refuses_the_linear_only_channels():
