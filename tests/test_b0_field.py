@@ -71,19 +71,44 @@ def test_the_frame_adapter_moves_the_offset_into_the_constant():
     assert abs(shifted - plain) > 1e-6
 
 
-def test_an_expression_needing_a_quadratic_is_refused_with_what_it_would_lose():
-    """Silently truncating a field the expansion cannot carry would be the
-    worst outcome, so it raises and reports what order 1 leaves behind."""
-    with pytest.raises(NotImplementedError, match='needs order 2'):
-        B0Field.fit(lambda p: 1e-3 * (p[:, 0] ** 2 - p[:, 2] ** 2), _points(),
-                    collective=False)
+def test_a_polynomial_field_is_carried_at_the_degree_it_actually_has():
+    """The degree detects itself: the search stops where the residual reaches
+    round-off, because a residual that small means the expression IS that
+    polynomial rather than being approximated by it. Every shim is one."""
+    quad = B0Field.fit(lambda p: 1e-3 * (p[:, 0] ** 2 - p[:, 2] ** 2),
+                       _points(), collective=False)
+    assert quad.order == 2 and quad.kind == 'polynomial'
+
+    # Reproduced to round-off, not merely fitted. This is the assertion that
+    # carries the claim: the fit residual itself bottoms out at sqrt(eps)
+    # because the normal equations square the condition number, so it is the
+    # reconstruction that shows the field is carried exactly.
+    pts = _points()
+    got = B0Field._design(pts, quad.order) @ quad.coefficients
+    want = 1e-3 * (pts[:, 0] ** 2 - pts[:, 2] ** 2)
+    assert np.abs(got - want).max() < 1e-12 * np.abs(want).max()
+
+    cubic = B0Field.fit(
+        lambda p: 1e-3 * p[:, 2] * (2 * p[:, 2] ** 2 - 3 * p[:, 0] ** 2),
+        _points(), collective=False)
+    assert cubic.order == 3
+
+
+def test_a_polynomial_field_refuses_the_linear_only_channels():
+    """`in_frame` carries the constant and the gradient, which for a degree-2
+    field is not the field. Returning them would silently truncate it, so it
+    raises instead -- the quadratic part has its own channel."""
+    quad = B0Field.fit(lambda p: 1e-3 * (p[:, 0] ** 2 - p[:, 2] ** 2),
+                       _points(), collective=False)
+    with pytest.raises(NotImplementedError, match='silently truncate'):
+        quad.in_frame()
 
 
 def test_a_field_no_polynomial_can_represent_is_refused():
     """A step is not a smooth scanner field: a static field in a current-free
     bore is a solid-harmonic series. Such a map is tissue structure and belongs
     on the per-node channel."""
-    with pytest.raises(ValueError, match='not a smooth scanner field'):
+    with pytest.raises(ValueError, match='needs the per-node expansion'):
         B0Field.fit(lambda p: 1e-3 * np.sign(p[:, 0]), _points(),
                     collective=False)
 
@@ -118,3 +143,79 @@ def test_the_uniform_part_converts_to_an_offresonance_rate():
     field = B0Field(Quantity(1e-3, 'mT'))
     assert field.phi_offset(scanner) == pytest.approx(
         1e-3 * scanner.gamma.m_as('rad/ms/mT'))
+
+
+def test_a_field_no_polynomial_can_carry_falls_back_to_the_nodes(tmp_path):
+    """The refusal above is right for the global expansion and wrong as a
+    verdict on the field: on a phantom that does not move, `x(t) = x0`, so a
+    per-node value IS the Eulerian answer and it is exact however rough the
+    field is. `on_phantom` therefore falls back instead of raising.
+
+    The expression here is a 30 mm sine, which a degree-3 polynomial misses by
+    82% of the field RMS -- the fallback is not a convenience, it is the only
+    representation that works.
+    """
+    pytest.importorskip('meshio')
+    from feelmri.Phantom import FEMPhantom
+    import meshio
+
+    pts = np.array([[0.11, -0.03, 0.07], [-0.05, 0.12, 0.02],
+                    [0.04, 0.06, -0.10], [-0.09, -0.08, 0.05],
+                    [0.02, -0.11, -0.06]])
+    path = tmp_path / 'rough.vtu'
+    meshio.write(str(path), meshio.Mesh(
+        pts, [('tetra', np.array([[0, 1, 2, 3], [1, 2, 4, 3]]))]))
+    phantom = FEMPhantom(path=str(path))
+
+    rough = lambda p: 1e-3 * np.sin(2 * np.pi * (p[:, 0] + p[:, 1]) / 0.03)
+
+    # The global expansion still refuses, and says why.
+    with pytest.raises(ValueError, match='needs the per-node expansion'):
+        B0Field.fit(rough, B0Field._scanner_nodes(phantom), collective=False)
+
+    field = B0Field.on_phantom(rough, phantom, collective=False)
+    assert field.kind == 'nodal'
+
+    # Exact at the nodes, which is the whole claim.
+    want = rough(B0Field._scanner_nodes(phantom))
+    got = field.nodal_mT(phantom)
+    assert np.abs(got - want).max() == 0.0
+
+    # And a static solver gets it as `delta_B`, with no gradient channel.
+    offset, delta_B, gradient, quad = field.solver_terms(phantom, moving=False)
+    assert offset == 0.0 and gradient is None and quad is None
+    assert np.abs(delta_B.reshape(-1) - want).max() == 0.0
+
+    # A moving phantom is refused by name rather than silently approximated.
+    with pytest.raises(NotImplementedError, match='not wired yet'):
+        field.solver_terms(phantom, moving=True)
+
+    # `nodal=False` keeps the older, stricter behaviour for anyone who wants it.
+    with pytest.raises(ValueError, match='needs the per-node expansion'):
+        B0Field.on_phantom(rough, phantom, nodal=False, collective=False)
+
+
+def test_a_per_node_field_refuses_a_node_set_it_was_not_built_on(tmp_path):
+    """A per-node array paired with the wrong partition is a plausible wrong
+    answer with no symptom, which is the failure mode this class exists to
+    avoid, so the node set is stamped and re-checked at every use."""
+    pytest.importorskip('meshio')
+    from feelmri.Phantom import FEMPhantom
+    import meshio
+
+    def build(name, scale):
+        pts = scale * np.array([[0.11, -0.03, 0.07], [-0.05, 0.12, 0.02],
+                                [0.04, 0.06, -0.10], [-0.09, -0.08, 0.05],
+                                [0.02, -0.11, -0.06]])
+        path = tmp_path / name
+        meshio.write(str(path), meshio.Mesh(
+            pts, [('tetra', np.array([[0, 1, 2, 3], [1, 2, 4, 3]]))]))
+        return FEMPhantom(path=str(path))
+
+    one, other = build('a.vtu', 1.0), build('b.vtu', 0.5)
+    rough = lambda p: 1e-3 * np.sin(2 * np.pi * p[:, 0] / 0.03)
+    field = B0Field.on_phantom(rough, one, collective=False)
+
+    assert field.nodal_mT(one).size == one.local_nodes.shape[0]
+    with pytest.raises(ValueError, match='different node set'):
+        field.nodal_mT(other)

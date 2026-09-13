@@ -1802,3 +1802,92 @@ def test_a_lab_frame_field_is_the_same_field_however_the_phantom_is_placed(
       f'[{frame}, concomitant={concomitant}] the readout reads the lab-frame '
       f'field {readout_gap:.3e} differently from the same field written out '
       f'per node')
+
+
+@pytest.mark.parametrize('frame', ['axial', 'oblique'])
+def test_a_quadratic_b0_field_reaches_the_readout_exactly(tmp_path, frame):
+  """A degree-2 field needs no new assembler channel and no approximation.
+
+  `mri_signal(maxwell=)` already takes six per-sample quadratic coefficients,
+  and the phase a static field accrues by time `t` is `-gamma*dB0*t`, so the
+  field's quadratic part is just `-gamma*t*Q` added to whatever the concomitant
+  term contributes. The assembler evaluates those monomials at the DEFORMED
+  position, so it is Eulerian for free.
+
+  Checked against the same field written straight onto `phi_dB0` per node,
+  which on a phantom that does not move IS the exact answer. The oblique arm is
+  the one that discriminates: a quadratic form in scanner coordinates
+  contributes to the LINEAR and CONSTANT terms of the imaging frame, so
+  dropping the `R^T Q R` rotation or the `2 Q L` feed-down fails there and
+  nowhere else.
+  """
+  pytest.importorskip('mpi4py')
+  pytest.importorskip('pymetis')
+  pytest.importorskip('meshio')
+  from pint import Quantity as Q_
+  from feelmri import B0Field, CartesianStack
+  from feelmri.MRObjects import Scanner
+  from _phantom_fixtures import make_cube_mesh
+
+  path, _v = make_cube_mesh(tmp_path / f'quad_{frame}.vtu', 'tetra', n=2,
+                            scale=6e-2)
+  scanner = Scanner()
+  gamma = scanner.gamma.m_as('rad/ms/mT')
+
+  if frame == 'axial':
+    R, LOC = np.eye(3), np.zeros(3)
+  else:
+    c, s = np.cos(0.37), np.sin(0.37)
+    R = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+    LOC = np.array([0.017, -0.029, 0.041])
+
+  # Degree 2 in every slot, so no term can be zero by luck.
+  expr = lambda p: 1e-3 * (0.4 + 3.0 * p[:, 0] - 2.0 * p[:, 2]
+                           + 5.0 * p[:, 0] ** 2 - 4.0 * p[:, 1] ** 2
+                           + 2.5 * p[:, 2] ** 2 + 1.7 * p[:, 0] * p[:, 1]
+                           - 3.1 * p[:, 0] * p[:, 2] + 2.2 * p[:, 1] * p[:, 2])
+
+  def phantom_at():
+    ph = FEMPhantom(path=str(path))
+    ph.orient(R, Q_(LOC, 'm'))
+    ph.set_assembler(voxel_size=1e3, lorder=2,
+                     nodal_approximation=True, lumped=True)
+    return ph
+
+  traj = CartesianStack(FOV=Q_(np.array([0.12, 0.12, 0.01]), 'm'),
+                        res=np.array([8, 4, 1]), oversampling=1,
+                        lines_per_shot=1, scanner=scanner,
+                        t_start=Q_(1.5, 'ms'), MPS_ori=R, LOC=Q_(LOC, 'm'))
+  t = traj.times.m_as('ms') - traj.t_start.m_as('ms')
+
+  # Reference: the field written per node. Exact, because nothing moves.
+  ref_ph = phantom_at()
+  field = B0Field.on_phantom(expr, ref_ph, collective=False)
+  assert field.order == 2, f'the fixture must be degree 2, got {field.order}'
+  n = ref_ph.local_nodes.shape[0]
+  nodal = B0Field._sample(expr, B0Field._scanner_nodes(ref_ph))
+  ref_ph.set_static_fields(T2=np.full(n, 1e9, dtype=np.float32),
+                           phi_dB0=(gamma * nodal).astype(np.float32))
+  ref_ph.update_magnetization(np.ones(n, dtype=np.complex64))
+  want = np.asarray(ref_ph.mri_signal(traj.points, t, None))
+
+  # Under test: the same field split across the k-shift, phi_dB0 and maxwell.
+  ph = phantom_at()
+  points, phi_u, maxwell = traj.b0_terms(field, scanner)
+  ph.set_static_fields(T2=np.full(n, 1e9, dtype=np.float32),
+                       phi_dB0=np.full(n, phi_u, dtype=np.float32))
+  ph.update_magnetization(np.ones(n, dtype=np.complex64))
+  got = np.asarray(ph.mri_signal(list(points), t, None, maxwell=maxwell))
+
+  gap = np.abs(got - want).max() / np.abs(want).max()
+  assert gap < 5e-4, (
+      f'[{frame}] the split channels disagree with the per-node field by '
+      f'{gap:.3e}')
+
+  # Dropping the quadratic must break it, or the test is about the linear part.
+  naked = np.asarray(ph.mri_signal(list(points), t, None))
+  bare = np.abs(naked - want).max() / np.abs(want).max()
+  assert bare > 100.0 * max(gap, 1e-12), (
+      f'[{frame}] omitting the quadratic coefficients changes the signal by '
+      f'only {bare:.3e} against {gap:.3e} with them')
+

@@ -2598,6 +2598,11 @@ def b0_kspace_shift(field, times_ms, scanner, rotation=None, location=None):
   gradient is always taken as ``R^T g`` and the slice offset always lands in
   the constant.
   """
+  if getattr(field, 'kind', None) == 'nodal':
+    raise TypeError(
+        "b0_kspace_shift: this field is a per-node expansion, and a k-space "
+        "shift can only carry a field that is linear in position. The per-node "
+        "part rides `phi_dB0` instead -- see `B0Field.readout_terms`.")
   b, g = field.in_frame(rotation=rotation, location=location, physical=False)
   t = np.asarray(times_ms, dtype=np.float64)
   gammabar = scanner.gammabar.m_as('1/ms/mT')

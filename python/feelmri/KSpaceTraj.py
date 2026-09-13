@@ -259,6 +259,13 @@ class Trajectory:
                 f"b0_shifted_points: expected a B0Field, got "
                 f"{type(field).__name__}. Build one with B0Field.fit or "
                 f"B0Field.on_phantom.")
+        if field.kind == 'nodal':
+            raise TypeError(
+                "b0_shifted_points: this field is a per-node expansion, and a "
+                "k-space shift can only carry a field that is linear in "
+                "position. Returning the nominal points would be a wrong image "
+                "with no symptom. The per-node part rides `phi_dB0` instead -- "
+                "see `B0Field.readout_terms`.")
         t0 = (float(self.t_start.m_as('ms')) if t_snapshot is None
               else float(t_snapshot))
         t = np.asarray(self.times.m_as('ms'), dtype=float) - t0
@@ -270,6 +277,51 @@ class Trajectory:
         return tuple(np.ascontiguousarray(self.points[i] + scale * g[i],
                                           dtype=self.points[i].dtype)
                      for i in range(3))
+
+    def b0_terms(self, field, scanner, t_snapshot=None):
+        """Everything this readout needs from a lab-frame B0 field.
+
+        Returns ``(points, phi_uniform, maxwell)``:
+
+        * ``points`` -- :attr:`points` displaced by the field's LINEAR part, the
+          k-space offset :meth:`b0_shifted_points` computes;
+        * ``phi_uniform`` -- the uniform part as an off-resonance rate in
+          rad/ms, to add to whatever `phi_dB0` the caller already has;
+        * ``maxwell`` -- ``(N, 6)`` quadratic phase coefficients to ADD to any
+          the concomitant term already contributes, or ``None`` below degree 2.
+
+        One call rather than three, because a field split across three channels
+        is a field that can be half-applied: forgetting the quadratic part
+        leaves a wrong image with no symptom. The quadratic rides the channel
+        `mri_signal(maxwell=)` already has, and the assembler evaluates those
+        monomials at the DEFORMED position, so it follows the tissue for free
+        and needs no new kernel code.
+        """
+        from feelmri.MRObjects import B0Field as _B0Field
+        if not isinstance(field, _B0Field):
+            raise TypeError(
+                f"b0_terms: expected a B0Field, got {type(field).__name__}.")
+        t0 = (float(self.t_start.m_as('ms')) if t_snapshot is None
+              else float(t_snapshot))
+        t = np.asarray(self.times.m_as('ms'), dtype=float) - t0
+
+        b, g, q = field.in_frame_full(
+            rotation=np.asarray(self.MPS_ori, dtype=float), location=self.LOC)
+        gammabar = scanner.gammabar.m_as('1/ms/mT')
+        gamma = scanner.gamma.m_as('rad/ms/mT')
+
+        scale = gammabar * t
+        points = tuple(
+            np.ascontiguousarray(self.points[i] + scale * g[i],
+                                 dtype=self.points[i].dtype) for i in range(3))
+
+        maxwell = None
+        if np.any(q):
+            # The assembler ADDS `m . monomials` to the phase, and the phase a
+            # static field accrues by time t is `-gamma * dB0 * t`. Laid out
+            # (xx, yy, zz, xy, xz, yz), which is the order the assembler reads.
+            maxwell = (-gamma * t.reshape(-1, 1)) * q.reshape(1, 6)
+        return points, gamma * b, maxwell
 
     def check_ph_enc_lines(self, ph_samples):
         """Verify that the number of phase-encoding lines is divisible by the multishot factor."""
