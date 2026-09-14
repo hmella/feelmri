@@ -230,12 +230,16 @@ if __name__ == '__main__':
 
   # Convert and stripe units
   traj_points = traj.points
-  traj_times  = traj.readout_times
-  # Only tissue off-resonance rides this channel. `phantom.readout` below
-  # routes the scanner field: its uniform part to a per-sample phase, the rest
-  # to a k-space shift kept apart from the nominal trajectory, which is what
-  # the reconstruction grids on.
-  delta_omega = np.zeros(T2star.shape, dtype=np.float32)
+  traj_times  = traj.times.m_as('ms') - traj.t_start.m_as('ms')
+  # Only the uniform part of the scanner field rides on the off-resonance
+  # channel -- it is spatially constant, so no k-space offset can carry it. The
+  # rest of it becomes the shift below, kept apart from `traj_points` because
+  # the reconstruction grids on the nominal trajectory and the difference
+  # between the two is the geometric distortion.
+  delta_omega = np.full(T2star.shape,
+                        b0_field.uniform_phi_rate(scanner, location=traj.LOC),
+                        dtype=np.float32)
+  b0_points = traj.b0_shifted_points(b0_field, scanner)
 
   # Set assembler for MRI signal evaluation using FEM
   vxsz = planning.FOV.m_as('m')/np.array(pars.Imaging.RECON_RES)
@@ -253,16 +257,20 @@ if __name__ == '__main__':
       # Update timeshift in the POD velocity
       pod_velocity.update_timeshift(fr * pars.Imaging.TimeSpacing.m_as('ms'))
 
-      # The readout handoff. It measures time from the MAGNETIZATION SNAPSHOT,
-      # which on a CartesianStack is `t_start` -- the timeline runs from the RF
-      # centre and the readout begins where the imaging block ends. Absolute
-      # times would apply a spurious exp(-t_start/T2*) and, worse, a SPATIALLY
-      # VARYING phi*t_start: 1.688 rad peak-to-peak across the object here.
-      # `t_anchor=0.0` keeps this loop's own POD convention, where the
-      # timeshift above already carries the frame time.
-      K[:,:,:,:,fr] = phantom.readout(Mxy_PC[:, fr, :], traj,
-                                      pod=pod_velocity, solver=solver,
-                                      t_anchor=0.0)
+      # Update magnetization
+      phantom.update_magnetization(Mxy_PC[:, fr, :])
+
+      # Generate 4D flow image
+      # Elapsed time since the MAGNETIZATION SNAPSHOT, not since the
+      # trajectory's own origin. `mri_signal` applies exp(-t/T2*) and
+      # exp(-i*phi*t) continuing from the instant the magnetization was
+      # captured, and on a CartesianStack that instant is `t_start` -- the
+      # timeline runs from the RF centre and the readout begins where the
+      # imaging block ends. Feeding absolute times applies a spurious
+      # exp(-t_start/T2*) and, worse, a SPATIALLY VARYING phi*t_start:
+      # measured 1.688 rad peak-to-peak across the object here.
+      K[:,:,:,:,fr] = phantom.mri_signal(
+          b0_points, traj.times.m_as('ms') - traj.t_start.m_as('ms'), pod_velocity)
 
   # Gather results
   K = gather_data(K)

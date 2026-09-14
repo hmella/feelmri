@@ -162,12 +162,18 @@ if __name__ == '__main__':
   vxsz = planning.FOV.m_as('m')/np.array(parameters.Imaging.RES)
   phantom.set_assembler(voxel_size=vxsz[0], lorder=1, horder=6, nodal_approximation=True, lumped=False)
 
-  # Only tissue off-resonance rides this channel. `phantom.readout` below
-  # routes the scanner field: its uniform part to a per-sample phase, the rest
-  # to a k-space shift kept apart from the nominal trajectory, which is what
-  # the reconstruction grids on.
-  phantom.set_static_fields(T2=T2,
-                            phi_dB0=np.zeros(T2.shape, dtype=np.float32))
+  # Set static fields. Only the uniform part of the scanner field rides on the
+  # off-resonance channel -- it is spatially constant, so no k-space offset can
+  # carry it; the rest of it becomes the shift below.
+  phantom.set_static_fields(
+      T2=T2,
+      phi_dB0=np.full(T2.shape,
+                      b0_field.uniform_phi_rate(scanner, location=traj.LOC),
+                      dtype=np.float32))
+
+  # The reconstruction grids on the NOMINAL trajectory, so the shift is kept
+  # apart from it: the difference between the two is the geometric distortion.
+  b0_points = traj.b0_shifted_points(b0_field, scanner)
 
   # Fast mode for CI testing
   if FAST_MODE:
@@ -190,10 +196,17 @@ if __name__ == '__main__':
       # seq.plot()
       Mxy, Mz = solver.solve(start=-4)
 
-      # The readout handoff: the time origin and the scanner field's routing.
-      # `t_anchor=0.0` keeps this loop's own convention.
-      tmp = phantom.readout(Mxy, traj, shot=sh, slice=s, solver=solver,
-                            t_anchor=0.0)
+      # Update magnetization
+      phantom.update_magnetization(Mxy)
+
+      # k-space points per shot
+      kspace_points = (b0_points[0][:,sh,s,np.newaxis], 
+                      b0_points[1][:,sh,s,np.newaxis], 
+                      b0_points[2][:,sh,s,np.newaxis])
+      kspace_times = traj.times.m_as('ms')[:,sh,s,np.newaxis] - traj.t_start.m_as('ms')
+
+      # Generate 4D flow image
+      tmp = phantom.mri_signal(kspace_points, kspace_times)
       K[:,sh,s,:,0] = tmp.swapaxes(0, 1)[:,:,0]
 
   # file.close()

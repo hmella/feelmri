@@ -168,15 +168,17 @@ if __name__ == '__main__':
   slices = traj.slices
   K = np.zeros([ro_samples, ph_samples, slices, 1, 1], dtype=np.complex64)
 
-  # Field inhomogeneities. Only the TISSUE part rides this channel -- chemical
-  # shift and local susceptibility, which travel with the material point.
-  # `phantoms[cs].readout` below routes the scanner field, whose uniform part
-  # becomes a per-sample phase and whose gradient becomes a shift of the
-  # sample's k, kept apart from the nominal trajectory the reconstruction
-  # grids on.
+  # Field inhomogeneities. The uniform part of the scanner field is spatially
+  # constant, so it rides here; the rest of it reaches the readout as the shift
+  # of the sample's k computed below.
   delta_phi = [scanner.gammabar.to('1/mT/ms') * delta_B0[cs].to('mT') for cs in range(Nb_species)]
   delta_omega = [2 * np.pi * delta_phi[cs].m_as('1/ms')
+                 + b0_field.uniform_phi_rate(scanner, location=traj.LOC)
                  for cs in range(Nb_species)]
+
+  # The nominal trajectory is what the reconstruction grids on, so the shift is
+  # kept separate: the difference between the two is the geometric distortion.
+  b0_points = traj.b0_shifted_points(b0_field, scanner)
 
   # Set assembler for MRI signal evaluation using FEM
   vxsz = planning.FOV.m_as('m')/np.array(parameters.Imaging.RES)
@@ -192,6 +194,12 @@ if __name__ == '__main__':
   for s in range(slices):
     for i, sh in enumerate(traj.shots):     
 
+      # k-space points per shot
+      kspace_points = (b0_points[0][:,sh,s,np.newaxis], 
+                      b0_points[1][:,sh,s,np.newaxis], 
+                      b0_points[2][:,sh,s,np.newaxis])
+      kspace_times = (traj.times.m_as('ms')[:,sh,s,np.newaxis] - traj.t_start.m_as('ms'))
+
       # Add imaging and delay blocks to the sequence
       seq.add_block(imaging)
       seq.add_block(time_spacing, dt=Q_(1, 'ms'))  # Delay between imaging blocks
@@ -202,11 +210,10 @@ if __name__ == '__main__':
 
         # Solve new blocks
         Mxy, Mz = solvers[cs].solve(start=-2)
+        phantoms[cs].update_magnetization(Mxy)
 
-        # The readout handoff, once per species. `t_anchor=0.0` keeps this
-        # loop's own convention.
-        tmp = phantoms[cs].readout(Mxy, traj, shot=sh, slice=s,
-                                   solver=solvers[cs], t_anchor=0.0)
+        # Generate 4D flow image
+        tmp = phantoms[cs].mri_signal(kspace_points, kspace_times)
         K[:,sh,s,:,0] += tmp.swapaxes(0, 1)[:,:,0]
 
   # Gather results

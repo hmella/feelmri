@@ -218,13 +218,18 @@ if __name__ == '__main__':
   vxsz = planning.FOV.m_as('m')/np.array(parameters.Imaging.RES)
   phantom.set_assembler(voxel_size=vxsz[0], lorder=1, horder=6, nodal_approximation=True, lumped=False)
 
-  # Only tissue off-resonance rides this channel. `phantom.readout` below
-  # routes the scanner field: its uniform part to a per-sample phase, the rest
-  # to a k-space shift kept apart from the nominal trajectory, which is what
-  # the reconstruction grids on.
+  # Set static fields. Only the uniform part of the scanner field rides on the
+  # off-resonance channel -- it is spatially constant, so no k-space offset can
+  # carry it; the rest of it becomes the shift below.
   phantom.set_static_fields(
       T2=T2star.m_as('ms'),
-      phi_dB0=np.zeros(T2star.m_as('ms').shape, dtype=np.float32))
+      phi_dB0=np.full(T2star.m_as('ms').shape,
+                      b0_field.uniform_phi_rate(scanner, location=traj.LOC),
+                      dtype=np.float32))
+
+  # The reconstruction grids on the NOMINAL trajectory, so the shift is kept
+  # apart from it: the difference between the two is the geometric distortion.
+  b0_points = traj.b0_shifted_points(b0_field, scanner)
 
   # Concomitant fields during the readout. The solver carries the term up to
   # the magnetization snapshot -- the slice select and, crucially here, the
@@ -252,23 +257,23 @@ if __name__ == '__main__':
   # measured from the slice centre, so `maxwell_recentre` carries the rest of
   # the expansion -- a k-space shift and a uniform phase. This slab is
   # off-isocentre, so the correction is not small.
-  # One integration per direction. `readout` derives both the quadratic form
-  # and the re-centring from these same moments, so the two cannot end up on
-  # different time origins.
-  maxwell_moments = []
+  maxwell, maxwell_points, maxwell_phase = [], [], []
   for d in range(enc.nb_directions):
       carried = []
       for g in imaging_blocks[d].gradients:
           g_shifted = copy.deepcopy(g)
           g_shifted.change_time(g.time - sp.rf.time)
           carried.append(g_shifted)
-      maxwell_moments.append(traj.maxwell_moments(scanner, carried=carried))
+      maxwell.append(traj.maxwell_coefficients(scanner, carried=carried))
+      dk, ph = traj.maxwell_recentre(scanner, carried=carried)
+      maxwell_points.append(tuple(
+          np.ascontiguousarray(b0_points[i] + dk[:, i].reshape(traj.times.shape),
+                               dtype=b0_points[i].dtype) for i in range(3)))
+      maxwell_phase.append(ph.reshape(traj.times.shape + (1,)))
   # The readout term that does not cancel between the two encodings, for the
   # panel below.
-  readout_bias = [traj.maxwell_coefficients(scanner, carried=c)[0]
-                  - traj.maxwell_coefficients(scanner)[0]
-                  for c in [[copy.deepcopy(g) for g in imaging_blocks[d].gradients]
-                            for d in range(enc.nb_directions)]]
+  readout_bias = [m[0] - traj.maxwell_coefficients(scanner)[0]
+                  for m in maxwell]
 
   # Iterate over cardiac phases
   for fr in range(Nb_frames):
@@ -292,9 +297,12 @@ if __name__ == '__main__':
       # exp(-t_start/T2*) and, worse, a SPATIALLY VARYING phi*t_start:
       # measured 1.688 rad peak-to-peak across the object here.
       for d in range(enc.nb_directions):
-          K[:,:,:,d:d+1,fr] = phantom.readout(
-              Mxy_PC[:, fr, d], traj, pod=pod_velocity, solver=solver,
-              maxwell_moments=maxwell_moments[d], t_anchor=0.0)
+          phantom.update_magnetization(Mxy_PC[:, fr, d])
+          K[:,:,:,d:d+1,fr] = phantom.mri_signal(
+              maxwell_points[d],
+              traj.times.m_as('ms') - traj.t_start.m_as('ms'),
+              pod_velocity,
+              maxwell=maxwell[d]) * np.exp(-1j*maxwell_phase[d])
 
   # Gather results
   K = gather_data(K)

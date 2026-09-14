@@ -50,28 +50,6 @@ class Scanner:
     gamma : Quantity
         Angular gyromagnetic ratio (2π × gammabar, rad·Hz/T).
     """
-    @classmethod
-    def from_parameters(cls, hardware, **overrides):
-        """Build a :class:`Scanner` from a parameter file's ``Hardware`` block.
-
-        Reads whichever of ``B0``, ``G_max``, ``G_sr`` and ``b1_max`` the block
-        carries and leaves the rest at their defaults. Worth having because
-        ``B0`` is the one that gets forgotten: two shipped examples declared it
-        in YAML and never passed it, so the 1.5 T default won silently and
-        editing the file did nothing -- which matters now that the concomitant
-        term goes as 1/B0.
-        """
-        kwargs = {}
-        for attr, name in (('B0', 'field_strength'),
-                           ('G_max', 'gradient_strength'),
-                           ('G_sr', 'gradient_slew_rate'),
-                           ('b1_max', 'b1_max')):
-            value = getattr(hardware, attr, None)
-            if value is not None:
-                kwargs[name] = value
-        kwargs.update(overrides)
-        return cls(**kwargs)
-
     def __init__(self, 
                 field_strength: Quantity = Quantity(1.5, 'T'), 
                 gradient_strength: Quantity = Quantity(33,'mT/m'),

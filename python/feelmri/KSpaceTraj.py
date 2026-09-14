@@ -206,20 +206,6 @@ class Trajectory:
         self._maxwell_moments = moments
         return _coef(moments, scanner, rotation=R)
 
-    def maxwell_moments(self, scanner, **kwargs):
-        """The ``(N, 4)`` concomitant moments this readout accumulates.
-
-        :meth:`maxwell_coefficients` and :meth:`maxwell_recentre` are both
-        derived from these, and deriving them from ONE call is the point:
-        the recentre reuses the last coefficients call's moments only when the
-        arguments match, so passing `carried=` or a `t0` to one and not the
-        other silently mixes time origins. Hand these to
-        ``FEMPhantom.readout(maxwell_moments=...)`` and both halves come from
-        the same integration.
-        """
-        self.maxwell_coefficients(scanner, **kwargs)
-        return self._maxwell_moments
-
     def maxwell_recentre(self, scanner, **kwargs):
         """The k-space shift and uniform phase that put ``Bc`` on isocentre.
 
@@ -400,39 +386,6 @@ class Trajectory:
 
         # Synchronize all processes
         MPI_comm.Barrier()
-
-    @property
-    def readout_times(self):
-        """Sample times in ms, measured FROM THE SNAPSHOT.
-
-        This is what :meth:`FEMPhantom.mri_signal` wants: it applies
-        ``exp(-t/T2)`` and ``exp(-i phi t)``, both of which continue from the
-        instant the magnetization was captured, and the snapshot on a native
-        trajectory sits at ``t_start``. Passing the absolute ``times`` instead
-        applies a spurious ``exp(-t_start/T2)`` plus a spatially varying
-        off-resonance ramp, which four of the shipped examples once did.
-        """
-        return self.times.m_as('ms') - self.t_start.m_as('ms')
-
-    def empty_kspace(self, n_enc=1, n_frames=1, dtype=np.complex64):
-        """A zeroed k-space array shaped for this trajectory.
-
-        ``(ro_samples, ph_samples, slices, n_enc, n_frames)`` -- the shape
-        every caller transcribes by hand from the three attributes.
-        """
-        return np.zeros([self.ro_samples, self.ph_samples, self.slices,
-                         n_enc, n_frames], dtype=dtype)
-
-    def shot(self, shot, slice=0):
-        """``(points, times)`` for one shot of one slice.
-
-        The four-line slicing triple the shot-major examples repeat, with the
-        times already measured from the snapshot.
-        """
-        t = self.readout_times[:, shot, slice, np.newaxis]
-        points = tuple(np.ascontiguousarray(a[:, shot, slice, np.newaxis])
-                       for a in self.points)
-        return points, np.ascontiguousarray(t)
 
     def _sample_grid(self, enc_time, ro_grad0, ro_grad, dt, kz):
         """Allocate the k-space arrays and fill the sample times and kz.

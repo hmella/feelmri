@@ -1675,12 +1675,16 @@ def readout_phase_terms(t_ms, *, scanner, b0_field=None, maxwell_moments=None,
   """The k-space shift, the extra per-sample phase and the quadratic
   coefficients one readout window needs.
 
-  This is the algebra between "I have a magnetization column" and "I can call
-  `mri_signal`", and it is the part that has repeatedly been assembled by hand
-  and got wrong: the lab field routed five different ways, the concomitant
-  half left uncoupled from the solver's own flag, the off-isocentre recentring
-  dropped. Both `simulate_pulseq` and `FEMPhantom.readout` go through here, so
-  the two cannot drift.
+  Extracted from :func:`simulate_pulseq`'s readout loop, which is its only
+  caller: the lab field's routing, the concomitant coefficients and the
+  off-isocentre re-centring are one subject and are easier to check together
+  than spread through the loop body. A caller assembling a readout by hand may
+  use it, but nothing in the library does.
+
+  It normalises both contributions onto the caller's own sample shape before
+  adding them: :func:`maxwell_recentre` returns a flat sample list while
+  :func:`b0_readout_terms` follows the shape of ``t_ms``, so added as they come
+  they would broadcast rather than sum.
 
   Parameters
   ----------
@@ -1981,10 +1985,10 @@ def simulate_pulseq(seq_path,
       # The shift stays LOCAL to this call: `rw.kspace` is the nominal
       # trajectory the reconstruction grids on, and the difference between the
       # two is the distortion the field produces.
-      # The shift stays LOCAL to this call, and the readout carries the
-      # concomitant term exactly when the SOLVER did. `FEMPhantom.readout`
-      # goes through the same builder, so the native path and this one cannot
-      # drift on the algebra.
+      # The shift stays LOCAL to this call: `rw.kspace` is the nominal
+      # trajectory the reconstruction grids on, and the difference between the
+      # two IS the distortion the field produces. The readout carries the
+      # concomitant term exactly when the SOLVER did.
       dk, b0_phase, maxwell = readout_phase_terms(
           t, scanner=scanner,
           b0_field=(b0_field if not b0_nodal else None),
