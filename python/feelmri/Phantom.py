@@ -824,6 +824,28 @@ class FEMPhantom:
         re-run the full global SVD on every rank (``Motion.calculate_pod``), and
         ``get_modes`` hard-checks the node count, so it cannot simply be re-sliced.
         """
+        # A trajectory built from PER-RANK data has a per-rank decomposition:
+        # each rank runs its own SVD, so its modes carry its own normalisation
+        # and its weights undo exactly that normalisation. Redistributing the
+        # modes below moves a node's mode vector onto a rank whose weights were
+        # scaled for a different decomposition, and the displacement comes out
+        # wrong -- silently, and invisibly to a rigid-translation fixture,
+        # which is the usual way this is checked. Measured on a 4 mm cube at 2
+        # ranks: 1.76e-02 of peak against 8.8e-07 for the same motion built the
+        # documented way.
+        #
+        # Only reachable here: without dual partitioning the modes never cross
+        # a rank boundary, and at one rank local IS global.
+        if (getattr(pod, 'local_to_global_map', None) is None
+                and MPI_size > 1):
+            collective_raise(
+                "FEMPhantom: this trajectory was built without "
+                "`global_to_local`, so its decomposition is per rank -- each "
+                "rank's modes carry its own normalisation. Dual partitioning "
+                "redistributes them between ranks, which pairs a node's mode "
+                "with another rank's weights. Build it from the GLOBAL "
+                "snapshots with `global_to_local=phantom.local_to_global_nodes`, "
+                "the way every shipped example does.")
         cache = self.__dict__.setdefault('_signal_modes_cache', {})
         key = id(pod)
         if key not in cache:

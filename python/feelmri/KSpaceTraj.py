@@ -243,10 +243,13 @@ class Trajectory:
         reconstruction grids on the nominal trajectory, and the difference
         between the two is the geometric distortion the field produces.
 
-        The uniform half ``b`` is not returned: it is spatially constant, so it
-        belongs on the phantom's off-resonance instead --
-        ``phi_dB0 + field.phi_offset(scanner, location=self.LOC)``, which the
-        assembler applies over the same ``t``.
+        **Prefer :meth:`b0_terms`, which returns every channel at once.** This
+        method hands back only the k-space shift: the uniform half ``b`` is
+        spatially constant, so it belongs on the phantom's off-resonance
+        instead -- ``phi_dB0 + field.phi_offset(scanner, location=self.LOC)`` --
+        and a caller who forgets it has half-applied the field, which is the
+        hazard :meth:`b0_terms` exists to close. It also cannot carry a
+        quadratic part at all, and refuses one.
 
         ``t_snapshot`` is the instant the magnetization was captured, default
         :attr:`t_start`; it must be the origin of the ``t`` handed alongside

@@ -133,11 +133,19 @@ def main() -> int:
   if args.pod:
     from feelmri.Motion import POD
     n_frames = 4
-    disp = np.zeros((n, 3, n_frames), dtype=np.float32)
+    # GLOBAL snapshots plus the node map, which is what every shipped example
+    # does and what the contract requires: built from per-rank data instead,
+    # each rank runs its own SVD and its modes carry its own normalisation, so
+    # dual partitioning -- which redistributes modes BETWEEN ranks -- pairs a
+    # node's mode with another rank's weights. Measured 1.76e-02 of peak that
+    # way against 8.8e-07 this way. `FEMPhantom._signal_modes` refuses it now,
+    # but the fixture should be right regardless.
+    disp = np.zeros((phantom.global_shape[0], 3, n_frames), dtype=np.float32)
     for axis, amp in enumerate((0.30, -0.20, 0.25)):
       disp[:, axis, :] = amp * reach
     extra['pod'] = POD(data=disp, times=np.linspace(0.0, 400.0, n_frames),
-                       n_modes=1, is_periodic=True)
+                       n_modes=1, is_periodic=True,
+                       global_to_local=phantom.local_to_global_nodes)
   if args.t2_prime > 0.0:
     extra = dict(t2_prime=Quantity(args.t2_prime, 'ms'),
                  spectral_bins=args.spectral_bins)

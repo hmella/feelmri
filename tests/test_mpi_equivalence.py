@@ -621,15 +621,75 @@ def test_a_per_node_b0_field_survives_mpi_and_dual_partitioning(tmp_path):
       f'freezing the field onto the node, so this fixture cannot see whether '
       f'the GRADIENT survived the redistribution')
 
-  # Dual carries a larger floor than plain MPI on this fixture, and it is NOT
-  # the B0 channel: with no field at all and the same trajectory, dual against
-  # serial reads 8.55e-04 where 2 and 3 ranks read 3.0e-06 and 2.9e-06. It is
-  # the POD mode contraction summing in a different order under a second
-  # partition, amplified by the cancellation the quadrature path carries.
-  # Tolerated here at its measured value; the B0 arms must not exceed it.
-  for label, bound in (('mpi2', 1e-4), ('mpi3', 1e-4), ('mpi2_dual', 2e-3)):
+  for label in ('mpi2', 'mpi3', 'mpi2_dual'):
     worst = float(np.abs(runs[label] - reference).max() / scale)
-    assert worst < bound, (
+    assert worst < 1e-4, (
         f'{label} differs from serial by {worst:.3e} of peak, above float32 '
         f'reassociation -- the per-node field is following the partition '
         f'rather than the node')
+
+
+@pytest.mark.slow
+@pytest.mark.requires_mpi
+@pytest.mark.timeout(180)
+def test_a_per_rank_trajectory_is_refused_under_dual_partitioning(tmp_path):
+    """A POD built from per-rank data has a PER-RANK decomposition.
+
+    Each rank runs its own SVD, so its modes carry its own normalisation and
+    its weights undo exactly that normalisation. Dual partitioning
+    redistributes the modes BETWEEN ranks, which pairs a node's mode vector
+    with another rank's weights -- and the displacement comes out wrong,
+    silently. Measured on a 4 mm cube at 2 ranks: **1.76e-02 of peak**, against
+    **8.8e-07** for the same motion built the documented way, from the global
+    snapshots plus `global_to_local`.
+
+    A rigid-translation fixture cannot see it as a mispairing, which is how it
+    survived: every node has the same displacement, so only the normalisation
+    differs. It is refused by name now.
+
+    Scoped: without dual partitioning the modes never cross a rank boundary,
+    and at one rank local IS global, so neither is refused.
+    """
+    pytest.importorskip('mpi4py')
+    pytest.importorskip('pymetis')
+    pytest.importorskip('meshio')
+    if shutil.which('mpirun') is None:
+        pytest.skip('mpirun not on PATH')
+
+    from _phantom_fixtures import make_cube_mesh
+    mesh_path = tmp_path / 'perrank.vtu'
+    make_cube_mesh(mesh_path, 'tetra', n=4, scale=1e-3)
+
+    script = tmp_path / 'perrank.py'
+    script.write_text(
+        'import sys, numpy as np\n'
+        f'sys.path.insert(0, {str(Path(__file__).resolve().parent)!r})\n'
+        'from feelmri.Phantom import FEMPhantom\n'
+        'from feelmri.Motion import POD\n'
+        'ph = FEMPhantom(path=sys.argv[1])\n'
+        'ph.enable_dual_partition(voxel_size=0.0, lorder=2, horder=2,\n'
+        '                         nodal_approximation=False, lumped=False)\n'
+        'n = ph.local_nodes.shape[0]\n'
+        'ph.set_static_fields(T2=np.full(n, 60.0, np.float32),\n'
+        '                     phi_dB0=np.zeros(n, np.float32))\n'
+        'ph.update_magnetization(np.ones(n, np.complex64))\n'
+        'd = np.zeros((n, 3, 4), np.float32)\n'
+        'd[:, 0, :] = 1e-4\n'
+        'pod = POD(data=d, times=np.linspace(0, 40, 4), n_modes=1,\n'
+        '          is_periodic=True)\n'
+        'k = [np.zeros((1, 1, 1), np.float32)] * 3\n'
+        't = np.full((1, 1, 1), 1.0, np.float32)\n'
+        'ph.mri_signal(k, t, pod)\n')
+
+    env = os.environ.copy()
+    env.setdefault('OPENBLAS_NUM_THREADS', '1')
+    env.setdefault('MPLBACKEND', 'Agg')
+    proc = _run(['mpirun', '--allow-run-as-root', '--oversubscribe', '-n', '2',
+                 sys.executable, str(script), str(mesh_path)], env)
+    out = proc.stdout.decode(errors='replace')
+    assert proc.returncode != 0, f'a per-rank trajectory was accepted:\n{out[-2000:]}'
+    assert 'global_to_local' in out, out[-3000:]
+    # Every rank, not just the one that noticed: the refusal sits upstream of
+    # the redistribution's Alltoallv.
+    assert out.count('global_to_local') >= 2, (
+        f'the refusal reached fewer than both ranks:\n{out[-3000:]}')

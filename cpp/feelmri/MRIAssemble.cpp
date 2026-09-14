@@ -174,6 +174,12 @@ public:
 
     /// Per-node gradient of a scanner-fixed B0 field, in rad/ms/m.
     ///
+    /// Independent of `set_static_fields`, which deliberately does NOT clear
+    /// it: `simulate_pulseq` re-sets the static fields once per sub-spin
+    /// inside its `t2_prime` bin loop, and clearing the gradient there would
+    /// drop the field from every bin but the first. The only way to remove it
+    /// is to pass an empty array.
+    ///
     /// The Eulerian counterpart of `phi_dB0`: that one is frozen onto the node
     /// and travels with the tissue, this one says how the field changes as the
     /// node MOVES, so the phase becomes `-(phi + g . u) * t` with `u` the
