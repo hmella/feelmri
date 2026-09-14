@@ -116,8 +116,21 @@ if __name__ == '__main__':
   assert worst_phase < 1e-9, (
     f'arg(b1) should land on Mxy exactly; off by {worst_phase:.2e}')
 
-  # The signal peak is NOT where the transmit field peaks.
-  peak_signal_r = radius[np.argmax(np.abs(Mxy_90))]
+  # The signal peak is NOT where the transmit field peaks. The node is picked
+  # GLOBALLY: `radius` and `Mxy_90` are this rank's slice, so an argmax over
+  # them names a different node on every rank -- which moved the reported
+  # centre inversion below from -0.588 to -0.691 at 8 ranks.
+  def _extreme(key, take_max):
+    i = int(np.argmax(key) if take_max else np.argmin(key))
+    op = MPI.MAXLOC if take_max else MPI.MINLOC
+    _, owner = MPI_comm.allreduce((float(key[i]), MPI_rank), op=op)
+    return i, owner
+
+  def _at(values, where):
+    i, owner = where
+    return MPI_comm.bcast(values[i] if MPI_rank == owner else None, root=owner)
+
+  peak_signal_r = float(_at(radius, _extreme(np.abs(Mxy_90), True)))
   MPI_print('|b1| runs {:.2f} at the centre to {:.2f} at the rim, so the flip '
             'runs {:.1f} to {:.1f} deg'.format(
               b1_centre, b1_rim, 90*b1_centre, 90*b1_rim))
@@ -131,7 +144,8 @@ if __name__ == '__main__':
     f'not at r = {peak_signal_r:.3f} m')
   MPI_print('Nominal 180 deg inversion: Mz runs {:+.3f} at the centre to '
             '{:+.3f} at the rim; only the |b1| = 1 ring inverts fully'.format(
-              float(Mz_180[np.argmin(radius)]), float(Mz_180[np.argmax(radius)])))
+              float(_at(Mz_180, _extreme(radius, False))),
+              float(_at(Mz_180, _extreme(radius, True)))))
 
   # 5. Show it. Under MPI each rank holds a subset of the nodes, so this draws
   # rank 0's own share.

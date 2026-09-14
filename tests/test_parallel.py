@@ -7,7 +7,7 @@ subset that supports it under ``mpirun -n 2``, so a rank-dependent failure
 The physics equivalence between rank counts is a different question and is
 tested directly in ``test_mpi_equivalence.py``.
 
-These are subprocess tests: 11 scripts, ~74 s, a third of the suite's wall
+These are subprocess tests: 15 scripts, ~110 s, a third of the suite's wall
 clock. They are marked ``slow`` so ``-m "not slow"`` is a fast suite, and
 ``requires_mpi`` because they need ``mpirun`` on PATH.
 """
@@ -30,8 +30,18 @@ pytestmark = [
 ]
 
 
+# The four scripts that ASSERT are the ones worth running here, and three of
+# them were missing: an assertion read at a rank-local `argmin` over
+# `local_nodes` is only correct at one rank. `t2_prime_spin_echo.py`
+# normalised its own T2' map that way and built a NEGATIVE T2' of -1.266 ms at
+# 8 ranks; `b1_inhomogeneity.py` reported a centre inversion of -0.691 against
+# -0.588. Neither was run under mpirun, which is why nothing caught them.
 @pytest.mark.parametrize("script", [
     "4dflow.py",
+    "b1_inhomogeneity.py",
+    "coil_sensitivity.py",
+    "concomitant_fields.py",
+    "t2_prime_spin_echo.py",
     "free_running.py",
     "gradient_orientation.py",
     "gradient_spoiling.py",

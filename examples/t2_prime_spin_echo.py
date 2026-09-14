@@ -5,11 +5,12 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+from mpi4py import MPI
 from pint import Quantity as Q_
 from scipy.interpolate import griddata
 
 from feelmri.Bloch import BlochSolver, Sequence, SequenceBlock, lineshape_bins
-from feelmri.MPIUtilities import MPI_print, MPI_rank
+from feelmri.MPIUtilities import MPI_comm, MPI_print, MPI_rank
 from feelmri.MRObjects import RF, Scanner
 from feelmri.Phantom import FEMPhantom
 
@@ -63,9 +64,30 @@ if __name__ == '__main__':
 
   nodes = phantom.local_nodes.astype(np.float64)
   radius = np.hypot(nodes[:, 0], nodes[:, 1])
-  u = (radius / np.abs(nodes[:, :2]).max())**2
+  # GLOBAL, not per-rank. `local_nodes` is this rank's slice, so a rank-local
+  # maximum makes the T2' map a function of how the mesh was cut. At 8 ranks a
+  # rank holding only the outer annulus has a small local max, `u` exceeds 1,
+  # and T2' comes out NEGATIVE -- measured -1.266 ms, which the solver refuses.
+  r_max = MPI_comm.allreduce(float(np.abs(nodes[:, :2]).max()), op=MPI.MAX)
+  u = (radius / r_max)**2
   t2_prime = T2_PRIME_CENTRE + (T2_PRIME_RIM - T2_PRIME_CENTRE) * u
-  centre, rim = int(np.argmin(radius)), int(np.argmax(radius))
+
+  # Every number reported below is read at the node nearest the axis or the
+  # node furthest from it. Both are picked GLOBALLY: an argmin over one rank's
+  # slice names a different node on each of them, which moved a reported
+  # inversion by 17% at 8 ranks in the sibling example.
+  def _extreme(key, take_max):
+    i = int(np.argmax(key) if take_max else np.argmin(key))
+    op = MPI.MAXLOC if take_max else MPI.MINLOC
+    _, owner = MPI_comm.allreduce((float(key[i]), MPI_rank), op=op)
+    return i, owner
+
+  def _at(values, where):
+    """That node's row, broadcast so every rank reports the same number."""
+    i, owner = where
+    return MPI_comm.bcast(values[i] if MPI_rank == owner else None, root=owner)
+
+  centre, rim = _extreme(radius, False), _extreme(radius, True)
 
   # 2. 90 -- tau -- [180] -- tau, storing all the way through so the whole
   # envelope is visible and not just its endpoints.
@@ -125,25 +147,32 @@ if __name__ == '__main__':
   echoes['scalar'] = run(echo, None)
   revival = {K: run(fid, 'gaussian', K) for K in (K_POOR, K_GOOD)}
 
-  # 3. Report.
+  # 3. Report. The two nodes' values are collected here, on every rank: the
+  # figure below is drawn on rank 0 only, and a broadcast inside that branch
+  # would leave the others waiting.
+  t2c, t2r = float(_at(t2_prime, centre)), float(_at(t2_prime, rim))
+  fids_c = {k: _at(v, centre) for k, v in fids.items()}
+  ech_c = {k: _at(v, centre) for k, v in echoes.items()}
+  ech_r = {k: _at(v, rim) for k, v in echoes.items()}
+  rev_r = {k: _at(v, rim) for k, v in revival.items()}
+
   floor = np.exp(-2 * TAU_MS / T2_MS)
   MPI_print("T2 = {:.0f} ms everywhere; T2' runs {:.0f} ms at the centre to "
-            "{:.0f} ms at the rim.".format(T2_MS, t2_prime[centre],
-                                           t2_prime[rim]))
+            "{:.0f} ms at the rim.".format(T2_MS, t2c,
+                                           t2r))
   MPI_print('Free induction at the centre, against each lineshape\'s closed '
             'form:')
   for s, f in SHAPES.items():
-    want = f(t_fid / t2_prime[centre]) * np.exp(-t_fid / T2_MS)
+    want = f(t_fid / t2c) * np.exp(-t_fid / T2_MS)
     MPI_print('  {:<11} K={:<4} worst departure {:.4f}'.format(
       s, K_LORENTZIAN if s == 'lorentzian' else K_GOOD,
-      float(np.abs(fids[s][centre] - want).max())))
+      float(np.abs(fids_c[s] - want).max())))
   MPI_print('Spin echo (the echo can only recover the REVERSIBLE part, so it '
             'must land on exp(-2 tau/T2) = {:.4f}):'.format(floor))
   for label in ('gaussian', 'lorentzian', 'scalar'):
-    m = echoes[label]
     MPI_print('  {:<11} centre {:.4f} -> {:.4f}   rim {:.4f} -> {:.4f}'.format(
-      label, m[centre, N_SAMPLES], m[centre, -1],
-      m[rim, N_SAMPLES], m[rim, -1]))
+      label, ech_c[label][N_SAMPLES], ech_c[label][-1],
+      ech_r[label][N_SAMPLES], ech_r[label][-1]))
   MPI_print('  the rim loses 99% of its signal and gets all of it back; the '
             'scalar model is monotone and never does.')
 
@@ -157,27 +186,28 @@ if __name__ == '__main__':
   recov.sequence.add_block(SequenceBlock(dur=Q_(500.0, 'ms'), dt=Q_(10.0, 'ms'),
                                          empty=True, store_magnetization=True))
   _, Mz = recov.solve()
+  mz_c = _at(Mz, centre)
   MPI_print('Weight normalisation: Mz after 5 T1 is {:.6f}, closed form '
-            '{:.6f}'.format(float(Mz[centre, 0]), 1.0 - np.exp(-5.0)))
+            '{:.6f}'.format(float(mz_c[0]), 1.0 - np.exp(-5.0)))
 
   # Asserted, not just printed: an example that only reports its own error
   # exits 0 however wrong the physics has become.
   for s_name, f in SHAPES.items():
-    want = f(t_fid / t2_prime[centre]) * np.exp(-t_fid / T2_MS)
-    worst = float(np.abs(fids[s_name][centre] - want).max())
+    want = f(t_fid / t2c) * np.exp(-t_fid / T2_MS)
+    worst = float(np.abs(fids_c[s_name] - want).max())
     # The lorentzian rule cannot reach the exponential it targets -- that is
     # the point of showing it -- so it gets the bound its own rule predicts.
     limit = 0.25 if s_name == 'lorentzian' else 2e-3
     assert worst < limit, f'{s_name} FID departs from its closed form by {worst:.3f}'
   for label in ('gaussian', 'lorentzian'):
-    assert abs(echoes[label][rim, -1] - floor) < 5e-3, (
+    assert abs(ech_r[label][-1] - floor) < 5e-3, (
       f'{label}: the echo should recover to exp(-2 tau/T2) = {floor:.4f}, got '
-      f'{echoes[label][rim, -1]:.4f}')
-  assert echoes['scalar'][rim, -1] < 0.1 * floor, (
+      f'{ech_r[label][-1]:.4f}')
+  assert ech_r['scalar'][-1] < 0.1 * floor, (
     'the scalar T2* control should NOT recover at the echo')
-  assert np.all(np.diff(echoes['scalar'][rim]) <= 1e-9), (
+  assert np.all(np.diff(ech_r['scalar']) <= 1e-9), (
     'the scalar T2* control must be monotone')
-  assert abs(float(Mz[centre, 0]) - (1.0 - np.exp(-5.0))) < 1e-6, (
+  assert abs(float(mz_c[0]) - (1.0 - np.exp(-5.0))) < 1e-6, (
     'the quadrature weights no longer sum to 1; the phantom relaxes to the '
     'wrong M0')
 
@@ -203,8 +233,8 @@ if __name__ == '__main__':
 
     ax = axes[0, 0]
     for s in SHAPES:
-      line, = ax.plot(t_fid, fids[s][centre], 'o-', markersize=3, label=s)
-      ax.plot(t_fid, SHAPES[s](t_fid / t2_prime[centre])
+      line, = ax.plot(t_fid, fids_c[s], 'o-', markersize=3, label=s)
+      ax.plot(t_fid, SHAPES[s](t_fid / t2c)
               * np.exp(-t_fid / T2_MS), '--', linewidth=1,
               color=line.get_color(), alpha=0.6)
     ax.set_title('1. The lineshape sets the DECAY SHAPE\n'
@@ -218,7 +248,7 @@ if __name__ == '__main__':
     for label, style, colour in (('gaussian', 'o-', 'tab:blue'),
                                  ('lorentzian', '^-', 'tab:orange'),
                                  ('scalar', 's-', '0.5')):
-      ax.plot(t_echo, echoes[label][rim], style, markersize=3, color=colour,
+      ax.plot(t_echo, ech_r[label], style, markersize=3, color=colour,
               label='{}, rim'.format(label))
     ax.axhline(floor, color='k', linestyle=':', linewidth=1,
                label='exp(-2 tau / T2), the irreversible floor')
@@ -233,14 +263,14 @@ if __name__ == '__main__':
 
     ax = axes[1, 0]
     for K, style in ((K_POOR, '^-'), (K_GOOD, 'o-')):
-      ax.plot(t_fid, revival[K][rim], style, markersize=3,
+      ax.plot(t_fid, rev_r[K], style, markersize=3,
               label='gaussian, K = {}'.format(K))
-    ax.plot(t_fid, SHAPES['gaussian'](t_fid / t2_prime[rim])
+    ax.plot(t_fid, SHAPES['gaussian'](t_fid / t2r)
             * np.exp(-t_fid / T2_MS), 'k--', linewidth=1, label='closed form')
-    ax.axvline(0.2 * K_POOR * t2_prime[rim], color='tab:red', linewidth=0.8)
+    ax.axvline(0.2 * K_POOR * t2r, color='tab:red', linewidth=0.8)
     ax.annotate('0.2*K*T2\' for K = {}'.format(K_POOR),
-                xy=(0.2 * K_POOR * t2_prime[rim], 0.5),
-                xytext=(0.2 * K_POOR * t2_prime[rim] + 1.5, 0.5), fontsize=8,
+                xy=(0.2 * K_POOR * t2r, 0.5),
+                xytext=(0.2 * K_POOR * t2r + 1.5, 0.5), fontsize=8,
                 color='tab:red')
     ax.set_title('3. Size K, or the decay REVIVES\n'
                  "(a finite bin set is quasi-periodic)")
@@ -259,7 +289,7 @@ if __name__ == '__main__':
     fig.colorbar(mesh, ax=ax, label='|Mxy| at t = {:.0f} ms'.format(TAU_MS))
     ax.set_title("4. t2_prime is a per-node MAP\n"
                  "(T2' {:.0f} ms centre, {:.0f} ms rim)".format(
-                   t2_prime[centre], t2_prime[rim]))
+                   t2c, t2r))
     ax.set_xlabel('x (m)')
     ax.set_ylabel('y (m)')
     ax.set_aspect('equal')
