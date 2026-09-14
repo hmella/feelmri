@@ -471,7 +471,6 @@ class SequenceBlock:
         self.dur = dur
         self.time_extent = self._get_extent()
         self.discrete_times = self._discretization()
-        self.Nb_times = len(self.discrete_times)
         self.empty = empty
         self.store_magnetization = store_magnetization
         self._spoiler = bool(spoiler)
@@ -697,7 +696,6 @@ class SequenceBlock:
         self.time_extent[0] += time
         self.time_extent[1] += time
         self.discrete_times += time
-        self.Nb_times = len(self.discrete_times)
 
     def change_time(self, delta):
         """Deprecated alias for :meth:`shift_time`.
@@ -925,12 +923,6 @@ class Sequence:
         self.time_extent = self._get_extent()
         self.dur = self.time_extent[1] - self.time_extent[0]
         self.non_empty = [not flattened_block.empty]
-
-    def update_block_references(self):
-        # Update reference time for each block
-        for i, block in enumerate(self.blocks):
-            shift = block.time_extent[-1].to('ms') + i * self.dt_blocks.to('ms') + self.dt_prep.to('ms')
-            block.shift_time(shift)
 
     def _get_extent(self):
         # Get (t_min, t_max) for each block

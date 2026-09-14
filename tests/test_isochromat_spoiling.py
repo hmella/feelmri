@@ -23,6 +23,9 @@ from feelmri import (
   plot_isochromat_voxel,
   spoiling_residual,
 )
+# Not in the package's `__all__` -- it is public on `Isochromats` and
+# re-exported by `Bloch`, which is where its one caller would find it.
+from feelmri.Isochromats import plot_multi_isochromat_dephasing
 
 
 # Use a kspace wavenumber chosen so that |k_sp| * voxel_size > 1
@@ -115,9 +118,15 @@ def test_create_multi_isochromats_rejects_unknown_distribution():
     )
 
 
-def test_plot_isochromat_voxel_writes_png(tmp_path):
-  """The visualisation helper must produce a non-empty PNG file when
-  asked to export."""
+def test_both_isochromat_plotters_write_a_png(tmp_path):
+  """Both visualisation helpers must produce a non-empty PNG when exported.
+
+  They are checked together because they share the point set and neither
+  asserts physics -- this is a smoke test that the drawing code runs. It
+  covers `plot_multi_isochromat_dephasing`, which is exported from the
+  package and had no caller anywhere: 78 lines of public API that no test,
+  example or library path had ever executed.
+  """
   import matplotlib
   matplotlib.use('Agg')
 
@@ -137,3 +146,15 @@ def test_plot_isochromat_voxel_writes_png(tmp_path):
   png = tmp_path / 'iso.png'
   plot_isochromat_voxel(pts, R=1e-3, show=True, export_to=str(png))
   assert png.exists() and png.stat().st_size > 0
+
+  # The dephasing view of the same voxel: K sub-spins of one FE node in the
+  # complex plane, at a chosen time index of a magnetization history.
+  K = pts.shape[0]
+  hist = np.exp(2j * np.pi * np.linspace(0, 1, K)[:, None]
+                * np.arange(3)[None, :]).astype(np.complex64)
+  dephased = tmp_path / 'dephasing.png'
+  plot_multi_isochromat_dephasing(
+    0, pts, hist[:, :1], hist, K,
+    x_original=np.zeros((1, 3), dtype=np.float32), elem_radius=1e-3,
+    t_index=2, show_positions=True, export_to=str(dephased))
+  assert dephased.exists() and dephased.stat().st_size > 0

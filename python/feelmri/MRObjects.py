@@ -874,7 +874,6 @@ class RF:
 
         # Lobe durations for “sinc-like” pulse shapes
         self.half1 = (self.NbLobes[0] + 1)/(np.sum(self.NbLobes) + 2)*self.dur.to('ms')
-        self.half2 = (self.NbLobes[1] + 1)/(np.sum(self.NbLobes) + 2)*self.dur.to('ms')
 
         self.phase_offset = phase_offset.to('rad')
         self.frequency_offset = frequency_offset.to('Hz')
