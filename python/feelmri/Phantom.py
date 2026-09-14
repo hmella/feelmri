@@ -901,7 +901,7 @@ class FEMPhantom:
             "normalisation. Dual partitioning redistributes them between "
             "ranks, which pairs a node's mode with another rank's weights. "
             "Build it from the GLOBAL snapshots with "
-            "`global_to_local=phantom.local_to_global_nodes`, the way every "
+            "`local_to_global_nodes=phantom.local_to_global_nodes`, the way every "
             "shipped example does.")
         # And the INVARIANT the redistribution actually rests on, checked
         # directly rather than by asking which attributes the object carries.
@@ -939,7 +939,7 @@ class FEMPhantom:
             f"MODES and never the weights, so a node's mode would be "
             f"contracted with another rank's weights. Build the trajectory "
             f"from the GLOBAL snapshots with "
-            f"`global_to_local=phantom.local_to_global_nodes`.")
+            f"`local_to_global_nodes=phantom.local_to_global_nodes`.")
         cache = self.__dict__.setdefault('_signal_modes_cache', {})
         key = id(pod)
         if key not in cache:
@@ -1366,10 +1366,10 @@ class FEMPhantom:
         side decays monotonically from the snapshot whatever constant it is
         given. That needs sub-voxel isochromats, not a scalar.
 
-        **With ``BlochSolver(t2_prime=...)``, pass T2 and not T2\*.** The
+        **With ``BlochSolver(t2_prime=...)``, pass T2 and not ``T2*``.** The
         solver then carries the reversible part explicitly as a sub-ensemble
         and ``simulate_pulseq`` replays the readout once per sub-spin, so the
-        value given here is applied on top of it: T2\* on both sides decays
+        value given here is applied on top of it: ``T2*`` on both sides decays
         the reversible component twice.
         """
         # Checked BEFORE the redistribution below, so a bad value is refused

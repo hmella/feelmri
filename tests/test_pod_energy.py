@@ -283,7 +283,7 @@ def test_a_time_outside_the_snapshots_is_refused(cls_name, t_bad):
     data = np.zeros((8, 3, 4), dtype=np.float32)
     data[:, 2, :] = 2.0e-3
     pod = cls(times=times, data=data, n_modes=1, is_periodic=False,
-              global_to_local=np.arange(8))
+              local_to_global_nodes=np.arange(8))
 
     assert np.isfinite(pod.get_weights(np.array([0.0, 150.0], np.float32))).all()
     with pytest.raises(ValueError, match='no motion data at t'):
@@ -303,7 +303,7 @@ def test_a_periodic_pod_accepts_any_time():
     data = np.zeros((8, 3, 4), dtype=np.float32)
     data[:, 2, :] = 2.0e-3
     pod = PODVelocity(times=times, data=data, n_modes=1, is_periodic=True,
-                      global_to_local=np.arange(8))
+                      local_to_global_nodes=np.arange(8))
     w = pod.get_weights(np.array([-500.0, 0.0, 5000.0], dtype=np.float32))
     assert np.isfinite(w).all(), 'the periodic fold left a time uncovered'
 
@@ -317,7 +317,7 @@ def test_the_timeshift_moves_the_covered_window():
     data = np.zeros((8, 3, 4), dtype=np.float32)
     data[:, 2, :] = 2.0e-3
     pod = POD(times=times, data=data, n_modes=1, is_periodic=False,
-              global_to_local=np.arange(8))
+              local_to_global_nodes=np.arange(8))
     assert np.isfinite(pod.get_weights(np.array([120.0], np.float32))).all()
     pod.update_timeshift(100.0)
     with pytest.raises(ValueError, match='no motion data at t'):

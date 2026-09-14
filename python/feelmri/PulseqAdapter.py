@@ -1805,7 +1805,7 @@ def simulate_pulseq(seq_path,
                                 dtype=np.float64).reshape(-1)
       # None on a static phantom, where the nodal value IS the Eulerian answer
       # and the channel would be pure cost. Cleared in the finally either way.
-      phantom.set_b0_gradient(b0_read.node_gradient)
+      phantom.set_b0_gradient(b0_read.node_gradient_rad_per_ms_per_m)
 
     # When the solver carried a spectral sub-ensemble, reproduce the readout from
     # it rather than from the collapsed magnetization. Needs the static fields the

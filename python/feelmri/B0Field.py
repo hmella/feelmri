@@ -31,7 +31,7 @@ from feelmri.MPIUtilities import MPI, MPI_print, MPI_rank
 #: bare tuple so a consumer that has not been taught about a new channel fails
 #: with an AttributeError instead of silently unpacking the wrong thing.
 SolverTerms = collections.namedtuple(
-    'SolverTerms', 'offset_mT delta_B gradient quadratic node_gradient')
+    'SolverTerms', 'offset_mT delta_B gradient quadratic node_gradient_mT_per_m')
 
 #: The same for the signal evaluator, with the rates already in rad/ms.
 #: What the readout needs from a PER-NODE field. Two fields, not five: unlike
@@ -42,7 +42,7 @@ SolverTerms = collections.namedtuple(
 #: `gradient` in mT/m and a `quadratic` in mT/m^2 inside a tuple whose other
 #: entries were rad/ms, and no caller anywhere read either.
 ReadoutTerms = collections.namedtuple(
-    'ReadoutTerms', 'phi_nodal node_gradient')
+    'ReadoutTerms', 'phi_nodal node_gradient_rad_per_ms_per_m')
 
 
 class NoPolynomialFits(ValueError):
@@ -279,7 +279,8 @@ class B0Field:
                 "k-space shift is linear in position and the six maxwell "
                 "coefficients are quadratic. It rides the phantom instead: "
                 "add `readout_terms(...).phi_nodal` to `phi_dB0` and pass "
-                "`.node_gradient` to `FEMPhantom.set_b0_gradient`.")
+                "`.node_gradient_rad_per_ms_per_m` to "
+                "`FEMPhantom.set_b0_gradient`.")
         b, g, q = self.in_frame_full(rotation=rotation, location=location,
                                      physical=False)
         t = np.asarray(times_ms, dtype=np.float64)
@@ -301,7 +302,7 @@ class B0Field:
 
         Both reductions are reached unconditionally, which is the whole point.
         Spelling this at the call site as ``field is not None and not
-        field.is_zero_everywhere()`` short-circuits, so a rank whose field is
+        field.is_zero_on_all_ranks()`` short-circuits, so a rank whose field is
         ``None`` never enters the ``allreduce`` the others are inside and they
         block there forever. A field present on some ranks only is an error in
         its own right -- it describes one scanner -- so it is refused by name
@@ -323,7 +324,7 @@ class B0Field:
         collective_raise(mismatch)
         if not all(present):
             return False
-        return not field.is_zero_everywhere()
+        return not field.is_zero_on_all_ranks()
 
     @property
     def is_zero(self):
@@ -339,8 +340,12 @@ class B0Field:
         return (self.offset_mT == 0.0 and not np.any(self.gradient_mT_per_m)
                 and not np.any(self.coefficients))
 
-    def is_zero_everywhere(self, collective=True):
+    def is_zero_on_all_ranks(self, collective=True):
         """:attr:`is_zero`, agreed across every rank.
+
+        "everywhere" -- its old name -- reads as "at every point in space",
+        which is what :attr:`is_zero` already claims; this is the reduction
+        over RANKS.
 
         For a per-node field :attr:`is_zero` inspects the LOCAL slice, so a
         rank whose own nodes all sit where the field vanishes answers True
@@ -473,7 +478,8 @@ class B0Field:
                      physical=False):
         """What `BlochSolver` needs from this field, in the frame it works in.
 
-        Returns ``(offset_mT, delta_B_mT, gradient, quadratic, node_gradient)``:
+        Returns ``(offset_mT, delta_B_mT, gradient, quadratic,
+        node_gradient_mT_per_m)``:
         a uniform
         part to fold into `delta_B`, a per-node array to fold into it instead, a
         3-vector for the hoisted gradient scalars, and the six quadratic
@@ -512,7 +518,7 @@ class B0Field:
         # puts the bracket on `delta_B`, where it costs nothing, and leaves a
         # per-node vector the kernel adds to the gradient scalars it already
         # hoists. `g` follows the same frame rule as the polynomial gradient.
-        g = self.node_gradient(phantom, rotation=rotation, physical=physical)
+        g = self.node_gradient_mT_per_m(phantom, rotation=rotation, physical=physical)
         x = np.asarray(phantom.local_nodes, dtype=np.float64)
         if physical and rotation is not None:
             x = x @ np.asarray(rotation, dtype=np.float64).T
@@ -522,9 +528,11 @@ class B0Field:
     def readout_terms(self, phantom, scanner, moving, rotation=None):
         """What the signal evaluator needs, in the imaging frame it works in.
 
-        Returns ``(phi_nodal, node_gradient)`` in rad/ms and rad/ms/m: the
+        Returns ``(phi_nodal, node_gradient_rad_per_ms_per_m)`` in rad/ms and
+        rad/ms/m: the
         field at each node, and its gradient there, which
-        :meth:`FEMPhantom.set_b0_gradient` takes. ``node_gradient`` is ``None``
+        :meth:`FEMPhantom.set_b0_gradient` takes.
+        ``node_gradient_rad_per_ms_per_m`` is ``None``
         on a phantom that does not move, where the nodal value IS the Eulerian
         answer. A field a polynomial can carry is REFUSED -- see the message.
         The
@@ -554,12 +562,17 @@ class B0Field:
         # `g . x0` separately from `g` leaves an artifact that does not vanish
         # at rest. The assembler's nodes are always the imaging ones, so
         # `physical` has no meaning here and the gradient always takes R^T.
-        g = self.node_gradient(phantom, rotation=rotation, physical=False)
+        g = self.node_gradient_mT_per_m(phantom, rotation=rotation, physical=False)
         return ReadoutTerms(gamma * nodal, gamma * g)
 
-    def phi_offset(self, scanner, location=None):
-        """The uniform part as an off-resonance rate in rad/ms, to add to
+    def uniform_phi_rate(self, scanner, location=None):
+        """The uniform part as an off-resonance RATE in rad/ms, to add to
         ``phi_dB0``.
+
+        A rate, not a phase: the assembler multiplies it by the sample time.
+        "offset" -- its old name -- reads as the rad that `ADC.phase_offset`
+        and `RF.phase_offset` carry, and a caller who added this to a phase
+        would be wrong by a factor of t.
 
         Uniform in space, so it carries no rotation -- but it DOES depend on
         where isocentre is: a slice offset turns part of the gradient into a
@@ -568,6 +581,15 @@ class B0Field:
         """
         b, _g = self.in_frame(location=location)
         return float(b * scanner.gamma.m_as('rad/ms/mT'))
+
+    def phi_offset(self, scanner, location=None):
+        """Deprecated alias for :meth:`uniform_phi_rate`."""
+        import warnings
+        warnings.warn(
+            "B0Field.phi_offset is now uniform_phi_rate: it returns a rate in "
+            "rad/ms, not a phase in rad. The value is unchanged.",
+            DeprecationWarning, stacklevel=2)
+        return self.uniform_phi_rate(scanner, location=location)
 
     @classmethod
     def fit(cls, expression, points_m, *, rtol=1.0e-3, max_order=None,
@@ -868,7 +890,7 @@ class B0Field:
                 f"(N,).")
         return f
 
-    def node_gradient(self, phantom, rotation=None, physical=False):
+    def node_gradient_mT_per_m(self, phantom, rotation=None, physical=False):
         """The per-node field gradient, in the frame the caller works in.
 
         Built once and cached on the field, and checked against the node set it
@@ -876,7 +898,8 @@ class B0Field:
         """
         if self._nodal_grad is None:
             raise TypeError(
-                f"B0Field.node_gradient: this field is a {self.kind} expansion, "
+                f"B0Field.node_gradient_mT_per_m: this field is a "
+                f"{self.kind} expansion, "
                 f"which has no per-node gradient.")
         from feelmri.MPIUtilities import collective_raise
         stamp = self._node_stamp(phantom)
@@ -884,7 +907,7 @@ class B0Field:
         # move it on some ranks only. Collected, for the same reason as above.
         collective_raise(
             "" if stamp == self._nodal_stamp else
-            f"B0Field.node_gradient: sampled on a different node set "
+            f"B0Field.node_gradient_mT_per_m: sampled on a different node set "
             f"({self._nodal_stamp}) from the one asking for it ({stamp}).")
         g = self._nodal_grad
         if not physical and rotation is not None:

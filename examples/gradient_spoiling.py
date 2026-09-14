@@ -168,7 +168,7 @@ if __name__ == '__main__':
   phantom.set_static_fields(
       T2=T2,
       phi_dB0=np.full(T2.shape,
-                      b0_field.phi_offset(scanner, location=traj.LOC),
+                      b0_field.uniform_phi_rate(scanner, location=traj.LOC),
                       dtype=np.float32))
 
   # The reconstruction grids on the NOMINAL trajectory, so the shift is kept

@@ -72,7 +72,7 @@ if __name__ == '__main__':
   pod_times = np.linspace(0, (phantom.Nfr-1)*dt, phantom.Nfr)
   pod_trajectory = POD(times=pod_times.m_as('ms'),
                       data=u,
-                      global_to_local=phantom.local_to_global_nodes,
+                      local_to_global_nodes=phantom.local_to_global_nodes,
                       n_modes=10,
                       is_periodic=True,
                       interpolation_method='Pchip')
@@ -195,7 +195,7 @@ if __name__ == '__main__':
   phantom.set_static_fields(
       T2=T2star.m_as('ms'),
       phi_dB0=np.full(T2star.shape,
-                      b0_field.phi_offset(scanner, location=traj.LOC),
+                      b0_field.uniform_phi_rate(scanner, location=traj.LOC),
                       dtype=np.float32))
 
   # The reconstruction grids on the NOMINAL trajectory, so the shift is kept

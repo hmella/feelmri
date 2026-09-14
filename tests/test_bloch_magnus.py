@@ -1950,7 +1950,7 @@ def _constant_velocity_pod(n_nodes, vz_m_per_s, n_frames=4, dt_ms=50.0):
   # frame returns NaN from the interpolator, which would poison the whole
   # magnetization and mask what this is measuring.
   return PODVelocity(times=times, data=data, n_modes=1, is_periodic=True,
-                     global_to_local=np.arange(n_nodes))
+                     local_to_global_nodes=np.arange(n_nodes))
 
 
 def _displacement_probe_sequence(scanner, lead_ms, grad_mT_per_m, dur_ms):
@@ -2040,7 +2040,7 @@ def test_a_caller_set_timeshift_still_reaches_the_cardiac_phase(rod_phantom):
   results = {}
   for shift in (0.0, 0.5 * period):
     pod = PODVelocity(times=times, data=data.copy(), n_modes=3,
-                      is_periodic=True, global_to_local=np.arange(n))
+                      is_periodic=True, local_to_global_nodes=np.arange(n))
     pod.update_timeshift(shift)
     seq = _displacement_probe_sequence(scanner, 0.0, 20.0, 3.0)
     solver = BlochSolver(seq, phantom, scanner=scanner, M0=1.0,

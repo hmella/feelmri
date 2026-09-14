@@ -11,6 +11,7 @@ Inspired by the CMRSim toolbox.
 """
 # TODO: add additional information about the original authors and license
 import time
+import warnings
 from collections.abc import Callable
 from typing import Literal
 
@@ -415,9 +416,16 @@ class POD:
         Displacement snapshots, shape ``(P, C, T)`` where ``P`` is the
         number of nodes, ``C`` the number of spatial components, and ``T``
         the number of time steps.
-    global_to_local : np.ndarray, optional
-        Index array mapping global node indices to the local MPI partition.
-        If given, modes are extracted for the local partition only.
+    local_to_global_nodes : np.ndarray, optional
+        The global index of each LOCAL node, i.e. exactly
+        ``phantom.local_to_global_nodes``. Used as ``phi[local_to_global_nodes]``
+        to slice this rank's rows out of the global modes, so it maps local to
+        global and not the other way round. If given, the decomposition still
+        runs on the GLOBAL snapshots -- which is what makes every rank agree on
+        the weights -- and only the modes are sliced.
+
+        Was called ``global_to_local``, which names the opposite direction;
+        that spelling is still accepted.
     n_modes : int, optional
         Number of POD modes to retain. Default is 5. Reduced automatically,
         with a warning, when it exceeds the numerical rank of ``data``.
@@ -435,14 +443,27 @@ class POD:
 
     def __init__(self, times: np.ndarray,
                  data: np.ndarray,
-                 global_to_local: np.ndarray = None,
+                 local_to_global_nodes: np.ndarray = None,
                  n_modes: int = 5,
                  is_periodic: bool = False,
                  interpolation_method: Literal['AkimaSpline', 'CubicSpline', 'Pchip'] = 'Pchip',
-                 timeshift: np.float32 = 0.0):
+                 timeshift: np.float32 = 0.0,
+                 global_to_local: np.ndarray = None):
+        if global_to_local is not None:
+            if local_to_global_nodes is not None:
+                raise TypeError(
+                    "POD: pass local_to_global_nodes, not both it and its old "
+                    "name global_to_local.")
+            warnings.warn(
+                "POD(global_to_local=...) is the old spelling of "
+                "local_to_global_nodes, and it named the opposite direction: "
+                "the array is the global index of each local node. Pass the "
+                "same array under the new name.",
+                DeprecationWarning, stacklevel=2)
+            local_to_global_nodes = global_to_local
         self.times = times          # (t,)
         self.data = data            # (P, C, t)
-        self.local_to_global_map = global_to_local
+        self.local_to_global_map = local_to_global_nodes
         self.n_modes = n_modes
         self.timeshift = timeshift
         self.is_periodic = is_periodic

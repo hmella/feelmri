@@ -74,7 +74,7 @@ if __name__ == '__main__':
   times = np.linspace(0, (phantom.Nfr-1)*dt, phantom.Nfr, dtype=np.float32)
   pod_velocity = PODVelocity(times=times.m_as('ms'),
                              data=v.m_as('m/ms'),
-                             global_to_local=phantom.local_to_global_nodes,
+                             local_to_global_nodes=phantom.local_to_global_nodes,
                              n_modes=25,
                              is_periodic=True)
 
@@ -180,7 +180,7 @@ if __name__ == '__main__':
   phantom.set_static_fields(
       T2=T2star.m_as('ms'),
       phi_dB0=np.full(T2star.shape,
-                      b0_field.phi_offset(scanner,
+                      b0_field.uniform_phi_rate(scanner,
                                           location=planning.LOC.m_as('m')),
                       dtype=np.float32))
 

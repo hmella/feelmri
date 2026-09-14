@@ -92,7 +92,7 @@ class Trajectory:
         self.gammabar = scanner.gammabar           # [Hz/T]
         self.lines_per_shot = lines_per_shot
         self.ro_samples = self.oversampling * self.res[0]  # number of readout samples
-        self.ph_samples = self.check_ph_enc_lines(self.res[1])
+        self.ph_samples = self._round_down_to_shot_multiple(self.res[1])
         self.slices = self.res[2]                  # number of slices
         self.nb_shots = self.ph_samples // self.lines_per_shot
         self.shots = [[None, ] * self.lines_per_shot for _ in range(self.nb_shots)]
@@ -246,7 +246,7 @@ class Trajectory:
         **Prefer :meth:`b0_terms`, which returns every channel at once.** This
         method hands back only the k-space shift: the uniform half ``b`` is
         spatially constant, so it belongs on the phantom's off-resonance
-        instead -- ``phi_dB0 + field.phi_offset(scanner, location=self.LOC)`` --
+        instead -- ``phi_dB0 + field.uniform_phi_rate(scanner, location=self.LOC)`` --
         and a caller who forgets it has half-applied the field, which is the
         hazard :meth:`b0_terms` exists to close. It also cannot carry a
         quadratic part at all, and refuses one.
@@ -311,7 +311,8 @@ class Trajectory:
                 "linear in position and the six maxwell coefficients are "
                 "quadratic. It rides the phantom instead: add "
                 "`field.readout_terms(...).phi_nodal` to `phi_dB0` and pass "
-                "`.node_gradient` to `FEMPhantom.set_b0_gradient`.")
+                "`.node_gradient_rad_per_ms_per_m` to "
+                "`FEMPhantom.set_b0_gradient`.")
         t0 = (float(self.t_start.m_as('ms')) if t_snapshot is None
               else float(t_snapshot))
         t = np.asarray(self.times.m_as('ms'), dtype=float) - t0
@@ -329,9 +330,31 @@ class Trajectory:
             for i in range(3))
         return points, phi_rate, maxwell
 
+    def _round_down_to_shot_multiple(self, ph_samples):
+        """Largest multiple of ``lines_per_shot`` that fits in ``ph_samples``.
+
+        Named `check_ph_enc_lines` before, which promised a check and did not
+        make one: it returns a DIFFERENT number than it was given, quietly
+        changing the acquisition matrix. It warns when it actually drops a
+        line, since that is a resolution the caller asked for and will not get.
+        """
+        kept = np.int32(self.lines_per_shot * (ph_samples // self.lines_per_shot))
+        if kept != ph_samples:
+            warnings.warn(
+                f"{type(self).__name__}: {int(ph_samples)} phase-encoding "
+                f"lines is not a multiple of lines_per_shot="
+                f"{self.lines_per_shot}, so {int(ph_samples) - int(kept)} "
+                f"were dropped and the matrix is {int(kept)} lines.")
+        return kept
+
     def check_ph_enc_lines(self, ph_samples):
-        """Verify that the number of phase-encoding lines is divisible by the multishot factor."""
-        return np.int32(self.lines_per_shot * (ph_samples // self.lines_per_shot))
+        """Deprecated alias for :meth:`_round_down_to_shot_multiple`."""
+        warnings.warn(
+            "Trajectory.check_ph_enc_lines checks nothing -- it rounds the "
+            "line count down to a multiple of lines_per_shot. It is now "
+            "_round_down_to_shot_multiple.",
+            DeprecationWarning, stacklevel=2)
+        return self._round_down_to_shot_multiple(ph_samples)
 
     def plot_trajectory(self, figsize=(12, 5), tight_layout=True, export_to=None):
         """Show k-space points and time map."""
@@ -486,7 +509,7 @@ class CartesianStack(Trajectory):
     def __init__(self, shot_coverage: Literal["full", "partial"] = "full", *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.shot_coverage = shot_coverage
-        self.ph_samples = self.check_ph_enc_lines(self.res[1])
+        self.ph_samples = self._round_down_to_shot_multiple(self.res[1])
         self.nb_shots = self.ph_samples // self.lines_per_shot
         (self.points, self.times) = self.kspace_points()
 
@@ -636,7 +659,7 @@ class RadialStack(Trajectory):
         super().__init__(*args, **kwargs)
         self.golden_angle = golden_angle
         self.full_spoke = full_spoke
-        self.ph_samples = self.check_ph_enc_lines(self.ph_samples)
+        self.ph_samples = self._round_down_to_shot_multiple(self.ph_samples)
         self.nb_shots = self.ph_samples // self.lines_per_shot
         (self.points, self.times) = self.kspace_points()
 
@@ -784,7 +807,7 @@ class SpiralStack(Trajectory):
         """
         super().__init__(*args, **kwargs)
 
-        self.ph_samples = self.check_ph_enc_lines(self.ph_samples)
+        self.ph_samples = self._round_down_to_shot_multiple(self.ph_samples)
         self.nb_shots = self.ph_samples // self.lines_per_shot
 
         self.min_samples_per_turn = 32

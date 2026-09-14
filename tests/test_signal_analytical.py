@@ -1987,9 +1987,9 @@ def test_a_rough_field_follows_a_moving_spin_through_the_readout(tmp_path,
   assert field.kind == 'nodal', (
       f'the fixture must need a per-node expansion, got {field.kind}')
   terms = field.readout_terms(ph, scanner, moving=True)
-  assert terms.node_gradient is not None
+  assert terms.node_gradient_rad_per_ms_per_m is not None
   ph.set_static_fields(T2=T2, phi_dB0=terms.phi_nodal.astype(np.float32))
-  ph.set_b0_gradient(terms.node_gradient)
+  ph.set_b0_gradient(terms.node_gradient_rad_per_ms_per_m)
   ph.update_magnetization(Mxy)
   taylor = np.asarray(
       getattr(ph, path_name)(list(pts), t, pod)).reshape(-1)[0]
@@ -2258,7 +2258,7 @@ def test_a_per_node_field_and_the_maxwell_channel_compose_in_one_readout(
 
   T2 = np.full(n, 1e9, dtype=np.float32)
   phantom.set_static_fields(T2=T2, phi_dB0=terms.phi_nodal.astype(np.float32))
-  phantom.set_b0_gradient(terms.node_gradient)
+  phantom.set_b0_gradient(terms.node_gradient_rad_per_ms_per_m)
 
   data = np.zeros((n, 3, 4), dtype=np.float32)
   for axis in range(3):
@@ -2287,7 +2287,7 @@ def test_a_per_node_field_and_the_maxwell_channel_compose_in_one_readout(
 
   moved = np.asarray(phantom.local_nodes, dtype=np.float64) + shift
   phase = (-(terms.phi_nodal
-             + np.einsum('ij,j->i', terms.node_gradient, shift)) * t_ms
+             + np.einsum('ij,j->i', terms.node_gradient_rad_per_ms_per_m, shift)) * t_ms
            + _monomial_phase(coef[0], moved))
   want = complex(np.sum(weights * np.exp(1j * phase)))
 
@@ -2301,7 +2301,7 @@ def test_a_per_node_field_and_the_maxwell_channel_compose_in_one_readout(
       1j * (-terms.phi_nodal * t_ms + _monomial_phase(coef[0], moved)))))
   no_max = complex(np.sum(weights * np.exp(1j * (
       -(terms.phi_nodal
-        + np.einsum('ij,j->i', terms.node_gradient, shift)) * t_ms))))
+        + np.einsum('ij,j->i', terms.node_gradient_rad_per_ms_per_m, shift)) * t_ms))))
   assert abs(no_grad - want) > 1e-2 * scale
   assert abs(no_max - want) > 1e-2 * scale
 

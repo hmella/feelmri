@@ -164,7 +164,7 @@ def main() -> int:
                             * (0.4 + 0.6 * np.cos(np.pi * u[:, axis]))
                             * np.sin(phase + 0.5 * axis))
     extra['pod'] = POD(data=disp, times=ts, n_modes=3, is_periodic=True,
-                       global_to_local=phantom.local_to_global_nodes)
+                       local_to_global_nodes=phantom.local_to_global_nodes)
   if args.t2_prime > 0.0:
     # MERGED, not reassigned. `extra = dict(...)` silently discarded
     # `b0_field` and `pod`, so any future case combining `--t2-prime` with

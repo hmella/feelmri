@@ -127,7 +127,7 @@ def _run_refusal_case(case, phantom, scanner, n_local, globals_):
         if g2l is None:
             data = data[np.asarray(phantom.local_to_global_nodes)]
         pod = POD(data=data, times=np.linspace(0.0, 5.0, 6), n_modes=2,
-                  global_to_local=g2l)
+                  local_to_global_nodes=g2l)
         phantom._signal_modes(pod)
     elif case == 'signal_modes_weights_disagree':
         # The structural check passes -- the attribute is there -- while the

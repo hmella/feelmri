@@ -173,7 +173,7 @@ if __name__ == '__main__':
   # of the sample's k computed below.
   delta_phi = [scanner.gammabar.to('1/mT/ms') * delta_B0[cs].to('mT') for cs in range(Nb_species)]
   delta_omega = [2 * np.pi * delta_phi[cs].m_as('1/ms')
-                 + b0_field.phi_offset(scanner, location=traj.LOC)
+                 + b0_field.uniform_phi_rate(scanner, location=traj.LOC)
                  for cs in range(Nb_species)]
 
   # The nominal trajectory is what the reconstruction grids on, so the shift is

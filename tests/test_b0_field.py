@@ -146,7 +146,7 @@ def test_the_uniform_part_converts_to_an_offresonance_rate():
     from feelmri import Scanner
     scanner = Scanner()
     field = B0Field(Quantity(1e-3, 'mT'))
-    assert field.phi_offset(scanner) == pytest.approx(
+    assert field.uniform_phi_rate(scanner) == pytest.approx(
         1e-3 * scanner.gamma.m_as('rad/ms/mT'))
 
 
@@ -189,22 +189,23 @@ def test_a_field_no_polynomial_can_carry_falls_back_to_the_nodes(tmp_path):
     # And a static solver gets it as `delta_B`, with no gradient channel.
     terms = field.solver_terms(phantom, moving=False)
     assert terms.offset_mT == 0.0
-    assert terms.node_gradient is None
+    assert terms.node_gradient_mT_per_m is None
     assert np.abs(terms.delta_B.reshape(-1) - want).max() == 0.0
 
     # A moving phantom gets the Eulerian expansion instead: the bracket on
     # `delta_B` and a per-node gradient for the kernel. At zero displacement
     # the two must reconstruct the same field.
     moving = field.solver_terms(phantom, moving=True)
-    assert moving.node_gradient is not None
+    assert moving.node_gradient_mT_per_m is not None
     # The per-node rung and the polynomial channels are mutually exclusive:
     # `quadratic` and `gradient` describe a GLOBAL expansion the kernel hoists
-    # per time step, `node_gradient` a per-node one it reads per node, and the
+    # per time step, `node_gradient_mT_per_m` a per-node one it reads per
+    # node, and the
     # kernel would add both. Nothing pinned this after the accessor rework.
     assert moving.gradient is None and moving.quadratic is None
     x = np.asarray(phantom.local_nodes, dtype=np.float64)
     rebuilt = (moving.delta_B.reshape(-1)
-               + np.einsum('ij,ij->i', x, moving.node_gradient))
+               + np.einsum('ij,ij->i', x, moving.node_gradient_mT_per_m))
     assert np.abs(rebuilt - want).max() < 1e-12 * np.abs(want).max()
 
     # `nodal=False` keeps the older, stricter behaviour for anyone who wants it.
@@ -269,7 +270,7 @@ def test_a_per_node_field_refuses_the_coefficient_accessors(tmp_path):
 
     for call in (lambda: field.in_frame_full(),
                  lambda: field.in_frame(),
-                 lambda: field.phi_offset(Scanner())):
+                 lambda: field.uniform_phi_rate(Scanner())):
         with pytest.raises(TypeError, match='readout_terms'):
             call()
     # `__call__` is the same claim one level down: there is no closed form to

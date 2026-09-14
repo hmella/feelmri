@@ -67,7 +67,7 @@ if __name__ == '__main__':
   u_times = np.linspace(0, (phantom.Nfr-1)*dt, phantom.Nfr, dtype=np.float32)
   pod_trajectory = POD(times=u_times.m_as('ms'),
                       data=u,
-                      global_to_local=phantom.local_to_global_nodes,
+                      local_to_global_nodes=phantom.local_to_global_nodes,
                       n_modes=10,
                       is_periodic=True,
                       interpolation_method='Pchip')
@@ -231,7 +231,7 @@ if __name__ == '__main__':
                                    rotation=planning.MPS)
   phantom.set_static_fields(T2=T2.m_as('ms'),
                             phi_dB0=b0_read.phi_nodal.astype(np.float32))
-  phantom.set_b0_gradient(b0_read.node_gradient)
+  phantom.set_b0_gradient(b0_read.node_gradient_rad_per_ms_per_m)
 
   # Iterate over cardiac phases
   # The reconstruction grids on the NOMINAL trajectory, and it stays nominal:

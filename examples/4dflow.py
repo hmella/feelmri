@@ -76,7 +76,7 @@ if __name__ == '__main__':
   times = np.linspace(0, (phantom.Nfr-1)*dt, phantom.Nfr, dtype=np.float32)
   pod_velocity = PODVelocity(times=times.m_as('ms'),
                             data=v.m_as('m/ms'),
-                            global_to_local=phantom.local_to_global_nodes,
+                            local_to_global_nodes=phantom.local_to_global_nodes,
                             n_modes=25,
                             is_periodic=True,
                             interpolation_method='Pchip')
@@ -237,7 +237,7 @@ if __name__ == '__main__':
   # the reconstruction grids on the nominal trajectory and the difference
   # between the two is the geometric distortion.
   delta_omega = np.full(T2star.shape,
-                        b0_field.phi_offset(scanner, location=traj.LOC),
+                        b0_field.uniform_phi_rate(scanner, location=traj.LOC),
                         dtype=np.float32)
   b0_points = traj.b0_shifted_points(b0_field, scanner)
 

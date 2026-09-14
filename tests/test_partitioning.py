@@ -134,7 +134,7 @@ def test_enable_dual_partition_refuses_after_the_partition_is_in_use(tmp_path):
   """Building a second layout after a POD or solver has bound to the partition
   would silently invalidate it, so it must raise instead."""
   phantom = _graded_phantom(tmp_path)
-  _ = phantom.local_to_global_nodes          # what POD(global_to_local=...) does
+  _ = phantom.local_to_global_nodes          # what POD(local_to_global_nodes=...) does
   with pytest.raises(RuntimeError, match='already in use'):
     phantom.enable_dual_partition(voxel_size=5.0, lorder=1, horder=6,
                                   nodal_approximation=False, lumped=False)
@@ -237,7 +237,7 @@ def test_mode_arrays_are_address_stable(tmp_path):
   rng = np.random.default_rng(0)
   data = rng.normal(0, 1e-3, (n_global, 3, 6)).astype(np.float32)
   pod = POD(times=np.linspace(0, 100, 6, dtype=np.float32), data=data,
-            global_to_local=phantom.local_to_global_nodes, n_modes=3,
+            local_to_global_nodes=phantom.local_to_global_nodes, n_modes=3,
             is_periodic=True, interpolation_method='Pchip')
   addrs = {phantom._cached_mode_arrays(pod)[0].__array_interface__['data'][0]
            for _ in range(6)}

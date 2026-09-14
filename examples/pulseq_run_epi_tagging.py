@@ -89,7 +89,7 @@ if __name__ == '__main__':
   u_times = np.linspace(0, (phantom.Nfr-1)*dt, phantom.Nfr, dtype=np.float32)
   pod_trajectory = POD(times=u_times.m_as('ms'),
                       data=u,
-                      global_to_local=phantom.local_to_global_nodes,
+                      local_to_global_nodes=phantom.local_to_global_nodes,
                       n_modes=10,
                       is_periodic=True,
                       interpolation_method='Pchip')
@@ -311,7 +311,7 @@ if __name__ == '__main__':
   phantom.set_static_fields(
       T2=T2.m_as('ms'),
       phi_dB0=np.full(T2.shape,
-                      b0_field.phi_offset(scanner,
+                      b0_field.uniform_phi_rate(scanner,
                                           location=planning.LOC.m_as('m')),
                       dtype=np.float32))
 

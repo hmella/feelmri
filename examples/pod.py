@@ -53,7 +53,7 @@ if __name__ == '__main__':
   times = np.linspace(0, (phantom.Nfr-1)*dt, phantom.Nfr)
   pod_velocity = POD(times=times.m_as('s'),
                     data=v.m_as('m/s'),
-                    global_to_local=phantom.local_to_global_nodes,
+                    local_to_global_nodes=phantom.local_to_global_nodes,
                     n_modes=30,
                     is_periodic=True)
 

@@ -679,7 +679,15 @@ class SequenceBlock:
 
         return Quantity(all_timings, units='ms')
 
-    def change_time(self, time):
+    def shift_time(self, delta):
+        """Move the whole block along the timeline BY ``delta``.
+
+        Note the contract differs from :meth:`Gradient.change_time` and
+        :meth:`RF.change_time`, which SET an absolute start time. The line
+        below is the bridge between the two: a block shift becomes an
+        absolute move for each event it holds.
+        """
+        time = delta
         # Update reference time for each gradient and RF pulse
         [g.change_time(g.time + time) for g in self.gradients]
         self.M_gradients = [g for g in self.gradients if g.axis == 0]
@@ -690,6 +698,19 @@ class SequenceBlock:
         self.time_extent[1] += time
         self.discrete_times += time
         self.Nb_times = len(self.discrete_times)
+
+    def change_time(self, delta):
+        """Deprecated alias for :meth:`shift_time`.
+
+        The name collided with `Gradient.change_time` / `RF.change_time`,
+        which take an ABSOLUTE time, while this one has always taken a delta.
+        """
+        warnings.warn(
+            "SequenceBlock.change_time is now shift_time: it moves the block "
+            "BY its argument, where Gradient.change_time and RF.change_time "
+            "set an absolute start time. Behaviour is unchanged.",
+            DeprecationWarning, stacklevel=2)
+        return self.shift_time(delta)
 
     def plot(self, tight_layout=True, figsize=None, export_to=None):
         if MPI_rank == 0:
@@ -777,7 +798,7 @@ class Sequence:
         # Add a block to the sequence
         if isinstance(block, SequenceBlock):
             block = block.copy()  # Ensure we work with a copy
-            block.change_time(self.time_extent[-1].to('ms') - block.time_extent[0].to('ms'))
+            block.shift_time(self.time_extent[-1].to('ms') - block.time_extent[0].to('ms'))
             self.blocks = [b for b in self.blocks + [block]]
             self.Nb_blocks = len(self.blocks)
             self.time_extent = self._get_extent()
@@ -801,7 +822,7 @@ class Sequence:
                     f"alignment matters.")
             if block > Quantity(0, 'ms'):
                 block = SequenceBlock(dur=block.to('ms'), dt=dt, empty=True, store_magnetization=False)
-                block.change_time(self.time_extent[-1].to('ms'))
+                block.shift_time(self.time_extent[-1].to('ms'))
                 self.blocks = [b for b in self.blocks + [block]]
                 self.Nb_blocks = len(self.blocks)
                 self.time_extent = self._get_extent()
@@ -818,7 +839,7 @@ class Sequence:
             shifted = []
             for child in sequence.blocks:
                 new_child = child.copy()
-                new_child.change_time(shift)
+                new_child.shift_time(shift)
                 shifted.append(new_child)
 
             self.blocks = list(self.blocks) + shifted
@@ -909,7 +930,7 @@ class Sequence:
         # Update reference time for each block
         for i, block in enumerate(self.blocks):
             shift = block.time_extent[-1].to('ms') + i * self.dt_blocks.to('ms') + self.dt_prep.to('ms')
-            block.change_time(shift)
+            block.shift_time(shift)
 
     def _get_extent(self):
         # Get (t_min, t_max) for each block
@@ -1065,7 +1086,7 @@ class BlochSolver:
         pulse, which no scalar T2* can do.
 
         This is the reversible part only. Pass the irreversible T2 to ``T2=``,
-        and pass **T2, not T2\***, to ``Phantom.set_static_fields`` or the two
+        and pass **T2, not ``T2*``**, to ``Phantom.set_static_fields`` or the two
         double-count.
         Requires ``dtype='float64'`` for quantitative work: the bin offsets
         are ~1e-5 to 1e-3 mT and float32 loses them into the background field
@@ -1757,7 +1778,7 @@ class BlochSolver:
             b0_delta_B = _terms.delta_B
             b0_gradient = _terms.gradient
             b0_quad = _terms.quadratic
-            b0_node_lin = _terms.node_gradient
+            b0_node_lin = _terms.node_gradient_mT_per_m
         # A field that is uniform in space folds into `delta_B` and is constant
         # in time however the spins move; one that varies does not, and the
         # raster has to resolve the motion rather than only the waveform.
