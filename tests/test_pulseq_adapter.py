@@ -1119,6 +1119,29 @@ def test_a_degree_two_b0_field_reaches_the_readout_through_simulate_pulseq(
   gamma = scanner.gamma.m_as('rad/ms/mT')
   path, _vol = make_cube_mesh(tmp_path / 'quad_b0.vtu', 'tetra', n=2, scale=6e-2)
 
+  def _rot(az, ay, ax):
+    ca, sa = np.cos(az), np.sin(az)
+    cb, sb = np.cos(ay), np.sin(ay)
+    cc, sc = np.cos(ax), np.sin(ax)
+    return (np.array([[ca, -sa, 0.], [sa, ca, 0.], [0., 0., 1.]])
+            @ np.array([[cb, 0., sb], [0., 1., 0.], [-sb, 0., cb]])
+            @ np.array([[1., 0., 0.], [0., cc, -sc], [0., sc, cc]]))
+
+  def fresh_oriented(R, LOC):
+    # `orient` BEFORE `set_assembler`: the assembler captures the coordinates
+    # in its constructor, so moving the mesh afterwards is refused.
+    ph = FEMPhantom(path=str(path))
+    ph.orient(R, Quantity(LOC, 'm'))
+    ph.set_assembler(voxel_size=1e3, lorder=2,
+                     nodal_approximation=True, lumped=True)
+    return ph
+
+  def fresh_static(T2_map):
+    ph = fresh()
+    ph.set_static_fields(T2=T2_map,
+                         phi_dB0=np.zeros(T2_map.size, dtype=np.float32))
+    return ph
+
   def fresh():
     ph = FEMPhantom(path=str(path))
     # NODAL, because the reference writes the field per node on `phi_dB0`
@@ -1166,3 +1189,70 @@ def test_a_degree_two_b0_field_reaches_the_readout_through_simulate_pulseq(
                     ).reshape(-1)
   assert np.abs(bare - want).max() > 100.0 * np.abs(got - want).max(), (
       'this field barely changes the readout, so the test cannot see it')
+
+  # ORIENTED, because everything above runs at `R = I, LOC = 0`, where every
+  # line of the frame algebra in `in_frame_full` collapses -- `b + g.L +
+  # L^T Q L`, `R^T (g + 2QL)` and `R^T Q R` all reduce to the identity. A
+  # mutation deleting the rotation and location handling from
+  # `b0_readout_terms` outright passed every assertion above it.
+  R = _rot(0.31, -0.18, 0.12)
+  LOC = np.array([0.021, -0.033, 0.047])
+  obl = fresh_oriented(R, LOC)
+  n_o = obl.local_nodes.shape[0]
+  T2o = np.full(n_o, 1e9, dtype=np.float32)
+  obl.set_static_fields(T2=T2o, phi_dB0=np.zeros(n_o, dtype=np.float32))
+  field_o = B0Field.on_phantom(expr, obl, collective=False)
+  got_o = np.asarray(adapter.simulate_pulseq(
+      seq_path, obl, b0_field=field_o, **kw).kspace[0]).reshape(-1)
+
+  ref_o = fresh_oriented(R, LOC)
+  nodal_o = B0Field._sample(expr, B0Field._scanner_nodes(ref_o))
+  ref_o.set_static_fields(T2=T2o, phi_dB0=(gamma * nodal_o).astype(np.float32))
+  want_o = np.asarray(adapter.simulate_pulseq(
+      seq_path, ref_o, delta_B=nodal_o.reshape(-1, 1), **kw).kspace[0]
+                      ).reshape(-1)
+  assert np.abs(got_o - want_o).max() <= 1e-5 * np.abs(want_o).max(), (
+      'the split channels disagree with the per-node field once the phantom '
+      'is oriented, so the readout half is not reading the frame')
+
+  # And the ADDITION `maxwell = conc_coef if maxwell is None else maxwell +
+  # conc_coef`, which no test had ever executed with both operands present:
+  # nothing combined `concomitant_fields=True` with a degree-2 `b0_field`.
+  #
+  # Checked on the COEFFICIENTS the readout is handed, not on k-space. A
+  # k-space comparison cannot isolate this -- `b0_field` reaches the solver as
+  # well, so the two runs differ whether or not the readout adds anything, and
+  # a mutation replacing the sum with either operand alone passes it.
+  seen = []
+  orig_signal = FEMPhantom.mri_signal
+
+  def _record(self, *a, **k):
+    seen.append(None if k.get('maxwell') is None
+                else np.asarray(k['maxwell'], dtype=np.float64).copy())
+    return orig_signal(self, *a, **k)
+
+  FEMPhantom.mri_signal = _record
+  try:
+    seen.clear()
+    adapter.simulate_pulseq(seq_path, fresh_static(T2), b0_field=field, **kw)
+    shim_only = [m for m in seen if m is not None]
+    seen.clear()
+    adapter.simulate_pulseq(seq_path, fresh_static(T2),
+                            concomitant_fields=True, **kw)
+    conc_only = [m for m in seen if m is not None]
+    seen.clear()
+    adapter.simulate_pulseq(seq_path, fresh_static(T2), b0_field=field,
+                            concomitant_fields=True, **kw)
+    together = [m for m in seen if m is not None]
+  finally:
+    FEMPhantom.mri_signal = orig_signal
+
+  assert shim_only and conc_only and together, (
+      'no maxwell coefficients reached the readout in one of the three runs')
+  assert np.any(shim_only[0]) and np.any(conc_only[0]), (
+      'one of the two contributions is identically zero, so their sum cannot '
+      'be distinguished from either of them')
+  want_sum = shim_only[0] + conc_only[0]
+  assert np.abs(together[0] - want_sum).max() <= 1e-12 * np.abs(want_sum).max(), (
+      'the readout coefficients with both channels on are not the sum of the '
+      'two; one set is overwriting the other')

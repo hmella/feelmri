@@ -871,9 +871,9 @@ class FEMPhantom:
         # modes below moves a node's mode vector onto a rank whose weights were
         # scaled for a different decomposition, and the displacement comes out
         # wrong -- silently, and invisibly to a rigid-translation fixture,
-        # which is the usual way this is checked. Measured on a 4 mm cube at 2
-        # ranks: 1.76e-02 of peak against 8.8e-07 for the same motion built the
-        # documented way.
+        # which is the usual way this is checked, because a rigid translation
+        # is the same vector on every node and any permutation of it is
+        # itself. The measured cost is in `mpi-and-phantom.md`.
         #
         # Only reachable here: without dual partitioning the modes never cross
         # a rank boundary, and at one rank local IS global.

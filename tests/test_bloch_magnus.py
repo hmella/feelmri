@@ -2720,7 +2720,7 @@ def test_a_spin_moving_at_constant_velocity_integrates_the_field_it_crosses():
   assert err(endpoint) > 100.0 * err(want)
 
 
-@pytest.mark.parametrize('placement', ['axial', 'oblique+offset'])
+@pytest.mark.parametrize('placement', ['axial+offset', 'oblique+offset'])
 def test_a_per_node_field_is_the_same_field_however_the_phantom_is_placed(
         placement):
   """The per-node rung under an oblique orientation and a slice offset.
@@ -2748,8 +2748,13 @@ def test_a_per_node_field_is_the_same_field_however_the_phantom_is_placed(
   rough = lambda q: 1.0e-3 * (np.sin(q[:, 0] / 0.25) * np.cos(q[:, 1] / 0.30)
                               * np.exp(q[:, 2] / 0.9))
 
-  if placement == 'axial':
-    R, LOC = np.eye(3), np.zeros(3)
+  # Both arms carry an OFFSET. At `R = I, LOC = 0` the frame-naive answer
+  # below is literally the same expression as the correct one, so the
+  # discriminating assertion had to be skipped and the arm asserted only that
+  # the field agreed with itself -- it passed with `g @ R` deleted from
+  # `node_gradient` and with the rotation deleted from `_scanner_nodes`.
+  if placement == 'axial+offset':
+    R, LOC = np.eye(3), np.array([0.031, -0.047, 0.062])
   else:
     R, LOC = _rotation_zyx(0.37, -0.21, 0.15), np.array([0.031, -0.047, 0.062])
 
@@ -2771,7 +2776,13 @@ def test_a_per_node_field_is_the_same_field_however_the_phantom_is_placed(
 
   x_local = np.asarray(phantom.local_nodes, dtype=np.float64)
   want = -gamma * rough((x_local + shift) @ np.asarray(R).T + LOC) * dur_ms
-  naive = -gamma * rough(x_local + shift + LOC) * dur_ms      # no rotation
+  # The two ways to get the frame wrong, and they are NOT interchangeable:
+  # with `R = I` a dropped rotation is the correct answer, so only the dropped
+  # LOCATION discriminates there. Asserting one of them and skipping the arm
+  # where it cannot fire leaves that arm asserting only that the field agrees
+  # with itself.
+  naive_rot = -gamma * rough(x_local + shift + LOC) * dur_ms
+  naive_loc = -gamma * rough((x_local + shift) @ np.asarray(R).T) * dur_ms
 
   def err(phase):
     return float(np.abs(np.exp(1j * np.angle(got)) - np.exp(1j * phase)).max())
@@ -2779,7 +2790,102 @@ def test_a_per_node_field_is_the_same_field_however_the_phantom_is_placed(
   assert err(want) < 2e-2, (
       f'[{placement}] the field disagrees with its scanner-frame truth by '
       f'{err(want):.3e}')
-  if placement != 'axial':
-    assert err(naive) > 20.0 * err(want), (
-        f'[{placement}] a frame-naive answer is only {err(naive):.3e} away, '
-        f'so this orientation cannot see a dropped rotation')
+  assert err(naive_loc) > 20.0 * err(want), (
+      f'[{placement}] dropping the slice offset is only {err(naive_loc):.3e} '
+      f'away, so this placement cannot see it')
+  if not np.allclose(R, np.eye(3)):
+    assert err(naive_rot) > 20.0 * err(want), (
+        f'[{placement}] dropping the rotation is only {err(naive_rot):.3e} '
+        f'away, so this orientation cannot see it')
+
+
+@pytest.mark.parametrize('conc', [False, True], ids=['plain', 'concomitant'])
+@pytest.mark.parametrize('node_lin', [False, True], ids=['-nodelin', '+nodelin'])
+@pytest.mark.parametrize('field_quad', [False, True], ids=['-quad', '+quad'])
+def test_every_kernel_field_branch_reproduces_the_closed_form(
+        conc, node_lin, field_quad):
+  """All eight `Bz_new` branches, driven through the kernel directly.
+
+  The node loop spells the field out once per cell of
+  `Conc x has_node_lin x has_field_quad`, because a `+=` would regroup the FMAs
+  under `-ffast-math` and the feature-off path has to stay bit-identical. Eight
+  copies of one expression is exactly the shape in which a term goes missing
+  from one of them, and that is what happened: an `else if (has_node_lin)`
+  hanging off the concomitant branch read as though it covered all four cells
+  and covered two, so with the concomitant term on the shim was dropped
+  entirely while both Python Magnus seeds kept it.
+
+  Two of the eight are unreachable from `BlochSolver` -- `solver_terms` never
+  returns `quadratic` and `node_gradient` together -- so they carry the most
+  complex expression in the file and nothing drives them. They stay, because
+  the time-varying-field work will make the combination reachable, and this is
+  what pins them meanwhile.
+
+  Order 0 with no RF and no trajectory reduces the whole step to
+  `phi = -gamma * Bz * T`, so every term appears linearly in a phase with a
+  closed form. Every channel is non-zero and incommensurate with the others,
+  so a dropped or duplicated term cannot cancel.
+  """
+  from feelmri.BlochSimulator import solve_mri_f64
+
+  gamma, dur_ms, B0_mT = 267.5, 3.0, 1500.0
+  x = np.array([[0.031, -0.047, 0.062], [-0.019, 0.023, -0.055],
+                [0.044, 0.017, 0.029], [-0.038, -0.026, 0.011]])
+  n = x.shape[0]
+  G = np.array([21.0e-3, -13.0e-3, 25.0e-3])          # mT/m
+  delta_B = np.array([1.1e-4, -0.7e-4, 0.3e-4, -1.9e-4])
+  g_node = np.array([[3.0e-3, -2.0e-3, 1.5e-3], [-1.0e-3, 2.5e-3, -0.5e-3],
+                     [2.0e-3, 1.0e-3, -3.0e-3], [-2.5e-3, -1.5e-3, 2.0e-3]])
+  q = np.array([7.0e-3, -5.0e-3, 3.0e-3, 2.0e-3, -4.0e-3, 6.0e-3])
+  conc_off_mT = -0.37e-3
+
+  # What the kernel is asked to form, written independently of it.
+  want = x @ G + delta_B
+  if node_lin:
+    want = want + np.einsum('ij,ij->i', x, g_node)
+  if field_quad:
+    px, py, pz = x[:, 0], x[:, 1], x[:, 2]
+    want = want + (q[0]*px*px + q[1]*py*py + q[2]*pz*pz
+                   + q[3]*px*py + q[4]*px*pz + q[5]*py*pz)
+  if conc:
+    px, py, pz = x[:, 0], x[:, 1], x[:, 2]
+    Gx, Gy, Gz = G
+    want = want + conc_off_mT + (
+        (Gx*Gx + Gy*Gy) * pz*pz + 0.25 * Gz*Gz * (px*px + py*py)
+        - Gx*Gz*px*pz - Gy*Gz*py*pz) / (2.0 * B0_mT)
+
+  n_time = 2
+  kw = dict(
+    r0=np.asfortranarray(x), T1=np.full((n, 1), 1e12), T2=np.full((n, 1), 1e12),
+    delta_B=delta_B.reshape(n, 1), M0=1.0, gamma=gamma,
+    rf_all=np.zeros((n_time, 1), dtype=complex),
+    G_all=np.asfortranarray(np.tile(G, (n_time, 1))),
+    dt=np.array([0.0, dur_ms]),
+    regime_idx=np.zeros((n_time, 1), dtype=bool),
+    Mxy_initial=np.ones((n, 1), dtype=complex),
+    Mz_initial=np.zeros((n, 1)),
+    modes=np.asfortranarray(np.zeros((0, 0))), weights=np.zeros((0, 0)),
+    has_traj=False, order=0, Bz_old_init=np.zeros((n, 1)), rf_old_init=0j,
+    B0=B0_mT if conc else 0.0)
+  if conc:
+    kw['conc_offset'] = np.full(n_time, conc_off_mT)
+  if node_lin:
+    kw['node_lin'] = np.ascontiguousarray(g_node)
+  if field_quad:
+    kw['field_quad'] = np.ascontiguousarray(q)
+
+  Mxy = solve_mri_f64(**kw)[0]
+  if not conc:
+    # `Bc_off` is read only inside the concomitant branch, so an offset passed
+    # with `B0 <= 0` used to be silently discarded -- neither applied nor
+    # refused. `BlochSolver` never reaches that state, but only because two
+    # independent gates line up, and this is a public entry point.
+    with pytest.raises(Exception, match='conc_offset'):
+      solve_mri_f64(**{**kw, 'conc_offset': np.full(n_time, conc_off_mT)})
+  got = np.angle(np.asarray(Mxy).reshape(-1))
+  expect = np.angle(np.exp(-1j * gamma * want * dur_ms))
+  err = float(np.abs(np.angle(np.exp(1j * (got - expect)))).max())
+  assert err < 1e-11, (
+      f'conc={conc} node_lin={node_lin} field_quad={field_quad}: the branch '
+      f'is {err:.3e} rad from its closed form, so it is not forming the field '
+      f'its three flags describe')

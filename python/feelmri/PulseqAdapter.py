@@ -2627,25 +2627,18 @@ def b0_readout_terms(field, times_ms, scanner, rotation=None, location=None):
 
   A per-node field rides the phantom instead and is refused here by name.
   """
-  if getattr(field, 'kind', None) == 'nodal':
+  from feelmri.MRObjects import B0Field as _B0Field
+  if not isinstance(field, _B0Field):
     raise TypeError(
-        "b0_readout_terms: this field is a per-node expansion; none of these "
-        "three channels can carry one. It rides the phantom instead -- add "
-        "`B0Field.readout_terms(...).phi_nodal` to `phi_dB0` and pass "
-        "`.node_gradient` to `FEMPhantom.set_b0_gradient`.")
-  b, g, q = field.in_frame_full(rotation=rotation, location=location,
-                                physical=False)
+        f"b0_readout_terms: expected a B0Field, got {type(field).__name__}.")
+  # One implementation, on the field. This used to spell the expansion out a
+  # second time, beside the copy in `Trajectory.b0_terms`, and the two had
+  # already drifted in what the second return value MEANS -- a rate there, a
+  # phase here -- with nothing comparing them.
   t = np.asarray(times_ms, dtype=np.float64)
-  gammabar = scanner.gammabar.m_as('1/ms/mT')
-  gamma = scanner.gamma.m_as('rad/ms/mT')
-  dk = (gammabar * t)[..., None] * g.reshape((1,) * t.ndim + (3,))
-  maxwell = None
-  if np.any(q):
-    # The assembler ADDS `m . monomials` to the phase, and the phase a static
-    # field accrues by time t is `-gamma * dB0 * t`. Laid out
-    # (xx, yy, zz, xy, xz, yz), the order the assembler reads.
-    maxwell = (-gamma * t.reshape(-1, 1)) * np.asarray(q).reshape(1, 6)
-  return dk, gamma * b * t, maxwell
+  dk, phi_rate, maxwell = field.polynomial_readout_terms(
+      t, scanner, rotation=rotation, location=location)
+  return dk, phi_rate * t, maxwell
 
 
 def maxwell_moments_from_kspace(kx, ky, kz, times_ms, scanner) -> np.ndarray:

@@ -585,11 +585,12 @@ public:
                     // adding g.x(t) -- the shape functions interpolate a
                     // PRODUCT of two nodal fields, leaving
                     // (sum N_a g_a).x_q - sum N_a (g_a . x_a), which has
-                    // nothing to do with the motion. Measured on a 6 cm
-                    // element at a 20 mm displacement: 6.7e-02 of the signal
-                    // that way against 2.5e-03 this way, where freezing the
-                    // field costs 1.79e-01. A phantom that does not move takes
-                    // today's line unchanged.
+                    // nothing to do with the motion. That is why the readout
+                    // and the solver spell the same expansion differently;
+                    // the measured cost of each of the three spellings, on a
+                    // 6 cm element at a 20 mm displacement, is in
+                    // `kspace-assembler.md`. A phantom that does not move
+                    // takes today's line unchanged.
                     if (has_b0_grad_ && has_traj) {
                         f_po.head(q_count) = -(phib
                             + g0b * (dx0.head(q_count) - x0b)
@@ -821,11 +822,12 @@ public:
                     // adding g.x(t) -- the shape functions interpolate a
                     // PRODUCT of two nodal fields, leaving
                     // (sum N_a g_a).x_q - sum N_a (g_a . x_a), which has
-                    // nothing to do with the motion. Measured on a 6 cm
-                    // element at a 20 mm displacement: 6.7e-02 of the signal
-                    // that way against 2.5e-03 this way, where freezing the
-                    // field costs 1.79e-01. A phantom that does not move takes
-                    // today's line unchanged.
+                    // nothing to do with the motion. That is why the readout
+                    // and the solver spell the same expansion differently;
+                    // the measured cost of each of the three spellings, on a
+                    // 6 cm element at a 20 mm displacement, is in
+                    // `kspace-assembler.md`. A phantom that does not move
+                    // takes today's line unchanged.
                     if (has_b0_grad_ && has_traj) {
                         f_po.head(q_count) = -(phib
                             + g0b * (dx0.head(q_count) - x0b)
@@ -1070,11 +1072,12 @@ public:
                     // adding g.x(t) -- the shape functions interpolate a
                     // PRODUCT of two nodal fields, leaving
                     // (sum N_a g_a).x_q - sum N_a (g_a . x_a), which has
-                    // nothing to do with the motion. Measured on a 6 cm
-                    // element at a 20 mm displacement: 6.7e-02 of the signal
-                    // that way against 2.5e-03 this way, where freezing the
-                    // field costs 1.79e-01. A phantom that does not move takes
-                    // today's line unchanged.
+                    // nothing to do with the motion. That is why the readout
+                    // and the solver spell the same expansion differently;
+                    // the measured cost of each of the three spellings, on a
+                    // 6 cm element at a 20 mm displacement, is in
+                    // `kspace-assembler.md`. A phantom that does not move
+                    // takes today's line unchanged.
                     if (has_b0_grad_ && has_traj) {
                         f_po.head(q_count) = -(phib
                             + g0b * (dx0.head(q_count) - x0b)

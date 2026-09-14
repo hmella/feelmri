@@ -316,23 +316,18 @@ class Trajectory:
               else float(t_snapshot))
         t = np.asarray(self.times.m_as('ms'), dtype=float) - t0
 
-        b, g, q = field.in_frame_full(
-            rotation=np.asarray(self.MPS_ori, dtype=float), location=self.LOC)
-        gammabar = scanner.gammabar.m_as('1/ms/mT')
-        gamma = scanner.gamma.m_as('rad/ms/mT')
-
-        scale = gammabar * t
+        # The algebra lives on the field, in `polynomial_readout_terms`. It
+        # was spelled out here AND in `PulseqAdapter.b0_readout_terms`, and
+        # two copies of one expansion can drift in the sign, the frame, the
+        # time origin or the dtype with nothing to notice.
+        dk, phi_rate, maxwell = field.polynomial_readout_terms(
+            t, scanner, rotation=np.asarray(self.MPS_ori, dtype=float),
+            location=self.LOC)
         points = tuple(
-            np.ascontiguousarray(self.points[i] + scale * g[i],
-                                 dtype=self.points[i].dtype) for i in range(3))
-
-        maxwell = None
-        if np.any(q):
-            # The assembler ADDS `m . monomials` to the phase, and the phase a
-            # static field accrues by time t is `-gamma * dB0 * t`. Laid out
-            # (xx, yy, zz, xy, xz, yz), which is the order the assembler reads.
-            maxwell = (-gamma * t.reshape(-1, 1)) * q.reshape(1, 6)
-        return points, gamma * b, maxwell
+            np.ascontiguousarray(self.points[i] + dk[..., i].reshape(
+                self.points[i].shape), dtype=self.points[i].dtype)
+            for i in range(3))
+        return points, phi_rate, maxwell
 
     def check_ph_enc_lines(self, ph_samples):
         """Verify that the number of phase-encoding lines is divisible by the multishot factor."""

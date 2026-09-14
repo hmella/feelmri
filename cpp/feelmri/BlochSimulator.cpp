@@ -118,6 +118,18 @@ MagnetizationState<T> solve_mri_impl(
     throw std::invalid_argument(
         "solve_mri: conc_offset must have 0, 1 or n_time entries");
   }
+  // `Bc_off` is read only inside the concomitant branch, which `B0 > 0`
+  // selects -- so with `B0 <= 0` a caller's offset is SILENTLY DISCARDED
+  // rather than applied or refused. `BlochSolver` never reaches that state,
+  // but only because two independent gates happen to line up, and this is a
+  // public entry point. Refused by name instead.
+  if (has_conc_offset && !concomitant) {
+    throw std::invalid_argument(
+        "solve_mri: conc_offset re-centres the concomitant field about "
+        "isocentre and is read only when that term is on, but B0 is not "
+        "positive so the term is off. Pass the scanner's B0, or leave "
+        "conc_offset empty.");
+  }
 
   // A static lab-frame field that is quadratic in position: six coefficients
   // over x^2, y^2, z^2, xy, xz and yz, in the frame `curr` lives in. They do
@@ -344,12 +356,10 @@ MagnetizationState<T> solve_mri_impl(
         // concomitant branch reads as though it covered all four cells and
         // does not: with the concomitant term on it dropped `node_lin`
         // entirely while both Python Magnus seeds kept it, so the first step
-        // of every block carried the shim and the rest did not. Measured on a
-        // G = 0 block, where the concomitant field is identically zero and the
-        // flag must therefore change nothing at all, switching it on moved the
-        // phase by 2.32 rad and left the answer 1.83 from the Eulerian truth
-        // and 1.86 from the frozen one -- neither of the two things it could
-        // legitimately have been.
+        // of every block carried the shim and the rest did not. Eight copies
+        // of one expression is exactly the shape in which a term goes missing
+        // from one of them; every cell is driven against its closed form by
+        // `test_every_kernel_field_branch_reproduces_the_closed_form`.
         if constexpr (Conc) {
           if (has_node_lin) {
             if (has_field_quad) {

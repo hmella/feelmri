@@ -666,22 +666,24 @@ def test_a_per_node_b0_field_survives_mpi_and_dual_partitioning(tmp_path):
   scale = float(np.abs(reference).max())
   assert scale > 0, 'the serial run produced no signal'
 
-  # The GRADIENT has to matter, not merely the field. Comparing against a run
-  # with no field at all passes with the gradient channel disabled on every
-  # rank -- the values still ride `phi_dB0`, every rank count still agrees, and
-  # the test reads green. Verified by mutation: with
-  # `_set_b0_gradient_local` made a no-op this assertion is the one that fires.
-  frozen_out = tmp_path / 'b0_frozen.npz'
+  # The READOUT GRADIENT has to matter, not merely the field. The control arm
+  # differs in that channel and in NOTHING else: it runs the identical
+  # simulation with `_set_b0_gradient_local` disabled. Withholding `b0_field`
+  # instead -- what this used to do -- also removes the field from the Bloch
+  # SOLVE, worth of order a radian here on its own, so the assertion was
+  # satisfied without the readout channel ever being exercised and the
+  # mutation it claimed to have been verified by could not have been run.
+  frozen_out = tmp_path / 'b0_no_readout_grad.npz'
   proc = _run([sys.executable, str(_PULSEQ_RUNNER), '--mesh', str(mesh_path),
                '--seq', str(seq_path), '--output', str(frozen_out),
-               '--b0-nodal', '--b0-frozen', '--pod'], env)
+               '--b0-nodal', '--b0-no-readout-gradient', '--pod'], env)
   assert proc.returncode == 0, proc.stdout.decode(errors='replace')[-4000:]
   frozen = np.load(frozen_out)['kspace']
   moved = float(np.abs(frozen - reference).max() / scale)
   assert moved > 1e-3, (
-      f'following the spins changes k-space by only {moved:.3e} against '
-      f'freezing the field onto the node, so this fixture cannot see whether '
-      f'the GRADIENT survived the redistribution')
+      f'disabling the readout gradient changes k-space by only {moved:.3e}, '
+      f'so this fixture cannot see whether that channel survived the '
+      f'redistribution')
 
   for label in ('mpi2', 'mpi3', 'mpi2_dual'):
     worst = float(np.abs(runs[label] - reference).max() / scale)

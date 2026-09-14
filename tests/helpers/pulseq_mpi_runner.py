@@ -54,11 +54,11 @@ def main() -> int:
                        'Without it `moving` is False, `readout_terms` returns '
                        'no gradient at all, and --b0-nodal exercises only the '
                        'phi_dB0 half.')
-  ap.add_argument('--b0-frozen', action='store_true',
-                  help='with --b0-nodal, install the field VALUES but not the '
-                       'gradient, i.e. the Lagrangian description. The two '
-                       'must differ, or a rank-count comparison passes with '
-                       'the gradient channel disabled on every rank.')
+  ap.add_argument('--b0-no-readout-gradient', action='store_true',
+                  help='with --b0-nodal, run the identical simulation with the '
+                       'READOUT gradient channel disabled and nothing else '
+                       'changed. The two must differ, or a rank-count '
+                       'comparison passes with that channel off everywhere.')
   ap.add_argument('--dual', action='store_true',
                   help='build two partitions instead of one, so every static '
                        'field and magnetization handoff is redistributed')
@@ -101,7 +101,11 @@ def main() -> int:
     return 0
 
   nodes = phantom.local_nodes.astype(np.float64)
-  reach = float(np.abs(nodes).max()) or 1.0
+  # GLOBAL, not this rank's own maximum: every field below is scaled by it, so
+  # a rank-local value makes the serial and the MPI runs describe different
+  # physics and the comparison measures the partition instead of the code.
+  reach = float(comm.allreduce(float(np.abs(nodes).max()),
+                               op=MPI.MAX)) or 1.0
   n = nodes.shape[0]
   phantom.set_static_fields(
       T2=np.full(n, 60.0, dtype=np.float32),
@@ -119,17 +123,17 @@ def main() -> int:
     if field.kind != 'nodal':
       raise SystemExit(f'the fixture must need the per-node rung, '
                        f'got {field.kind}')
-    if args.b0_frozen:
-      # The field frozen onto the node: its values on phi_dB0 and no gradient
-      # at all. `simulate_pulseq` is given no b0_field, so nothing installs one.
-      from feelmri.MRObjects import Scanner as _Scanner
-      gamma = _Scanner().gamma.m_as('rad/ms/mT')
-      nodal = field.nodal_mT(phantom)
-      phantom.set_static_fields(
-          T2=np.full(n, 60.0, dtype=np.float32),
-          phi_dB0=((2.0 * nodes[:, 0] / reach) + gamma * nodal).astype(np.float32))
-    else:
-      extra['b0_field'] = field
+    extra['b0_field'] = field
+    if args.b0_no_readout_gradient:
+      # The control arm for "does the READOUT gradient matter", and it has to
+      # differ in that channel and NOTHING else. Withholding `b0_field`
+      # instead -- which is what this used to do -- also removes the field
+      # from the Bloch solve, worth of order a radian here on its own, so the
+      # comparison was satisfied without the readout channel ever being
+      # exercised. Disabling the one call that installs it is the mutation
+      # the assertion actually claims to make.
+      from feelmri.Phantom import FEMPhantom as _FP
+      _FP._set_b0_gradient_local = lambda self, gradient: None
   if args.pod:
     from feelmri.Motion import POD
     n_frames = 4
@@ -140,14 +144,32 @@ def main() -> int:
     # node's mode with another rank's weights. Measured 1.76e-02 of peak that
     # way against 8.8e-07 this way. `FEMPhantom._signal_modes` refuses it now,
     # but the fixture should be right regardless.
+    #
+    # SPATIALLY VARYING and TIME VARYING, both deliberately. A rigid
+    # translation is the same vector on every node, so redistributing the
+    # modes onto the wrong rows changes nothing and the very mispairing this
+    # fixture exists to expose is invisible; and a displacement that does not
+    # move in time gives the motion raster nothing to resolve. The global node
+    # coordinates supply the spatial variation, so a permuted mode array is a
+    # different displacement field.
+    g_nodes = np.asarray(phantom.global_nodes, dtype=np.float64)
+    g_reach = float(np.abs(g_nodes).max()) or 1.0
+    u = g_nodes / g_reach
+    ts = np.linspace(0.0, 400.0, n_frames)
     disp = np.zeros((phantom.global_shape[0], 3, n_frames), dtype=np.float32)
-    for axis, amp in enumerate((0.30, -0.20, 0.25)):
-      disp[:, axis, :] = amp * reach
-    extra['pod'] = POD(data=disp, times=np.linspace(0.0, 400.0, n_frames),
-                       n_modes=1, is_periodic=True,
+    for k, t in enumerate(ts):
+      phase = 2.0 * np.pi * t / 400.0
+      for axis, amp in enumerate((0.30, -0.20, 0.25)):
+        disp[:, axis, k] = (amp * reach
+                            * (0.4 + 0.6 * np.cos(np.pi * u[:, axis]))
+                            * np.sin(phase + 0.5 * axis))
+    extra['pod'] = POD(data=disp, times=ts, n_modes=3, is_periodic=True,
                        global_to_local=phantom.local_to_global_nodes)
   if args.t2_prime > 0.0:
-    extra = dict(t2_prime=Quantity(args.t2_prime, 'ms'),
+    # MERGED, not reassigned. `extra = dict(...)` silently discarded
+    # `b0_field` and `pod`, so any future case combining `--t2-prime` with
+    # either would have passed with the feature it names switched off.
+    extra.update(t2_prime=Quantity(args.t2_prime, 'ms'),
                  spectral_bins=args.spectral_bins)
   if args.coils > 0:
     # Tied to the node's POSITION, so the map follows the node through the

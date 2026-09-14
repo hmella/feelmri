@@ -60,8 +60,15 @@ CONCOMITANT_DT_GR_MS = 0.01
 # Omega_1 has an O(dt^2) error with nothing to anchor it: measured on a 20 ms
 # gradient-free block under a 12 mm sinusoidal displacement and a 3 mT/m lab
 # gradient, 1.72e-01 rad at dt = 10 ms against 1.27e-03 at 1 ms, and exactly
-# 0.000e+00 at every raster with the field off. Raster cost, paid only when
-# both are on: x1.00 on `epi_v142`, x1.10 on `gre_v15`, x1.75 on `flash_tr_v15`.
+# 0.000e+00 at every raster with the field off.
+#
+# Raster cost, paid only when both are on and set by how coarse the block's
+# own `dt` is: x1.00 on `epi_v142`, x1.10 on `gre_v15`, x1.75 on
+# `flash_tr_v15`. Those are all SHORT-TR sequences. A long block at the
+# adapter's default `dt = 10 ms` is capped to 1 ms throughout, so a 3 s T1
+# recovery or a 5 s inversion delay reaches x9.97-9.98 -- on the step count
+# and on the (n_nodes, n_steps) working set alike. A block whose own `dt` is
+# already at or below the cap is left untouched.
 B0_MOTION_DT_MS = 1.0
 
 

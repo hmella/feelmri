@@ -295,6 +295,46 @@ class B0Field:
                 f"offset={self.offset_mT:.6g} mT, "
                 f"gradient={np.round(self.gradient_mT_per_m, 9)} mT/m)")
 
+    def polynomial_readout_terms(self, times_ms, scanner, rotation=None,
+                                 location=None):
+        """The three readout channels a POLYNOMIAL field needs, in one place.
+
+        Returns ``(dk, phi_rate, maxwell)``: the k-space offset to ADD to each
+        sample, the uniform part as an off-resonance RATE in rad/ms, and
+        ``(N, 6)`` quadratic coefficients to add to whatever the concomitant
+        term contributes -- ``None`` below degree 2.
+
+        `Trajectory.b0_terms` and `PulseqAdapter.b0_readout_terms` are the two
+        callers and both used to spell this out themselves. Two copies of one
+        algebra can drift in the sign, the frame, the time origin or the dtype
+        with nothing to notice, and they had already drifted in what the second
+        return value MEANS -- a rate in one and a phase in the other. The
+        shared form returns the rate; a caller wanting the phase multiplies by
+        its own `t`.
+        """
+        if self.kind == 'nodal':
+            raise TypeError(
+                "polynomial_readout_terms: this field is a per-node "
+                "expansion; none of these three channels can carry one -- a "
+                "k-space shift is linear in position and the six maxwell "
+                "coefficients are quadratic. It rides the phantom instead: "
+                "add `readout_terms(...).phi_nodal` to `phi_dB0` and pass "
+                "`.node_gradient` to `FEMPhantom.set_b0_gradient`.")
+        b, g, q = self.in_frame_full(rotation=rotation, location=location,
+                                     physical=False)
+        t = np.asarray(times_ms, dtype=np.float64)
+        gammabar = scanner.gammabar.m_as('1/ms/mT')
+        gamma = scanner.gamma.m_as('rad/ms/mT')
+        dk = (gammabar * t)[..., None] * np.asarray(g).reshape(
+            (1,) * t.ndim + (3,))
+        maxwell = None
+        if np.any(q):
+            # The assembler ADDS `m . monomials` to the phase, and the phase a
+            # static field accrues by time t is `-gamma * dB0 * t`. Laid out
+            # (xx, yy, zz, xy, xz, yz), the order the assembler reads.
+            maxwell = (-gamma * t.reshape(-1, 1)) * np.asarray(q).reshape(1, 6)
+        return dk, gamma * float(b), maxwell
+
     @staticmethod
     def is_live(field):
         """Whether ``field`` is a non-zero ``B0Field``, agreed across ranks.
@@ -620,17 +660,14 @@ class B0Field:
         # and both are needed for a field written the way a B0 map is written
         # -- a large uniform offset plus a small spatial term:
         #
-        #  * the yardstick becomes the RMS of the VARIATION. Scored against the
-        #    RMS of the values, `1.0 + 1e-3 z` over +-0.1 m fitted at order 0
-        #    with gradient [0, 0, 0], discarding the entire linear term because
-        #    5.99e-05 / 1.0 is under rtol. The constant monomial carries the
-        #    offset exactly at every order, so it cannot belong in the measure
-        #    of what is left to fit.
+        #  * the yardstick becomes the RMS of the VARIATION. Scored against
+        #    the RMS of the VALUES, a small spatial term sits under `rtol`
+        #    purely because the offset is large, and the fit discards it. The
+        #    constant monomial carries the offset exactly at every order, so
+        #    it cannot belong in the measure of what is left to fit.
         #  * the residual stops cancelling. It is formed from the reduced
-        #    `f.f - 2 c.b + c.A.c`, and against an uncentred 1e3 mT offset
-        #    those are ~1e8 while the answer is ~1e-7: the degree-2 fit of a
-        #    linear field then reported a residual of 1.9e-05 mT that is pure
-        #    round-off.
+        #    `f.f - 2 c.b + c.A.c`, and against a large uncentred offset those
+        #    terms dwarf the answer, so what comes back is round-off.
         n_tot = float(p.shape[0])
         fs = float(f.sum())
         pp = float((p * p).sum())
@@ -691,9 +728,8 @@ class B0Field:
                 if sv.size and sv[0] > 0.0 else 0)
             # The point count is not enough: monomials that are linearly
             # dependent ON THESE POINTS make the fit exact and arbitrary off
-            # the sampled manifold. Measured on a coplanar z = 0 cloud,
-            # `x^2 + z^2` fitted at order 2 with residual 0.000e+00 and a zz
-            # coefficient of 0.0 against a truth of 1.0e-03.
+            # the sampled manifold -- a coplanar cloud fits `x^2 + z^2` at
+            # order 2 with a zero residual and a zz coefficient of zero.
             # `order > 0` because degree 0 is the one fit that must always
             # produce an answer: it is a single constant monomial, so a
             # rank-deficient design there means there is nothing to fit at all

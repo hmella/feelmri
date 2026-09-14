@@ -200,6 +200,11 @@ def test_a_field_no_polynomial_can_carry_falls_back_to_the_nodes(tmp_path):
     # the two must reconstruct the same field.
     moving = field.solver_terms(phantom, moving=True)
     assert moving.node_gradient is not None
+    # The per-node rung and the polynomial channels are mutually exclusive:
+    # `quadratic` and `gradient` describe a GLOBAL expansion the kernel hoists
+    # per time step, `node_gradient` a per-node one it reads per node, and the
+    # kernel would add both. Nothing pinned this after the accessor rework.
+    assert moving.gradient is None and moving.quadratic is None
     x = np.asarray(phantom.local_nodes, dtype=np.float64)
     rebuilt = (moving.delta_B.reshape(-1)
                + np.einsum('ij,ij->i', x, moving.node_gradient))
