@@ -322,7 +322,18 @@ class SliceProfile:
         return interp_profile
 
 
-class VelocityEncoding:
+class _DirectionalEncoding:
+    """Direction bookkeeping shared by the encoding classes."""
+
+    def normalize_directions(self):
+        """Normalize each direction vector to unit length in place."""
+        for i in range(self.nb_directions):
+            norm = np.linalg.norm(self.directions[i, :], 2)
+            if norm != 0:
+                self.directions[i, :] /= norm
+
+
+class VelocityEncoding(_DirectionalEncoding):
     """Phase-contrast velocity encoding for MRI signal simulation.
 
     Computes the velocity-induced phase accumulated by spins after a pair of
@@ -356,13 +367,6 @@ class VelocityEncoding:
             self.normalize_directions()
         self.dtype = dtype
 
-    def normalize_directions(self):
-        """Normalize each direction vector to unit length in place."""
-        for i in range(self.nb_directions):
-            norm = np.linalg.norm(self.directions[i, :], 2)
-            if norm != 0:
-                self.directions[i, :] /= norm
-
     def encode(self, velocity, delta_phi=0.0):
         """Compute the velocity-induced phase for each encoding direction.
 
@@ -384,7 +388,7 @@ class VelocityEncoding:
         return phi_v
 
 
-class PositionEncoding:
+class PositionEncoding(_DirectionalEncoding):
     """Position (displacement tagging) encoding for MRI signal simulation.
 
     Computes the displacement-induced phase for one or more encoding
@@ -413,13 +417,6 @@ class PositionEncoding:
         self.nb_directions = directions.shape[0]
         self.normalize_directions()
         self.dtype = dtype
-
-    def normalize_directions(self):
-        """Normalize each direction vector to unit length in place."""
-        for i in range(self.nb_directions):
-            norm = np.linalg.norm(self.directions[i, :], 2)
-            if norm != 0:
-                self.directions[i, :] /= norm
 
     def encode(self, displacement):
         """Compute the displacement-induced phase for each encoding direction.

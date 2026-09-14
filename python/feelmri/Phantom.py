@@ -1604,6 +1604,22 @@ class FEMPhantom:
         return np.ascontiguousarray(
             (flat[:, :, None] * C[:, None, :]).reshape(flat.shape[0], -1))
 
+    @contextmanager
+    def _signal_call(self, kspace_times, pod, maxwell):
+        """The prologue the four signal entry points share.
+
+        Yields the C++ argument tuple that follows ``kspace_points``. The
+        entry points themselves stay separate: they aggregate over assembler
+        groups differently, and merging them counts every node once per group.
+        """
+        if isinstance(pod, list):
+            raise NotImplementedError(
+                "Lists of trajectories must be combined using PODSum before evaluation.")
+        with self._using('signal'):
+            t_cpp, m_x, m_y, m_z, w, has_traj = self._prepare_pod_data(kspace_times, pod)
+            yield (t_cpp, m_x, m_y, m_z, w, has_traj,
+                   self._maxwell_inputs(maxwell, kspace_times))
+
     def mri_signal(self, kspace_points, kspace_times, pod=None,
                    maxwell=None):
         """Compute the MRI k-space signal using the configured assembler(s).
@@ -1627,14 +1643,7 @@ class FEMPhantom:
         np.ndarray
             Complex k-space signal summed over all assembler groups.
         """
-        # Create help to call the correct function
-        if isinstance(pod, list):
-            raise NotImplementedError("Lists of trajectories must be combined using PODSum before evaluation.")
-            
-        with self._using('signal'):
-            t_cpp, m_x, m_y, m_z, w, has_traj = self._prepare_pod_data(kspace_times, pod)
-            mw = self._maxwell_inputs(maxwell, kspace_times)
-
+        with self._signal_call(kspace_times, pod, maxwell) as args:
             eval_helper = []
             for i, a in enumerate(self.assembler):
                 if i == 0 and self.nodal_approximation__:
@@ -1642,8 +1651,7 @@ class FEMPhantom:
                 else:
                     eval_helper.append(a.signal)
 
-            return sum([signal(kspace_points, t_cpp, m_x, m_y, m_z, w, has_traj, mw)
-                        for signal in eval_helper])
+            return sum([signal(kspace_points, *args) for signal in eval_helper])
 
     def signal(self, kspace_points, kspace_times, pod=None,
                    maxwell=None):
@@ -1663,14 +1671,8 @@ class FEMPhantom:
         np.ndarray
             Complex k-space signal.
         """
-        # Added isinstance check to prevent crashes when passing precomputed lists
-        if isinstance(pod, list):
-            raise NotImplementedError("Lists of trajectories must be combined using PODSum before evaluation.")
-        with self._using('signal'):
-            t_cpp, m_x, m_y, m_z, w, has_traj = self._prepare_pod_data(kspace_times, pod)
-            mw = self._maxwell_inputs(maxwell, kspace_times)
-            return sum([a.signal(kspace_points, t_cpp, m_x, m_y, m_z, w, has_traj, mw)
-                        for a in self.assembler])
+        with self._signal_call(kspace_times, pod, maxwell) as args:
+            return sum([a.signal(kspace_points, *args) for a in self.assembler])
 
     def signal_nodal(self, kspace_points, kspace_times, pod=None,
                    maxwell=None):
@@ -1690,18 +1692,13 @@ class FEMPhantom:
         np.ndarray
             Complex k-space signal.
         """
-        if isinstance(pod, list):
-            raise NotImplementedError("Lists of trajectories must be combined using PODSum before evaluation.")
         # Evaluated on ONE group only, for the same reason as ``signal_sum``: every
         # group carries the full node set. Note the mass matrix ``M_`` is assembled
         # from the *small*-element group alone, so on a mesh that splits, this
         # integrates only that group -- use ``mri_signal``, which routes the
         # large-element group through the quadrature path, for the whole mesh.
-        with self._using('signal'):
-            t_cpp, m_x, m_y, m_z, w, has_traj = self._prepare_pod_data(kspace_times, pod)
-            mw = self._maxwell_inputs(maxwell, kspace_times)
-            return self.assembler[0].signal_nodal(kspace_points, t_cpp, m_x, m_y, m_z,
-                                                  w, has_traj, mw)
+        with self._signal_call(kspace_times, pod, maxwell) as args:
+            return self.assembler[0].signal_nodal(kspace_points, *args)
 
     def signal_sum(self, kspace_points, kspace_times, pod=None,
                    maxwell=None):
@@ -1722,13 +1719,8 @@ class FEMPhantom:
             Complex k-space signal.
         """
 
-        if isinstance(pod, list):
-            raise NotImplementedError("Lists of trajectories must be combined using PODSum before evaluation.")
         # Evaluated on ONE group only. Every assembler group is constructed with the
         # rank's *entire* node set (only the element subset differs), so summing this
         # nodal quantity over groups would count each node once per group.
-        with self._using('signal'):
-            t_cpp, m_x, m_y, m_z, w, has_traj = self._prepare_pod_data(kspace_times, pod)
-            mw = self._maxwell_inputs(maxwell, kspace_times)
-            return self.assembler[0].signal_sum(kspace_points, t_cpp, m_x, m_y, m_z,
-                                                w, has_traj, mw)
+        with self._signal_call(kspace_times, pod, maxwell) as args:
+            return self.assembler[0].signal_sum(kspace_points, *args)

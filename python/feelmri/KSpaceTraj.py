@@ -364,6 +364,108 @@ class Trajectory:
         # Synchronize all processes
         MPI_comm.Barrier()
 
+    def _sample_grid(self, enc_time, ro_grad0, ro_grad, dt, kz):
+        """Allocate the k-space arrays and fill the sample times and kz.
+
+        The two in-plane components are the subclass's business -- a
+        phase-encode ladder and a rotated spoke are different geometries --
+        but everything else is shared. Alternate lines are traversed in the
+        opposite direction, so an odd line reads its dwell reversed and
+        starts from where the previous line ended.
+
+        Returns ``(kspace, t)`` with ``kspace[2]`` and ``t`` already filled.
+        """
+        shape = [self.ro_samples, self.ph_samples, self.slices]
+        kspace = (
+            np.zeros(shape, dtype=self.dtype),
+            np.zeros(shape, dtype=self.dtype),
+            np.zeros(shape, dtype=self.dtype),
+        )
+
+        t = np.zeros(shape, dtype=self.dtype)
+        for shot in self.shots:
+            for idx, ph in enumerate(shot):
+                ro = (-1)**idx
+                if idx == 0:
+                    t[::ro, ph, 0] = (
+                        enc_time.m_as('ms') + ro_grad0.dur.m_as('ms')
+                        + ro_grad.slope.m_as('ms') + dt
+                    )
+                else:
+                    t[::ro, ph, 0] = (
+                        t[:, shot[idx - 1]].max()
+                        + ro_grad.slope.m_as('ms') + ro_grad.slope.m_as('ms')
+                        + dt[::ro]
+                    )
+
+        # Fill kz coordinates
+        for s in range(self.slices):
+            kspace[2][:, :, s] = kz[s]
+            t[:, :, s] = t[:, :, 0]
+
+        return kspace, t
+
+    def _plot_gradient_scheme(self, ro_gradients, ph_gradients, enc_gradients):
+        """Draw the readout / phase / encoding gradient scheme for one shot.
+
+        Collective: it ends on a barrier, so every rank must reach it.
+        """
+        if self.plot_seq:
+            if MPI_rank == 0:
+                # plt.rcParams['text.usetex'] = True
+                plt.rcParams.update({'font.size': 16})
+
+                fig, ax = plt.subplots(2, 1, figsize=(8, 4))
+
+                # Phase encoding gradients
+                for gr in ph_gradients:
+                    ax1 = ax[1].plot(gr.timings.m_as('ms'), gr.amplitudes.m_as('mT/m'), 'r-', linewidth=2)
+
+                # Readout gradients
+                for gr in ro_gradients:
+                    ax2 = ax[0].plot(gr.timings.m_as('ms'), gr.amplitudes.m_as('mT/m'), 'b-', linewidth=2)
+
+                # Encoding gradients
+                for gr in enc_gradients:
+                    ax3 = ax[0].plot(gr.timings.m_as('ms'), gr.amplitudes.m_as('mT/m'), 'k--', linewidth=3, zorder=100)
+                    ax4 = ax[1].plot(gr.timings.m_as('ms'), gr.amplitudes.m_as('mT/m'), 'k--', linewidth=3, zorder=100)
+
+                # Add ADC readout
+                for i in range(1, self.lines_per_shot + 1):
+                    a = [
+                        (ro_gradients[i].time + ro_gradients[i].slope).m_as('ms'),
+                        (ro_gradients[i].time + ro_gradients[i].slope + ro_gradients[i].lenc).m_as('ms'),
+                    ]
+                    ax5 = ax[0].plot(a, [0, 0], 'm-', linewidth=4, zorder=101)
+
+                # Set legend labels
+                ax1[0].set_label('PH')
+                ax2[0].set_label('RO')
+                ax5[0].set_label('ADC')
+
+                # Format plots
+                for i in range(len(ax)):
+                    ax[i].hlines(y=[0], xmin=0, xmax=[100], colors=['0.7'], linestyles='solid')
+                    ax[i].tick_params('both', length=5, width=1, which='major', labelsize=16)
+                    ax[i].tick_params('both', length=3, width=1, which='minor', labelsize=16)
+                    ax[i].minorticks_on()
+                    ax[i].set_ylabel('$G~\\mathrm{(mT/m)}$', fontsize=16)
+                    ax[i].axis([
+                        0,
+                        ro_gradients[-1].time.m_as('ms') + ro_gradients[-1].dur.m_as('ms'),
+                        -1.4 * self.Gr_max.m_as('mT/m'),
+                        1.4 * self.Gr_max.m_as('mT/m'),
+                    ])
+                    ax[i].legend(fontsize=14, loc='upper right', ncol=4)
+                ax[1].set_xlabel('$t~\\mathrm{(ms)}$', fontsize=16)
+                plt.tight_layout()
+                plt.show()
+
+            # Synchronize all processes
+            MPI_comm.Barrier()
+
+
+
 
 class CartesianStack(Trajectory):
     """Stack-of-Cartesian k-space trajectory (standard spin-warp or EPI).
@@ -455,59 +557,7 @@ class CartesianStack(Trajectory):
                 blip_grad.calculate(-self.k_bw[1].to('1/m') / self.ph_samples)
                 ph_gradients.append(blip_grad)
 
-        if self.plot_seq:
-            if MPI_rank == 0:
-                # plt.rcParams['text.usetex'] = True
-                plt.rcParams.update({'font.size': 16})
-
-                fig, ax = plt.subplots(2, 1, figsize=(8, 4))
-
-                # Phase encoding gradients
-                for gr in ph_gradients:
-                    ax1 = ax[1].plot(gr.timings.m_as('ms'), gr.amplitudes.m_as('mT/m'), 'r-', linewidth=2)
-
-                # Readout gradients
-                for gr in ro_gradients:
-                    ax2 = ax[0].plot(gr.timings.m_as('ms'), gr.amplitudes.m_as('mT/m'), 'b-', linewidth=2)
-
-                # Encoding gradients
-                for gr in enc_gradients:
-                    ax3 = ax[0].plot(gr.timings.m_as('ms'), gr.amplitudes.m_as('mT/m'), 'k--', linewidth=3, zorder=100)
-                    ax4 = ax[1].plot(gr.timings.m_as('ms'), gr.amplitudes.m_as('mT/m'), 'k--', linewidth=3, zorder=100)
-
-                # Add ADC readout
-                for i in range(1, self.lines_per_shot + 1):
-                    a = [
-                        (ro_gradients[i].time + ro_gradients[i].slope).m_as('ms'),
-                        (ro_gradients[i].time + ro_gradients[i].slope + ro_gradients[i].lenc).m_as('ms'),
-                    ]
-                    ax5 = ax[0].plot(a, [0, 0], 'm-', linewidth=4, zorder=101)
-
-                # Set legend labels
-                ax1[0].set_label('PH')
-                ax2[0].set_label('RO')
-                ax5[0].set_label('ADC')
-
-                # Format plots
-                for i in range(len(ax)):
-                    ax[i].hlines(y=[0], xmin=0, xmax=[100], colors=['0.7'], linestyles='solid')
-                    ax[i].tick_params('both', length=5, width=1, which='major', labelsize=16)
-                    ax[i].tick_params('both', length=3, width=1, which='minor', labelsize=16)
-                    ax[i].minorticks_on()
-                    ax[i].set_ylabel('$G~\\mathrm{(mT/m)}$', fontsize=16)
-                    ax[i].axis([
-                        0,
-                        ro_gradients[-1].time.m_as('ms') + ro_gradients[-1].dur.m_as('ms'),
-                        -1.4 * self.Gr_max.m_as('mT/m'),
-                        1.4 * self.Gr_max.m_as('mT/m'),
-                    ])
-                    ax[i].legend(fontsize=14, loc='upper right', ncol=4)
-                ax[1].set_xlabel('$t~\\mathrm{(ms)}$', fontsize=16)
-                plt.tight_layout()
-                plt.show()
-
-            # Synchronize all processes
-            MPI_comm.Barrier()
+        self._plot_gradient_scheme(ro_gradients, ph_gradients, enc_gradients)
 
         # Time needed to acquire one line
         # It depends on the k-space bandwidth, the gyromagnetic constant, and
@@ -519,12 +569,6 @@ class CartesianStack(Trajectory):
         ky = self.ky_extent[0].m_as('1/m') * np.ones(kx.shape)
         kz = np.linspace(self.kz_extent[0].m_as('1/m'), self.kz_extent[1].m_as('1/m'), self.slices)
 
-        kspace = (
-            np.zeros([self.ro_samples, self.ph_samples, self.slices], dtype=self.dtype),
-            np.zeros([self.ro_samples, self.ph_samples, self.slices], dtype=self.dtype),
-            np.zeros([self.ro_samples, self.ph_samples, self.slices], dtype=self.dtype),
-        )
-
         # Build shots locations
         for ph in range(self.ph_samples):
             if self.shot_coverage == "partial":
@@ -533,7 +577,7 @@ class CartesianStack(Trajectory):
                 self.shots[ph % self.nb_shots][ph // self.nb_shots] = ph
 
         # kspace times and locations
-        t = np.zeros([self.ro_samples, self.ph_samples, self.slices], dtype=self.dtype)
+        kspace, t = self._sample_grid(enc_time, ro_grad0, ro_grad, dt, kz)
         for shot in self.shots:
             for idx, ph in enumerate(shot):
 
@@ -545,24 +589,6 @@ class CartesianStack(Trajectory):
                 kspace[1][::ro, ph, :] = np.tile(
                     ky[:, None] + self.k_spa[1].m_as('1/m') * ph, [1, self.slices]
                 )
-
-                # Update timings
-                if idx == 0:
-                    t[::ro, ph, 0] = (
-                        enc_time.m_as('ms') + ro_grad0.dur.m_as('ms')
-                        + ro_grad.slope.m_as('ms') + dt
-                    )
-                else:
-                    t[::ro, ph, 0] = (
-                        t[:, shot[idx - 1]].max()
-                        + ro_grad.slope.m_as('ms') + ro_grad.slope.m_as('ms')
-                        + dt[::ro]
-                    )
-
-        # Fill kz coordinates
-        for s in range(self.slices):
-            kspace[2][:, :, s] = kz[s]
-            t[:, :, s] = t[:, :, 0]
 
         # Calculate echo time
         self.echo_time = (enc_time + ro_grad0.dur + 0.5 * self.lines_per_shot * ro_grad.dur).to('ms')
@@ -665,59 +691,7 @@ class RadialStack(Trajectory):
                 blip_grad.calculate(-self.k_bw[1].to('1/m') / self.ph_samples)
                 ph_gradients.append(blip_grad)
 
-        if self.plot_seq:
-            if MPI_rank == 0:
-                # plt.rcParams['text.usetex'] = True
-                plt.rcParams.update({'font.size': 16})
-
-                fig, ax = plt.subplots(2, 1, figsize=(8, 4))
-
-                # Phase encoding gradients
-                for gr in ph_gradients:
-                    ax1 = ax[1].plot(gr.timings.m_as('ms'), gr.amplitudes.m_as('mT/m'), 'r-', linewidth=2)
-
-                # Readout gradients
-                for gr in ro_gradients:
-                    ax2 = ax[0].plot(gr.timings.m_as('ms'), gr.amplitudes.m_as('mT/m'), 'b-', linewidth=2)
-
-                # Encoding gradients
-                for gr in enc_gradients:
-                    ax3 = ax[0].plot(gr.timings.m_as('ms'), gr.amplitudes.m_as('mT/m'), 'k--', linewidth=3, zorder=100)
-                    ax4 = ax[1].plot(gr.timings.m_as('ms'), gr.amplitudes.m_as('mT/m'), 'k--', linewidth=3, zorder=100)
-
-                # Add ADC readout
-                for i in range(1, self.lines_per_shot + 1):
-                    a = [
-                        (ro_gradients[i].time + ro_gradients[i].slope).m_as('ms'),
-                        (ro_gradients[i].time + ro_gradients[i].slope + ro_gradients[i].lenc).m_as('ms'),
-                    ]
-                    ax5 = ax[0].plot(a, [0, 0], 'm-', linewidth=4, zorder=101)
-
-                # Set legend labels
-                ax1[0].set_label('PH')
-                ax2[0].set_label('RO')
-                ax5[0].set_label('ADC')
-
-                # Format plots
-                for i in range(len(ax)):
-                    ax[i].hlines(y=[0], xmin=0, xmax=[100], colors=['0.7'], linestyles='solid')
-                    ax[i].tick_params('both', length=5, width=1, which='major', labelsize=16)
-                    ax[i].tick_params('both', length=3, width=1, which='minor', labelsize=16)
-                    ax[i].minorticks_on()
-                    ax[i].set_ylabel('$G~\\mathrm{(mT/m)}$', fontsize=16)
-                    ax[i].axis([
-                        0,
-                        ro_gradients[-1].time.m_as('ms') + ro_gradients[-1].dur.m_as('ms'),
-                        -1.4 * self.Gr_max.m_as('mT/m'),
-                        1.4 * self.Gr_max.m_as('mT/m'),
-                    ])
-                    ax[i].legend(fontsize=14, loc='upper right', ncol=4)
-                ax[1].set_xlabel('$t~\\mathrm{(ms)}$', fontsize=16)
-                plt.tight_layout()
-                plt.show()
-
-            # Synchronize all processes
-            MPI_comm.Barrier()
+        self._plot_gradient_scheme(ro_gradients, ph_gradients, enc_gradients)
 
         # Time needed to acquire one line
         # It depends on the k-space bandwidth, the gyromagnetic constant, and
@@ -732,12 +706,6 @@ class RadialStack(Trajectory):
 
         ky = np.zeros(kx.shape)
         kz = np.linspace(self.kz_extent[0].m_as('1/m'), self.kz_extent[1].m_as('1/m'), self.slices)
-
-        kspace = (
-            np.zeros([self.ro_samples, self.ph_samples, self.slices], dtype=self.dtype),
-            np.zeros([self.ro_samples, self.ph_samples, self.slices], dtype=self.dtype),
-            np.zeros([self.ro_samples, self.ph_samples, self.slices], dtype=self.dtype),
-        )
 
         # Build shots locations
         for ph in range(self.ph_samples):
@@ -754,7 +722,7 @@ class RadialStack(Trajectory):
             theta = np.array([np.mod((2 * np.pi - 2 * np.pi / GR) * n, 2 * np.pi) for n in range(self.ph_samples)])
 
         # kspace times and locations
-        t = np.zeros([self.ro_samples, self.ph_samples, self.slices], dtype=self.dtype)
+        kspace, t = self._sample_grid(enc_time, ro_grad0, ro_grad, dt, kz)
         for shot in self.shots:
             for idx, ph in enumerate(shot):
 
@@ -770,24 +738,6 @@ class RadialStack(Trajectory):
                     -kx[:, None] * np.sin(theta[ph]) + ky[:, None] * np.cos(theta[ph]),
                     [1, self.slices],
                 )
-
-                # Update timings
-                if idx == 0:
-                    t[::ro, ph, 0] = (
-                        enc_time.m_as('ms') + ro_grad0.dur.m_as('ms')
-                        + ro_grad.slope.m_as('ms') + dt
-                    )
-                else:
-                    t[::ro, ph, 0] = (
-                        t[:, shot[idx - 1]].max()
-                        + ro_grad.slope.m_as('ms') + ro_grad.slope.m_as('ms')
-                        + dt[::ro]
-                    )
-
-        # Fill kz coordinates
-        for s in range(self.slices):
-            kspace[2][:, :, s] = kz[s]
-            t[:, :, s] = t[:, :, 0]
 
         # Calculate echo time
         if self.full_spoke:

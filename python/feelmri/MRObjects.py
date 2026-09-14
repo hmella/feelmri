@@ -1696,14 +1696,6 @@ class Gradient:
                 self.lenc = Quantity(0.0, "ms")
                 self.strength = (area / self.slope).to(self.Gr_max.u)
 
-                if self.strength > self.Gr_max:
-                    raise ValueError(
-                        f"Cannot achieve area={area} in dur={dur}: "
-                        f"G={self.strength} > Gmax={self.Gr_max}"
-                    )
-
-                self.dur = dur
-
             # Case B: plateau needed
             else:
                 self.slope = slope_max
@@ -1712,34 +1704,32 @@ class Gradient:
                     self.Gr_max.u
                 )
 
-                if self.strength > self.Gr_max:
-                    raise ValueError(
-                        f"Cannot achieve area={area} in dur={dur}: "
-                        f"G={self.strength} > Gmax={self.Gr_max}"
-                    )
+            if self.strength > self.Gr_max:
+                raise ValueError(
+                    f"Cannot achieve area={area} in dur={dur}: "
+                    f"G={self.strength} > Gmax={self.Gr_max}"
+                )
 
-                self.dur = dur
+            self.dur = dur
 
         else:
             # Minimal duration case
-            slope_min = slope_max
-            area_max = slope_min * self.Gr_max.to("mT/m")
+            area_max = slope_max * self.Gr_max.to("mT/m")
 
-            # Pure triangular
+            # Pure triangular: it reaches its peak and turns straight round,
+            # so there is no plateau.
             if area <= area_max:
                 ratio = (area / area_max).m
-                self.slope = (slope_min * np.sqrt(ratio)).to("ms")
+                self.slope = (slope_max * np.sqrt(ratio)).to("ms")
                 self.strength = (
                     self.Gr_max * np.sqrt(ratio)
                 ).to(self.Gr_max.u)
-                self.lenc = (
-                    self.slope - slope_min * np.sqrt(ratio)
-                ).to("ms")
+                self.lenc = Quantity(0.0, "ms")
 
             # Plateau required
             else:
                 area_needed = area - area_max
-                self.slope = slope_min
+                self.slope = slope_max
                 self.strength = self.Gr_max
                 self.lenc = (area_needed / self.Gr_max).to("ms")
 
@@ -2025,17 +2015,23 @@ class RF:
         # Construct complex B1 with real magnitude (exact original)
         B1 = B1e + 1j*0
 
-        # Apply phase + frequency offsets
-        if self.phase_offset.m != 0.0 or self.frequency_offset.m != 0.0:
-            # The frequency term is NEGATED: the solver precesses as
-            # exp(-i*gamma*Bz*t), so an RF modulated as exp(+i*2*pi*df*t)
-            # resonates at z = -df/(gammabar*Gz), the mirror of the slice
-            # Pulseq means. Every writer sets freq_offset = gammabar*Gz*z to
-            # select the slice at +z, so a positive offset selects positive z.
-            B1 *= np.exp(1j*(self.phase_offset.m_as('rad')
-                            - 2*np.pi*self.frequency_offset.m_as('kHz')*t_shift))
+        B1 = self._apply_offsets(B1, t_shift)
 
         return B1
+
+    def _apply_offsets(self, B1, t_shift):
+        """Apply the transmit phase and frequency offsets to a waveform.
+
+        The frequency term is NEGATED: the solver precesses as
+        exp(-i*gamma*Bz*t), so an RF modulated as exp(+i*2*pi*df*t) would
+        resonate at z = -df/(gammabar*Gz), the mirror of the slice Pulseq
+        means. Every writer sets freq_offset = gammabar*Gz*z to select the
+        slice at +z, so a positive offset must select positive z.
+        """
+        if self.phase_offset.m == 0.0 and self.frequency_offset.m == 0.0:
+            return B1
+        return B1 * np.exp(1j*(self.phase_offset.m_as('rad')
+                               - 2*np.pi*self.frequency_offset.m_as('kHz')*t_shift))
 
     def _unit_hard(self, t):
         """Generate a hard (rectangular) RF pulse."""
@@ -2043,14 +2039,7 @@ class RF:
         B1e = 1.0 * self._window(t)
         B1 = B1e + 1j*0
 
-        if self.phase_offset.m != 0.0 or self.frequency_offset.m != 0.0:
-            # The frequency term is NEGATED: the solver precesses as
-            # exp(-i*gamma*Bz*t), so an RF modulated as exp(+i*2*pi*df*t)
-            # resonates at z = -df/(gammabar*Gz), the mirror of the slice
-            # Pulseq means. Every writer sets freq_offset = gammabar*Gz*z to
-            # select the slice at +z, so a positive offset selects positive z.
-            B1 *= np.exp(1j*(self.phase_offset.m_as('rad')
-                            - 2*np.pi*self.frequency_offset.m_as('kHz')*t_shift))
+        B1 = self._apply_offsets(B1, t_shift)
 
         return B1
 

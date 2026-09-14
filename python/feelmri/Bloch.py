@@ -693,12 +693,10 @@ class SequenceBlock:
             for i, obj in enumerate(objects):
                 for t, amp in obj:
                     if titles[i] == 'RF':
-                        for t, amp in obj:
-                            ax[i].plot(t, np.real(amp), label='Real', color='b')
-                            ax[i].plot(t, np.imag(amp), label='Imaginary', color='r')
+                        ax[i].plot(t, np.real(amp), label='Real', color='b')
+                        ax[i].plot(t, np.imag(amp), label='Imaginary', color='r')
                     else:
-                        for t, amp in obj:
-                            ax[i].plot(t, amp, color='b')
+                        ax[i].plot(t, amp, color='b')
                 ax[i].set_ylabel(titles[i])
                 ax[i].set_xlim([self.time_extent[0].m, self.time_extent[1].m])
 

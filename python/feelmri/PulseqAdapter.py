@@ -166,20 +166,31 @@ def read_version(io) -> Version:
 # Definitions & signature
 # ---------------------------------------------------------------------------
 
+def _section_rows(io):
+    """Yield the whitespace-split rows of a section body.
+
+    Stops at end of file or at the blank line that separates this section
+    from the next, leaving anything after it for the caller. A reader that
+    breaks out early leaves the remainder unconsumed, exactly as the
+    hand-written loops did.
+    """
+    while True:
+        line = io.readline()
+        if not line:
+            return
+        parts = line.split()
+        if not parts:
+            return
+        yield parts
+
+
 def read_definitions(io) -> Dict[str, Any]:
     """
     Read the [DEFINITIONS] section as a dict of key->value(s).
     Numeric tokens become floats if parseable.
     """
     defs: Dict[str, Any] = {}
-    while True:
-        line = io.readline()
-        if not line:
-            break
-        parts = line.split()
-        if not parts:
-            # break on whitespace / blank line
-            break
+    for parts in _section_rows(io):
         key = parts[0]
         value_tokens = parts[1:]
         parsed = [_to_float_or_str(tok) for tok in value_tokens]
@@ -202,13 +213,7 @@ def read_signature(io) -> str:
     Read the [SIGNATURE] section and return the 'Hash' value, if present.
     """
     signature = ""
-    while True:
-        line = io.readline()
-        if not line:
-            break
-        parts = line.split()
-        if not parts:
-            break
+    for parts in _section_rows(io):
         key = parts[0]
         if key == "Hash":
             value_tokens = parts[1:]
@@ -291,13 +296,7 @@ def read_events(io, scale: List[float],
     scale_arr = np.array(scale, dtype=float)
     has_str_col = bool(np.any(np.isnan(scale_arr)))
 
-    while True:
-        line = io.readline()
-        if not line:
-            break
-        parts = line.split()
-        if not parts:
-            break
+    for parts in _section_rows(io):
         if len(parts) != n_vals + 1:
             # A short row ends the section: the table is over.
             break
@@ -332,13 +331,7 @@ def read_labels(io, event_library: Optional[Dict[int, Dict[str, Any]]] = None
     if event_library is None:
         event_library = {}
 
-    while True:
-        line = io.readline()
-        if not line:
-            break
-        parts = line.split()
-        if not parts:
-            break
+    for parts in _section_rows(io):
         if len(parts) < 3:
             break
         eid = int(float(parts[0]))
@@ -386,13 +379,7 @@ def read_extension_blocks(io, event_library: Optional[Dict[int, Dict[str, Any]]]
     if event_library is None:
         event_library = {}
 
-    while True:
-        line = io.readline()
-        if not line:
-            break
-        parts = line.split()
-        if not parts:
-            break
+    for parts in _section_rows(io):
         if len(parts) < 4:
             break
         eid = int(float(parts[0]))
@@ -2323,6 +2310,31 @@ def _flatten_gradients(source):
   return [g for block in blocks for g in block.gradients]
 
 
+def _second_moment_increments(h, G):
+  """Per-segment increments of the four concomitant moments.
+
+  Exact on each piecewise-linear segment:
+    integral A^2 dt  = h (A0^2 + A0 A1 + A1^2)/3
+    integral A B dt  = h (2 A0 B0 + A0 B1 + A1 B0 + 2 A1 B1)/6
+
+  ``h`` is the per-segment dwell and ``G`` the (N, 3) gradient at the segment
+  corners, so ``h.size == G.shape[0] - 1``.
+  """
+  A0, A1 = G[:-1], G[1:]
+  square = h[:, None] * (A0 * A0 + A0 * A1 + A1 * A1) / 3.0
+
+  def _cross(i, j):
+    return h * (2.0 * A0[:, i] * A0[:, j] + A0[:, i] * A1[:, j]
+                + A1[:, i] * A0[:, j] + 2.0 * A1[:, i] * A1[:, j]) / 6.0
+
+  increment = np.empty((h.size, 4), dtype=float)
+  increment[:, 0] = square[:, 0] + square[:, 1]
+  increment[:, 1] = square[:, 2]
+  increment[:, 2] = _cross(0, 2)
+  increment[:, 3] = _cross(1, 2)
+  return increment
+
+
 def maxwell_moments(source, t0_ms: float, sample_times_ms,
                     rotation=None) -> np.ndarray:
   """Time-integrated gradient products that drive the concomitant field.
@@ -2421,25 +2433,47 @@ def maxwell_moments(source, t0_ms: float, sample_times_ms,
       raise ValueError(f"maxwell_moments: rotation must be 3x3, got {R.shape}")
     G = G @ R.T
 
-  # Exact on each piecewise-linear segment:
-  #   integral A^2 dt  = h (A0^2 + A0 A1 + A1^2)/3
-  #   integral A B dt  = h (2 A0 B0 + A0 B1 + A1 B0 + 2 A1 B1)/6
   h = np.diff(grid)
-  A0, A1 = G[:-1], G[1:]
-  square = h[:, None] * (A0 * A0 + A0 * A1 + A1 * A1) / 3.0
-
-  def _cross(i, j):
-    return h * (2.0 * A0[:, i] * A0[:, j] + A0[:, i] * A1[:, j]
-                + A1[:, i] * A0[:, j] + 2.0 * A1[:, i] * A1[:, j]) / 6.0
-
-  increment = np.empty((h.size, 4), dtype=float)
-  increment[:, 0] = square[:, 0] + square[:, 1]
-  increment[:, 1] = square[:, 2]
-  increment[:, 2] = _cross(0, 2)
-  increment[:, 3] = _cross(1, 2)
+  increment = _second_moment_increments(h, G)
 
   cumulative = np.vstack((np.zeros((1, 4)), np.cumsum(increment, axis=0)))
   return cumulative[np.searchsorted(grid, times)]
+
+
+def _maxwell_moments_array(moments, who: str) -> np.ndarray:
+  """Validate and return the (N, 4) moment array."""
+  m = np.asarray(moments, dtype=float)
+  if m.ndim != 2 or m.shape[1] != 4:
+    raise ValueError(f"{who}: expected (N, 4) moments, got {m.shape}")
+  return m
+
+
+def _maxwell_form(m: np.ndarray, scanner, who: str):
+  """The concomitant quadratic form and its ``-gamma / (2 B0)`` scale.
+
+  The sign convention, the 1/4 and the 1/B0 live here and nowhere else.
+  ``who`` names the caller so each guard still reports itself: a refusal that
+  cannot say which check fired is not coverage.
+
+  Call this only where the caller has decided the term is live -- the B0
+  refusal fires here, so hoisting it past an early return would refuse a
+  configuration that previously did no work at all.
+  """
+  gamma = scanner.gamma.m_as('rad/ms/mT')
+  B0 = scanner.field_strength.m_as('mT')
+  if not B0 > 0:
+    raise ValueError(
+        f"{who}: the concomitant term scales as 1/B0, so a zero or negative "
+        f"field strength ({scanner.field_strength}) is undefined, not merely "
+        f"weak.")
+
+  a, b, c, d = m[:, 0], m[:, 1], m[:, 2], m[:, 3]
+  form = np.zeros((m.shape[0], 3, 3), dtype=float)
+  form[:, 0, 0] = form[:, 1, 1] = 0.25 * b
+  form[:, 2, 2] = a
+  form[:, 0, 2] = form[:, 2, 0] = -0.5 * c
+  form[:, 1, 2] = form[:, 2, 1] = -0.5 * d
+  return form, -gamma / (2.0 * B0)
 
 
 def maxwell_phase_coefficients(moments, scanner, rotation=None) -> np.ndarray:
@@ -2474,24 +2508,8 @@ def maxwell_phase_coefficients(moments, scanner, rotation=None) -> np.ndarray:
   is zero, and the six coefficients collapse to the four the field naturally
   has.
   """
-  m = np.asarray(moments, dtype=float)
-  if m.ndim != 2 or m.shape[1] != 4:
-    raise ValueError(
-        f"maxwell_phase_coefficients: expected (N, 4) moments, got {m.shape}")
-  gamma = scanner.gamma.m_as('rad/ms/mT')
-  B0 = scanner.field_strength.m_as('mT')
-  if not B0 > 0:
-    raise ValueError(
-        f"maxwell_phase_coefficients: the concomitant term scales as 1/B0, so "
-        f"a zero or negative field strength ({scanner.field_strength}) is "
-        f"undefined, not merely weak.")
-
-  a, b, c, d = m[:, 0], m[:, 1], m[:, 2], m[:, 3]
-  form = np.zeros((m.shape[0], 3, 3), dtype=float)
-  form[:, 0, 0] = form[:, 1, 1] = 0.25 * b
-  form[:, 2, 2] = a
-  form[:, 0, 2] = form[:, 2, 0] = -0.5 * c
-  form[:, 1, 2] = form[:, 2, 1] = -0.5 * d
+  m = _maxwell_moments_array(moments, "maxwell_phase_coefficients")
+  form, scale = _maxwell_form(m, scanner, "maxwell_phase_coefficients")
   if rotation is not None:
     R = np.asarray(rotation, dtype=float)
     if R.shape != (3, 3):
@@ -2500,7 +2518,6 @@ def maxwell_phase_coefficients(moments, scanner, rotation=None) -> np.ndarray:
     # phi = x_phys^T M x_phys with x_phys = R x_assembler.
     form = np.einsum('ki,nkl,lj->nij', R, form, R)
 
-  scale = -gamma / (2.0 * B0)
   out = np.empty((m.shape[0], 6), dtype=float)
   out[:, 0] = scale * form[:, 0, 0]          # x^2
   out[:, 1] = scale * form[:, 1, 1]          # y^2
@@ -2534,10 +2551,7 @@ def maxwell_recentre(moments, scanner, rotation=None, location=None):
   same vector :meth:`FEMPhantom.orient` was given. ``None`` or zero returns
   zeros, so an acquisition at isocentre pays nothing and stays bit-identical.
   """
-  m = np.asarray(moments, dtype=float)
-  if m.ndim != 2 or m.shape[1] != 4:
-    raise ValueError(
-        f"maxwell_recentre: expected (N, 4) moments, got {m.shape}")
+  m = _maxwell_moments_array(moments, "maxwell_recentre")
   n = m.shape[0]
   if location is None:
     return np.zeros((n, 3)), np.zeros(n)
@@ -2545,20 +2559,7 @@ def maxwell_recentre(moments, scanner, rotation=None, location=None):
   if not np.any(L):
     return np.zeros((n, 3)), np.zeros(n)
 
-  gamma = scanner.gamma.m_as('rad/ms/mT')
-  B0 = scanner.field_strength.m_as('mT')
-  if not B0 > 0:
-    raise ValueError(
-        f"maxwell_recentre: the concomitant term scales as 1/B0, so a zero or "
-        f"negative field strength ({scanner.field_strength}) is undefined.")
-
-  a, b, c, d = m[:, 0], m[:, 1], m[:, 2], m[:, 3]
-  form = np.zeros((n, 3, 3), dtype=float)
-  form[:, 0, 0] = form[:, 1, 1] = 0.25 * b
-  form[:, 2, 2] = a
-  form[:, 0, 2] = form[:, 2, 0] = -0.5 * c
-  form[:, 1, 2] = form[:, 2, 1] = -0.5 * d
-  scale = -gamma / (2.0 * B0)
+  form, scale = _maxwell_form(m, scanner, "maxwell_recentre")
 
   # F L in physical coordinates, then into the frame the assembler's nodes are
   # in. Only the LINEAR term takes the rotation; the uniform one is a scalar.
@@ -2673,18 +2674,7 @@ def maxwell_moments_from_kspace(kx, ky, kz, times_ms, scanner) -> np.ndarray:
   G = np.gradient(k, t, axis=0) / gammabar
 
   h = np.diff(t)
-  A0, A1 = G[:-1], G[1:]
-  square = h[:, None] * (A0 * A0 + A0 * A1 + A1 * A1) / 3.0
-
-  def _cross(i, j):
-    return h * (2.0 * A0[:, i] * A0[:, j] + A0[:, i] * A1[:, j]
-                + A1[:, i] * A0[:, j] + 2.0 * A1[:, i] * A1[:, j]) / 6.0
-
-  increment = np.empty((h.size, 4), dtype=float)
-  increment[:, 0] = square[:, 0] + square[:, 1]
-  increment[:, 1] = square[:, 2]
-  increment[:, 2] = _cross(0, 2)
-  increment[:, 3] = _cross(1, 2)
+  increment = _second_moment_increments(h, G)
   return np.vstack((np.zeros((1, 4)), np.cumsum(increment, axis=0)))
 
 

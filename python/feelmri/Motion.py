@@ -22,6 +22,28 @@ from feelmri.MPIUtilities import MPI_print, MPI_rank
 from feelmri.PODHelper import tensordot_modes_weights
 
 
+def _check_n_modes(n_modes, n_max: int, default: int = None) -> int:
+    """Resolve a mode count against its upper bound, or refuse it."""
+    n = default if n_modes is None else int(n_modes)
+    if n < 1 or n > n_max:
+        raise ValueError(f"n_modes must lie in [1, {n_max}], got {n}.")
+    return n
+
+
+def _flat_snapshots(data: np.ndarray, remove_mean: bool):
+    """Flatten snapshots to ``(-1, T)`` float64 and optionally de-mean.
+
+    The copy matters: ``remove_mean`` would otherwise write through the
+    reshape view into the caller's array.
+    """
+    data = np.asarray(data)
+    n_tsteps = data.shape[-1]
+    flat_sv = data.reshape(-1, n_tsteps).astype(np.float64, copy=True)
+    if remove_mean:
+        flat_sv -= np.mean(flat_sv, axis=1, keepdims=True)
+    return flat_sv, n_tsteps
+
+
 def _snapshot_eigenspectrum(flat_sv: np.ndarray):
     """Eigen-decompose the snapshot covariance, largest eigenvalue first.
 
@@ -702,10 +724,7 @@ class POD:
             Value in ``(0, 1]``. Its complement is the relative squared
             reconstruction error of the truncated field.
         """
-        n = self.n_modes if n_modes is None else int(n_modes)
-        if n < 1 or n > self.n_modes_max:
-            raise ValueError(
-                f"n_modes must lie in [1, {self.n_modes_max}], got {n}.")
+        n = _check_n_modes(n_modes, self.n_modes_max, self.n_modes)
         return float(self.energy[n - 1])
 
     def cumulative_energy(self) -> np.ndarray:
@@ -777,10 +796,7 @@ class POD:
             Relative error per snapshot time, shape ``(T,)``. Entries lie
             in ``[0, 1]``; an all-zero snapshot reports 0.
         """
-        n = self.n_modes if n_modes is None else int(n_modes)
-        if n < 1 or n > self.n_modes_max:
-            raise ValueError(
-                f"n_modes must lie in [1, {self.n_modes_max}], got {n}.")
+        n = _check_n_modes(n_modes, self.n_modes_max, self.n_modes)
         return _frame_errors(self.eigenvalues, self._eigenvectors, n)
 
 
@@ -969,14 +985,7 @@ def pod_energy_spectrum(data: np.ndarray, *, remove_mean: bool = False):
     modes_for_energy : Invert the curve for a target energy.
     POD.energy_ratio : Same quantity from an existing POD.
     """
-    data = np.asarray(data)
-    n_tsteps = data.shape[-1]
-    # Copy: remove_mean would otherwise write through the reshape view
-    # into the caller's array.
-    flat_sv = data.reshape(-1, n_tsteps).astype(np.float64, copy=True)
-
-    if remove_mean:
-        flat_sv -= np.mean(flat_sv, axis=1, keepdims=True)
+    flat_sv, _ = _flat_snapshots(data, remove_mean)
 
     eigen_values, _ = _snapshot_eigenspectrum(flat_sv)
 
@@ -1038,16 +1047,8 @@ def pod_frame_errors(data: np.ndarray, n_modes: int, *,
     --------
     POD.frame_errors : Same curve from an existing POD.
     """
-    data = np.asarray(data)
-    n_tsteps = data.shape[-1]
-
-    n = int(n_modes)
-    if n < 1 or n > n_tsteps:
-        raise ValueError(f"n_modes must lie in [1, {n_tsteps}], got {n}.")
-
-    flat_sv = data.reshape(-1, n_tsteps).astype(np.float64, copy=True)
-    if remove_mean:
-        flat_sv -= np.mean(flat_sv, axis=1, keepdims=True)
+    flat_sv, n_tsteps = _flat_snapshots(data, remove_mean)
+    n = _check_n_modes(n_modes, n_tsteps)
 
     eigen_values, eigen_vectors = _snapshot_eigenspectrum(flat_sv)
 
