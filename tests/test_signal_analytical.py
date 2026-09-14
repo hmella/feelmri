@@ -2206,6 +2206,15 @@ def test_the_signal_paths_refuse_an_assembler_with_no_static_fields(
   with pytest.raises(RuntimeError, match='set_static_fields'):
     getattr(phantom, path_name)(list(pts), t, None)
 
+  # And the hole the guard above is one function too late to close: a T2 and
+  # phi_dB0 pair that agree with EACH OTHER but not with the node count is
+  # indexed by element connectivity inside `set_static_fields` itself, so it
+  # reads out of bounds before any signal path runs. Refused by the node
+  # count now; without that check this call dumps core.
+  short = np.full(n - 1, 50.0, dtype=np.float32)
+  with pytest.raises(Exception, match=f'{n} nodes'):
+    phantom.assembler[0].set_static_fields(short, np.zeros_like(short))
+
 
 def test_a_per_node_field_and_the_maxwell_channel_compose_in_one_readout(
         tmp_path):

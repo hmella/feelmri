@@ -304,3 +304,56 @@ def test_wrong_length_ownership_mask_raises(tmp_path):
   n = phantom.local_nodes.shape[0]
   with pytest.raises(RuntimeError, match='set_node_ownership'):
     phantom.assembler[0].set_node_ownership(np.ones(n + 7, dtype=np.float32))
+
+
+def test_layout_bound_state_is_dropped_when_the_layout_changes(tmp_path):
+  """Everything keyed to a partition has to die with it, and three things did
+  not: the per-node B0 gradient, and both mode caches.
+
+  The gradient is the one with teeth. `simulate_pulseq` reads it back in a
+  `finally` to restore a caller's own, so a copy left over from a dead layout
+  is either reinstalled against nodes that no longer exist -- silently, whenever
+  the row count happens to match -- or raises from inside that `finally`,
+  replacing a good result with a row-count complaint.
+
+  The mode caches are keyed on `(id(pod), partition, LOCAL node count)`, so a
+  stale entry survives on exactly the ranks whose count did not change. Those
+  ranks then hit the cache and skip `_signal_modes`, which is COLLECTIVE, while
+  the others miss and enter it -- a strict subset of ranks inside an Alltoallv,
+  the hang this module is written to avoid.
+
+  `set_assembler` counts too: it builds fresh assemblers, which carry no
+  gradient, so a remembered copy would describe a channel that is not
+  installed.
+  """
+  phantom = _graded_phantom(tmp_path)
+  phantom.set_assembler(voxel_size=5.0, lorder=1, horder=2,
+                        nodal_approximation=False, lumped=False)
+  n = phantom.local_nodes.shape[0]
+  phantom.set_static_fields(np.full(n, 50.0), np.zeros(n))
+  phantom.set_b0_gradient(np.tile([1.0e-4, -2.0e-4, 3.0e-4], (n, 1)))
+  assert phantom._b0_gradient is not None
+  # Tagged with the layout it was captured in: a row count alone does not
+  # identify one, since two layouts can hold the same number of nodes on a
+  # rank and a different set of them.
+  assert phantom._b0_gradient_partition == getattr(
+      phantom, '_active_partition', None)
+  phantom.__dict__['_mode_array_cache'] = {('stale',): 'x'}
+  phantom.__dict__['_signal_modes_cache'] = {0: 'x'}
+
+  phantom.distribute_mesh()
+
+  assert phantom._b0_gradient is None
+  assert phantom._b0_gradient_partition is None
+  assert '_mode_array_cache' not in phantom.__dict__
+  assert '_signal_modes_cache' not in phantom.__dict__
+
+  # And again for the assembler rebuild, which drops the C++ side.
+  phantom.set_assembler(voxel_size=5.0, lorder=1, horder=2,
+                        nodal_approximation=False, lumped=False)
+  n = phantom.local_nodes.shape[0]
+  phantom.set_static_fields(np.full(n, 50.0), np.zeros(n))
+  phantom.set_b0_gradient(np.tile([1.0e-4, -2.0e-4, 3.0e-4], (n, 1)))
+  phantom.set_assembler(voxel_size=5.0, lorder=1, horder=4,
+                        nodal_approximation=False, lumped=False)
+  assert phantom._b0_gradient is None

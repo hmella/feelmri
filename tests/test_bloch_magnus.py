@@ -47,7 +47,8 @@ from feelmri import (
   FEMPhantom,
   Scanner,
 )
-from feelmri.Bloch import Sequence, SequenceBlock, lineshape_bins
+from feelmri.Bloch import (Sequence, SequenceBlock, lineshape_bins,
+                           B0_MOTION_DT_MS)
 from feelmri.MRObjects import RF, Gradient
 
 from _phantom_fixtures import make_minimal_tet_mesh, make_1d_rod_mesh
@@ -2630,6 +2631,27 @@ def test_a_gradient_free_block_resolves_the_motion_under_a_lab_field():
     assert gap(run(dt_ms, False), converged_off) == 0.0, (
         'a gradient-free block with no lab field must compose exactly under '
         'any subdivision, and it no longer does')
+
+  # `_motion_raster` guards its `block.dt` read with `except AttributeError`,
+  # so it declares that it accepts a block without one -- and then read `dt`
+  # and `dt_rf` again OUTSIDE that guard to build the tolerance, raising the
+  # exception it had just swallowed. Every step it reads goes through the same
+  # accessor now. Both objects below are exactly what the guard promises to
+  # tolerate; before the fix each raised `AttributeError`.
+  solver = BlochSolver.__new__(BlochSolver)
+  coarse = np.arange(0.0, 50.0, 10.0)
+
+  class _NoDt:
+    pass
+
+  class _BareFloatDt:
+    dt, dt_rf = 10.0, 0.01          # plain floats, no `.m_as`
+
+  for blk in (_NoDt(), _BareFloatDt()):
+    out = np.asarray(solver._motion_raster(blk, coarse))
+    assert float(np.diff(out).max()) <= B0_MOTION_DT_MS + 1e-9, (
+        f'{type(blk).__name__} was accepted but its raster still steps '
+        f'{float(np.diff(out).max()):.3g} ms, above the cap')
 
 
 def _linear_displacement_pod(n_nodes, shift, n_frames=6, dur_ms=5.0):

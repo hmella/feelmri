@@ -3266,7 +3266,7 @@ def simulate_pulseq(seq_path,
   PulseqSimulation
   """
   from feelmri.Bloch import BlochSolver, apply_demodulation
-  from feelmri.MPIUtilities import gather_data
+  from feelmri.MPIUtilities import gather_data, MPI_print
 
   if scanner is None:
     scanner = Scanner()
@@ -3290,6 +3290,7 @@ def simulate_pulseq(seq_path,
   # way `previous_sensitivity` is, so a temporary one put on here is removed
   # and theirs comes back rather than being cleared to None.
   previous_gradient = getattr(phantom, '_b0_gradient', None)
+  previous_gradient_layout = getattr(phantom, '_b0_gradient_partition', None)
 
   # The temporary sensitivity map is removed in the finally below, so a
   # readout that raises does not leave it on the caller's phantom.
@@ -3308,8 +3309,11 @@ def simulate_pulseq(seq_path,
     # `dB0(x0) - g.x0` on `delta_B`; the two differ deliberately, see
     # `FEMPhantom.set_b0_gradient`.)
     b0_field = solver_kwargs.get('b0_field', None)
-    # Reduced, not rank-local: see `B0Field.is_zero_everywhere`.
-    if b0_field is not None and b0_field.is_zero_everywhere():
+    # Reduced, and reached from every rank: see `B0Field.is_live`. Spelled
+    # here as a short-circuiting `and`, a rank with no field would skip the
+    # allreduce the others are inside.
+    from feelmri.MRObjects import B0Field as _B0FieldLive
+    if not _B0FieldLive.is_live(b0_field):
       b0_field = None
     b0_nodal = b0_field is not None and b0_field.kind == 'nodal'
     b0_phi_nodal = None
@@ -3517,7 +3521,19 @@ def simulate_pulseq(seq_path,
   finally:
     if b0_phi_nodal is not None:
       # Cleared unconditionally: a stale per-node gradient left on the phantom
-      # is a wrong image with no symptom. The caller's own is then restored.
+      # is a wrong image with no symptom. The caller's own is then restored --
+      # but only into the layout it was captured in. A `finally` that raises
+      # replaces a good result, or the exception already propagating, with a
+      # row-count complaint about the restore, so a gradient that no longer
+      # describes the live partition is dropped with a warning instead.
+      live = getattr(phantom, '_active_partition', None)
+      if previous_gradient is not None and previous_gradient_layout != live:
+        MPI_print("[simulate_pulseq] WARNING: the caller's per-node B0 "
+                  "gradient was built under the '{}' layout and '{}' is live; "
+                  "it has been cleared rather than paired with the wrong "
+                  "nodes. Call set_b0_gradient again.".format(
+                      previous_gradient_layout, live))
+        previous_gradient = None
       phantom.set_b0_gradient(previous_gradient)
       if b0_static_set:
         phantom.set_static_fields(*remembered)

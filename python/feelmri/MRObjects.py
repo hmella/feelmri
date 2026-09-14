@@ -270,12 +270,47 @@ class B0Field:
         # A per-node field carries a zero coefficient vector, so the polynomial
         # spelling below renders it as an indistinguishable null field.
         if self.kind == 'nodal':
+            # A rank can own no nodes, and `max()` on an empty array raises.
+            # This fires on exactly those ranks, so a log line on all of them
+            # aborts a strict subset and the rest block at the next collective.
+            peak = (float(np.abs(self._nodal_mT).max())
+                    if self._nodal_mT.size else 0.0)
             return (f"B0Field(kind='nodal', nodes={self._nodal_mT.size}, "
-                    f"peak={np.abs(self._nodal_mT).max():.6g} mT, "
+                    f"peak={peak:.6g} mT, "
                     f"within-element residual={self.mesh_residual_mT:.3g} mT)")
         return (f"B0Field(kind={self.kind!r}, order={self.order}, "
                 f"offset={self.offset_mT:.6g} mT, "
                 f"gradient={np.round(self.gradient_mT_per_m, 9)} mT/m)")
+
+    @staticmethod
+    def is_live(field):
+        """Whether ``field`` is a non-zero ``B0Field``, agreed across ranks.
+
+        Both reductions are reached unconditionally, which is the whole point.
+        Spelling this at the call site as ``field is not None and not
+        field.is_zero_everywhere()`` short-circuits, so a rank whose field is
+        ``None`` never enters the ``allreduce`` the others are inside and they
+        block there forever. A field present on some ranks only is an error in
+        its own right -- it describes one scanner -- so it is refused by name
+        rather than left to deadlock at the next collective.
+        """
+        from feelmri.MPIUtilities import MPI_comm, collective_raise
+
+        here = field is not None
+        present = (MPI_comm.allgather(here) if MPI_comm.Get_size() > 1
+                   else [here])
+        mismatch = ''
+        if any(present) and not all(present):
+            absent = [r for r, ok in enumerate(present) if not ok]
+            mismatch = (f"BlochSolver: a `b0_field` was given on some ranks "
+                        f"and not on others (absent on rank(s) {absent}). It "
+                        f"describes one scanner, so every rank must build it.")
+        # Uniform by construction -- every rank formed it from the same
+        # gathered list -- so this is safe to reach from every rank.
+        collective_raise(mismatch)
+        if not all(present):
+            return False
+        return not field.is_zero_everywhere()
 
     @property
     def is_zero(self):
@@ -537,17 +572,31 @@ class B0Field:
         Fitting a gathered map per rank would let ranks disagree and the solve
         would be silently inconsistent.
         """
-        from feelmri.MPIUtilities import MPI_comm
+        from feelmri.MPIUtilities import MPI_comm, collective_raise
 
+        if max_order is not None and int(max_order) < 0:
+            raise ValueError(
+                f"B0Field.fit: max_order={max_order} tries no degree at all. "
+                f"Pass 0 or more, or leave it unset for the class cap.")
         p = np.asarray(points_m, dtype=np.float64).reshape(-1, 3)
         values = expression(p)
         if isinstance(values, Quantity):
             values = values.m_as('mT')
         f = np.asarray(values, dtype=np.float64).reshape(-1)
-        if f.size != p.shape[0]:
-            raise ValueError(
+        # Collected, not raised on the spot: both counts are rank-local, so an
+        # expression that returns a fixed length matches on one rank only and
+        # a bare raise there strands the others in the reductions below.
+        rows = ("" if f.size == p.shape[0] else
                 f"B0Field.fit: the expression returned {f.size} values for "
                 f"{p.shape[0]} points; it must map (N, 3) positions to (N,).")
+        # Gated on `collective`, which promises this call makes none: an
+        # ungated `collective_raise` allgathers whenever the size is > 1, so a
+        # rank that fits locally would pair that allgather with whatever the
+        # others reach next and every later collective reads corrupted data.
+        if collective:
+            collective_raise(rows)
+        elif rows:
+            raise ValueError(rows)
 
         max_order = cls.MAX_ORDER if max_order is None else int(max_order)
         # The fit is done on the field with its MEAN REMOVED, and the mean is
@@ -607,7 +656,12 @@ class B0Field:
             # the sampled manifold. Measured on a coplanar z = 0 cloud,
             # `x^2 + z^2` fitted at order 2 with residual 0.000e+00 and a zz
             # coefficient of 0.0 against a truth of 1.0e-03.
-            if rank < n_terms:
+            # `order > 0` because degree 0 is the one fit that must always
+            # produce an answer: it is a single constant monomial, so a
+            # rank-deficient design there means there is nothing to fit at all
+            # -- an empty point cloud -- and the honest result is the uniform
+            # field at the mean, not an unpack of `best` that is still None.
+            if order > 0 and rank < n_terms:
                 blocked = (order, f"the degree-{order} monomials are linearly "
                                   f"dependent on these points (rank {rank} of "
                                   f"{n_terms}), so the fit would be exact on "
@@ -670,7 +724,9 @@ class B0Field:
             gap, span = cls._holdout_residual(expression, phantom, nodes, fitted,
                                               kwargs.get('collective', True))
             rtol = float(kwargs.get('rtol', 1.0e-3))
-            if span > 0.0 and gap > max(rtol, cls.EXACT_RTOL) * span:
+            # `span is None` means no rank had the connectivity to check with,
+            # so the fit is UNVERIFIED rather than verified clean.
+            if span is not None and span > 0.0 and gap > rtol * span:
                 # The fit reproduces every node and does not generalise. A
                 # coarse structured mesh is the ordinary way in: 27 nodes on a
                 # 3 x 3 x 3 lattice carry only THREE distinct values per axis,
@@ -762,11 +818,14 @@ class B0Field:
             raise TypeError(
                 f"B0Field.node_gradient: this field is a {self.kind} expansion, "
                 f"which has no per-node gradient.")
+        from feelmri.MPIUtilities import collective_raise
         stamp = self._node_stamp(phantom)
-        if stamp != self._nodal_stamp:
-            raise ValueError(
-                f"B0Field.node_gradient: sampled on a different node set "
-                f"({self._nodal_stamp}) from the one asking for it ({stamp}).")
+        # The stamp is built from this rank's own nodes, so a repartition can
+        # move it on some ranks only. Collected, for the same reason as above.
+        collective_raise(
+            "" if stamp == self._nodal_stamp else
+            f"B0Field.node_gradient: sampled on a different node set "
+            f"({self._nodal_stamp}) from the one asking for it ({stamp}).")
         g = self._nodal_grad
         if not physical and rotation is not None:
             g = g @ np.asarray(rotation, dtype=np.float64)
@@ -788,15 +847,32 @@ class B0Field:
         """
         from feelmri.MPIUtilities import MPI_comm, collective_raise
 
-        if gradient is not None:
+        # Which BRANCH is taken decides how many collectives this call makes
+        # -- the analytic one below makes none, the finite-difference path
+        # three -- so the ranks have to agree on it before either runs.
+        analytic = gradient is not None
+        if collective and MPI_comm.Get_size() > 1:
+            seen = MPI_comm.allgather(analytic)
+            collective_raise(
+                "" if all(seen) or not any(seen) else
+                "B0Field: an analytic `gradient=` was supplied on some ranks "
+                "and not on others; it describes one field and must be the "
+                "same callable everywhere.")
+        if analytic:
             g = gradient(points)
             if isinstance(g, Quantity):
                 g = g.m_as('mT/m')
             g = np.asarray(g, dtype=np.float64).reshape(-1, 3)
-            if g.shape[0] != points.shape[0]:
-                raise ValueError(
+            # Collected: `points.shape[0]` is this rank's node count, so a
+            # gradient that returns a fixed length matches on exactly one rank
+            # and the rest walk on into the next collective.
+            rows = ("" if g.shape[0] == points.shape[0] else
                     f"B0Field: the gradient returned {g.shape[0]} rows for "
                     f"{points.shape[0]} points; it must map (N, 3) to (N, 3).")
+            if collective:
+                collective_raise(rows)
+            elif rows:
+                raise ValueError(rows)
             return g
 
         # Scaled to the cloud, not absolute. A fixed 1e-4 m is a tenth of a
@@ -842,7 +918,16 @@ class B0Field:
                 f"is not differentiable -- a lookup, a step, or interpolated "
                 f"data. Pass an analytic `gradient=`, or put the field on "
                 f"`delta_B`, which needs no derivative.")
-        collective_raise(problem, ValueError)
+        # Gated, like every other guard here: `collective=False` promises this
+        # call makes none, and `collective_raise` allgathers whenever the size
+        # is > 1. Ungated it desynchronises the ranks that took this branch
+        # from the ones that did not, and the NEXT allgather then returns each
+        # rank its own value paired with someone else's -- silently, so the
+        # corruption surfaces somewhere unrelated.
+        if collective:
+            collective_raise(problem, ValueError)
+        elif problem:
+            raise ValueError(problem)
         return g
 
     @classmethod
@@ -865,18 +950,33 @@ class B0Field:
         # would skip the allreduce its peers are already inside, and the others
         # block in it for ever.
         elems = getattr(phantom, 'local_elements', None)
-        gap, lo, hi = 0.0, 0.0, 0.0
-        if elems is not None and len(elems) > 0:
+        have = elems is not None and len(elems) > 0
+        # IDENTITIES for the reductions, not zeros. A rank that owns no
+        # elements has no opinion about the field's range, and contributing
+        # 0.0 to a MIN and a MAX makes the span straddle zero: on a field that
+        # does not -- a shim written as a large uniform offset plus a small
+        # spatial term, which is how this class documents them -- the span is
+        # then inflated by the whole offset and the threshold below cannot
+        # fire. Measured on a 1 ppm shim at 1.5 T, 1.8e-04 mT of real
+        # variation was reported as 5.0 mT.
+        gap, lo, hi = 0.0, np.inf, -np.inf
+        if have:
             centroids = nodes[np.asarray(elems)].mean(axis=1)
             truth = cls._sample(expression, centroids)
             gap = float(np.abs(
                 truth - np.asarray(fitted(centroids)).reshape(-1)).max())
-            lo = float(truth.min()) if truth.size else 0.0
-            hi = float(truth.max()) if truth.size else 0.0
+            if truth.size:
+                lo, hi = float(truth.min()), float(truth.max())
         if collective:
             gap = MPI_comm.allreduce(gap, op=MPI.MAX)
             lo = MPI_comm.allreduce(lo, op=MPI.MIN)
             hi = MPI_comm.allreduce(hi, op=MPI.MAX)
+            have = bool(MPI_comm.allreduce(have, op=MPI.LOR))
+        # No connectivity ANYWHERE means the guard could not run, which is not
+        # the same as having run and found nothing. `on_phantom` is told so
+        # rather than reading a zero span as a clean bill of health.
+        if not have:
+            return gap, None
         return gap, hi - lo
 
     @classmethod

@@ -35,6 +35,28 @@ pymetis_ncommon = {
 }
 
 
+def _per_rank_decompositions(pod):
+    """Names of the components of `pod` whose decomposition is per rank.
+
+    Only a `POD` has a decomposition to get wrong: built without
+    `global_to_local` it runs its SVD on this rank's slice, so its modes carry
+    a normalisation its weights undo and neither survives being moved to
+    another rank. A trajectory that carries no decomposition is safe by
+    construction -- `RespiratoryMotion` broadcasts ONE direction vector to
+    every node, so any permutation of it is itself -- and a `PODSum` is exactly
+    as safe as its children, which is why this recurses rather than asking for
+    an attribute the sum does not have.
+    """
+    children = [c for c in (getattr(pod, 'pod1', None),
+                            getattr(pod, 'pod2', None)) if c is not None]
+    if children:
+        return [name for c in children for name in _per_rank_decompositions(c)]
+    if (hasattr(pod, 'local_to_global_map')
+            and pod.local_to_global_map is None):
+        return [type(pod).__name__]
+    return []
+
+
 class FEMPhantom:
     """Finite element mesh phantom for MRI signal simulation.
 
@@ -461,6 +483,25 @@ class FEMPhantom:
         # after a create_submesh -- silently wrong signal at MPI_size > 1.
         self.__dict__.pop('_own_mask_cache', None)
         self.__dict__.pop('_redist_cache', None)
+        # Both mode caches are keyed on the LOCAL node count, so a stale entry
+        # survives a repartition on the ranks whose count happens not to have
+        # changed. Those ranks then hit the cache and skip `_signal_modes`
+        # entirely while the others miss and enter it -- and `_signal_modes`
+        # is collective, so a strict subset of ranks reaches an Alltoallv.
+        self.__dict__.pop('_mode_array_cache', None)
+        self.__dict__.pop('_signal_modes_cache', None)
+        # Per local node, like the receive map, and read back by
+        # `simulate_pulseq` to restore a caller's own gradient. Kept, it is
+        # reinstalled against nodes that no longer exist -- silently when the
+        # row count happens to match, and otherwise as a raise from inside a
+        # `finally`, which destroys a successful run's return value.
+        if getattr(self, '_b0_gradient', None) is not None:
+            self._b0_gradient = None
+            self._b0_gradient_partition = None
+            MPI_print("[FEMPhantom] WARNING: the per-node B0 gradient was "
+                      "built against the previous partition and has been "
+                      "cleared. Call set_b0_gradient again after "
+                      "repartitioning.")
 
     # ------------------------------------------------------------------
     # Multiple simultaneous partitions
@@ -836,24 +877,33 @@ class FEMPhantom:
         #
         # Only reachable here: without dual partitioning the modes never cross
         # a rank boundary, and at one rank local IS global.
-        if (getattr(pod, 'local_to_global_map', None) is None
-                and MPI_size > 1):
-            collective_raise(
-                "FEMPhantom: this trajectory was built without "
-                "`global_to_local`, so its decomposition is per rank -- each "
-                "rank's modes carry its own normalisation. Dual partitioning "
-                "redistributes them between ranks, which pairs a node's mode "
-                "with another rank's weights. Build it from the GLOBAL "
-                "snapshots with `global_to_local=phantom.local_to_global_nodes`, "
-                "the way every shipped example does.")
+        #
+        # Computed as a message and raised UNCONDITIONALLY. Inside the branch
+        # that found it, a rank with a clean trajectory walks on into the
+        # `redistribute_nodal` below while the others block in the allgather.
+        offenders = _per_rank_decompositions(pod) if MPI_size > 1 else []
+        collective_raise(
+            "" if not offenders else
+            f"FEMPhantom: {' and '.join(sorted(set(offenders)))} in this "
+            "trajectory was built without `global_to_local`, so its "
+            "decomposition is per rank -- each rank's modes carry its own "
+            "normalisation. Dual partitioning redistributes them between "
+            "ranks, which pairs a node's mode with another rank's weights. "
+            "Build it from the GLOBAL snapshots with "
+            "`global_to_local=phantom.local_to_global_nodes`, the way every "
+            "shipped example does.")
         cache = self.__dict__.setdefault('_signal_modes_cache', {})
         key = id(pod)
         if key not in cache:
             n_bloch = self._partitions['bloch']['_local_to_global_nodes'].size
             modes = np.asarray(pod.get_modes(n_bloch), dtype=np.float32)
-            cache[key] = np.ascontiguousarray(
-                self.redistribute_nodal(modes, 'bloch', 'signal'))
-        return cache[key]
+            # The trajectory is held alongside its modes for the reason
+            # `_cached_mode_arrays` spells out: a collected object frees its
+            # `id`, and the next one allocated at that address would be handed
+            # these modes.
+            cache[key] = (pod, np.ascontiguousarray(
+                self.redistribute_nodal(modes, 'bloch', 'signal')))
+        return cache[key][1]
 
     def quadrature_cost_weights(self, voxel_size, lorder=1, horder=1, cost_ratio=47.0,
                                 nodal_approximation=False):
@@ -1260,6 +1310,15 @@ class FEMPhantom:
         print("[Assembler] Rank {:d} has {:d}/{:d} elements with size < {:f}".format(
             MPI_rank, len(small), len(self.local_elem_size), voxel_size))
         self.assembler = []
+        # The new assemblers carry no B0 gradient, so the remembered copy would
+        # claim a channel that is not installed -- and `simulate_pulseq` reads
+        # it back to restore a caller's own. Dropped with the assemblers.
+        if getattr(self, '_b0_gradient', None) is not None:
+            self._b0_gradient = None
+            self._b0_gradient_partition = None
+            MPI_print("[FEMPhantom] WARNING: the per-node B0 gradient was "
+                      "dropped with the previous assemblers. Call "
+                      "set_b0_gradient again after set_assembler.")
 
         for d in [(small, lorder), (large, horder)]:
             size, order = d
@@ -1479,6 +1538,7 @@ class FEMPhantom:
         # a temporary field of its own and has to put back whatever was there.
         if gradient is None:
             self._b0_gradient = None
+            self._b0_gradient_partition = None
             empty = np.zeros((0, 3), dtype=np.float64)
             return self._set_b0_gradient_local(empty)
 
@@ -1502,6 +1562,11 @@ class FEMPhantom:
         collective_raise(problem)
 
         self._b0_gradient = np.array(g, copy=True)
+        # TAGGED with the layout it was captured in. The row count alone does
+        # not identify a layout -- the bloch and signal partitions can hold the
+        # same number of nodes on a rank and a different set of them -- so an
+        # untagged array is silently reinstallable against the wrong nodes.
+        self._b0_gradient_partition = getattr(self, '_active_partition', None)
         if getattr(self, '_dual', False) and self._active_partition != 'signal':
             g = self.redistribute_nodal(np.ascontiguousarray(g), 'bloch', 'signal')
             with self._using('signal'):

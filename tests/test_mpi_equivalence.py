@@ -489,7 +489,10 @@ def test_a_rank_asymmetric_refusal_does_not_hang(tmp_path):
 @pytest.mark.requires_mpi
 @pytest.mark.timeout(240)
 @pytest.mark.parametrize('case', ['static_fields', 'update_mag', 'b1_map',
-                                  'coil_map', 'b0_gradient'])
+                                  'coil_map', 'b0_gradient',
+                                  'b0_field_present', 'b0_expression_rows',
+                                  'b0_gradient_rows',
+                                  'signal_modes_per_rank'])
 def test_every_per_node_refusal_reaches_every_rank(tmp_path, case):
   """Three more refusals whose condition is true on a SUBSET of ranks, each
   sitting upstream of a collective. All three hung.
@@ -508,6 +511,20 @@ def test_every_per_node_refusal_reaches_every_rank(tmp_path, case):
     node lives on one rank, and the setter redistributes.
   - `b0_gradient`: the scanner field's per-node Eulerian channel, the same
     shape as `coil_map` and upstream of the same Alltoallv.
+
+  Four more from the pass after that, every one of them added by the audit
+  that was fixing this same class:
+
+  - `b0_field_present`: `field is not None and field.is_zero_everywhere()`
+    SHORT-CIRCUITS, so a rank with no field skipped the allreduce the others
+    were inside. Two call sites had it, in the solver and in the adapter.
+  - `b0_expression_rows`: the expression's own row count is per rank, checked
+    with a bare raise upstream of `fit`'s reductions.
+  - `b0_gradient_rows`: the same for an analytic `gradient=`, raised 40 lines
+    above the `collective_raise` written to prevent it.
+  - `signal_modes_per_rank`: the per-rank-POD refusal was written INSIDE the
+    branch that found the problem, so a rank holding a correctly built
+    trajectory walked on into `redistribute_nodal`'s Alltoallv.
 
   The timeout is the assertion: before the fix none of these came back.
   """

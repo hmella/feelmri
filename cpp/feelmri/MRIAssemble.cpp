@@ -124,6 +124,17 @@ public:
                 "set_static_fields: T2 has " + std::to_string(T2.size()) +
                 " entries and phi_dB0 has " + std::to_string(phi_dB0.size()) +
                 "; they describe the same nodes and must agree.");
+        // Against the NODE COUNT as well, not only against each other. The
+        // interpolation loop below reads `inv_T2(elems_(e, a))` with no bound
+        // of its own, so a consistent pair of the wrong length is an
+        // out-of-bounds read inside this function -- before
+        // `require_static_fields` can ever see it.
+        if (T2.size() != static_cast<Eigen::Index>(nb_nodes_))
+            throw std::invalid_argument(
+                "set_static_fields: " + std::to_string(T2.size()) +
+                " entries for " + std::to_string(nb_nodes_) + " nodes. They "
+                "are indexed by element connectivity, so a short array is "
+                "read out of bounds and a long one pairs the wrong nodes.");
         for (Eigen::Index i = 0; i < T2.size(); ++i)
         {
             if (!feelmri_is_positive(T2(i)))
@@ -320,6 +331,12 @@ public:
     /// array out of bounds -- and under `-DEIGEN_NO_DEBUG` that is not an
     /// assertion, it is a segmentation fault. Reproduced on every one of the
     /// three paths by calling `signal_*` straight after `set_assembler`.
+    /// Note the guard is inert when the partition is EMPTY: a zero-length
+    /// array then matches a zero node count and nothing is thrown. That is
+    /// harmless -- the loops it protects run zero iterations -- but it means a
+    /// rank owning no nodes does not enforce what its peers do, so this cannot
+    /// be the only check. `Phantom.set_static_fields` validates collectively
+    /// upstream, which is what makes a rank-local throw here safe.
     void require_static_fields(const char* who) const
     {
         if (f_nodes_invT2_.size() != nb_nodes_

@@ -123,6 +123,20 @@ def apply_demodulation(signal, phase):
     return out * factor
 
 
+def _step_ms(block, name, default=0.0):
+    """``block.<name>`` in ms, or ``default`` when the block does not carry it.
+
+    The raster helpers read several step attributes off a block and must agree
+    with each other about which of them are optional. Reading one through a
+    ``try`` and the next bare leaves the guard describing a tolerance the
+    function does not have.
+    """
+    try:
+        return float(getattr(block, name).m_as('ms'))
+    except AttributeError:
+        return default
+
+
 def _raster_tolerance(*steps):
     """Collapse tolerance for a block, below every step it means to take.
 
@@ -1627,16 +1641,14 @@ class BlochSolver:
         """
         if not block.gradients:
             return times_ms
-        try:
-            if float(block.dt_gr.m_as('ms')) > 0.0:
-                return times_ms
-        except AttributeError:
-            pass
+        if _step_ms(block, 'dt_gr') > 0.0:
+            return times_ms
         extra = [t for t in (_sloped_segment_times(g, CONCOMITANT_DT_GR_MS)
                              for g in block.gradients) if t.size]
         if not extra:
             return times_ms
-        tol = _raster_tolerance(block.dt.m_as('ms'), block.dt_rf.m_as('ms'),
+        tol = _raster_tolerance(_step_ms(block, 'dt'),
+                                _step_ms(block, 'dt_rf'),
                                 CONCOMITANT_DT_GR_MS)
         merged = _collapse_near_duplicates(
             np.sort(np.concatenate([times_ms] + extra)), tol)
@@ -1656,23 +1668,33 @@ class BlochSolver:
 
         Built LOCALLY and never written back, for the reason `_ramp_raster`
         gives. A block whose own `dt` is already at or below the cap is left
-        alone: the caller has chosen a raster.
+        alone: the caller has chosen a raster. An explicit `dt_gr` is NOT a
+        reason to bail out the way it is in `_ramp_raster` -- that is a
+        gradient sub-raster and says nothing about how finely the motion is
+        sampled -- but it does enter the collapse tolerance below.
         """
         t = np.asarray(times_ms, dtype=np.float64)
         if t.size < 2:
             return times_ms
-        try:
-            if float(block.dt.m_as('ms')) <= B0_MOTION_DT_MS:
-                return times_ms
-        except AttributeError:
-            pass
-        tol = _raster_tolerance(block.dt.m_as('ms'), block.dt_rf.m_as('ms'),
-                                B0_MOTION_DT_MS)
+        dt_ms = _step_ms(block, 'dt')
+        if 0.0 < dt_ms <= B0_MOTION_DT_MS:
+            return times_ms
+        # `dt_gr` belongs in the tolerance even though it is not a reason to
+        # bail out: `_discretization` built this raster knowing about it, so
+        # leaving it out here yields a LARGER tolerance than the one that
+        # placed the points and the collapse below deletes legitimate ones.
+        tol = _raster_tolerance(dt_ms, _step_ms(block, 'dt_rf'),
+                                _step_ms(block, 'dt_gr'), B0_MOTION_DT_MS)
         gaps = np.diff(t)
         if float(gaps.max()) <= B0_MOTION_DT_MS + tol:
             return times_ms
+        # The same `cap + tol` the early-out uses. Deciding "fine enough" and
+        # "how many sub-steps" on predicates that differ by `tol` splits a gap
+        # in two whenever some OTHER gap in the block happens to be coarse.
         extra = []
         for a, b, gap in zip(t[:-1], t[1:], gaps):
+            if gap <= B0_MOTION_DT_MS + tol:
+                continue
             n_sub = int(np.ceil(gap / B0_MOTION_DT_MS))
             if n_sub > 1:
                 extra.append(np.linspace(a, b, n_sub + 1)[1:-1])
@@ -1701,11 +1723,13 @@ class BlochSolver:
         # attribute.
         b0_offset_mT, b0_gradient = 0.0, None
         b0_delta_B, b0_quad, b0_node_lin = None, None, None
-        # Reduced, not rank-local: on a per-node field `is_zero` reads the
-        # local slice and can disagree between ranks, and it decides which
-        # kernel channels this rank passes.
-        if (self.b0_field is not None
-                and not self.b0_field.is_zero_everywhere()):
+        # Reduced, not rank-local, and the reduction is reached from EVERY
+        # rank: on a per-node field `is_zero` reads the local slice and can
+        # disagree between ranks, and it decides which kernel channels this
+        # rank passes. `B0Field.is_live` owns both reductions; a bare
+        # `is not None and ...` here would short-circuit past them.
+        from feelmri.MRObjects import B0Field as _B0FieldLive
+        if _B0FieldLive.is_live(self.b0_field):
             # `moving` is the SOLVER's, not the field's: the readout decides
             # separately whether it was given a trajectory, and the two may
             # legitimately disagree. A phantom that does not move samples the

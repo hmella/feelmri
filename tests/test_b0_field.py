@@ -447,3 +447,44 @@ def test_a_fit_that_only_interpolates_the_nodes_falls_back_to_the_nodes(tmp_path
         assert poly.kind == 'polynomial' and poly.order == 2, (
             f'n={n}: a genuine degree-2 field came back as {poly.kind} '
             f'order {poly.order}')
+
+
+def test_the_degenerate_node_sets_a_rank_can_own_are_carried_not_crashed():
+    """Under MPI a rank can own no nodes at all, and an audit-6 guard turned
+    two of those into hard failures on exactly those ranks -- which is the
+    worst place for one, because the surviving ranks then block in the next
+    collective rather than reporting anything.
+
+    `fit` broke on its FIRST iteration when there were no points (the degree-0
+    design is rank-deficient there), left `best` unassigned and died unpacking
+    it: `TypeError: cannot unpack non-iterable NoneType object`. Degree 0 is
+    one constant monomial, so it is the fit that must always produce an
+    answer; an empty cloud has nothing to fit and the honest result is the
+    uniform field at the mean.
+
+    `__repr__` called `.max()` on the empty per-node array, raising
+    `ValueError: zero-size array to reduction operation maximum`, so a log line
+    on all ranks aborted a strict subset of them.
+
+    A negative `max_order` tries no degree at all and reached the same unpack;
+    it is refused by name instead.
+    """
+    zero = lambda p: np.zeros(p.shape[0])
+
+    empty = B0Field.fit(zero, np.zeros((0, 3)), collective=False)
+    assert empty.kind == 'uniform' and empty.is_zero
+
+    with pytest.raises(ValueError, match='no degree at all'):
+        B0Field.fit(zero, _points(), collective=False, max_order=-1)
+
+    class _Cloud:
+        def __init__(self, nodes):
+            self.local_nodes = nodes
+
+    rough = B0Field.on_phantom(lambda p: np.sin(41.0 * p[:, 0]) * 1e-3,
+                               _Cloud(_points(60)), collective=False)
+    assert rough.kind == 'nodal'
+    # Exactly what a rank owning no nodes holds once the collective build is
+    # done: the fit is global, the sampling is local and local is empty.
+    rough._nodal_mT = np.zeros(0)
+    assert 'nodes=0' in repr(rough)

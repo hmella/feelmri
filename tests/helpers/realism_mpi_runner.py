@@ -87,6 +87,48 @@ def _run_refusal_case(case, phantom, scanner, n_local, globals_):
         g = np.zeros((n_local, 3), dtype=np.float64)
         g[globals_ == 0, 1] = np.nan
         phantom.set_b0_gradient(g)
+    elif case == 'b0_field_present':
+        # SPMD code that builds the field from a rank-local condition leaves
+        # one rank with None. `field is not None and field.is_zero_everywhere()`
+        # short-circuits, so that rank never enters the allreduce the others
+        # are inside. Both `BlochSolver` and `simulate_pulseq` spelled it that
+        # way; `B0Field.is_live` owns the two reductions now.
+        from feelmri import B0Field
+        field = None if MPI_rank == 1 else B0Field.fit(
+            lambda q: q[:, 2] * 1.0e-3, phantom.local_nodes, collective=False)
+        if B0Field.is_live(field):
+            raise RuntimeError('unreachable: the disagreement was not caught')
+    elif case == 'b0_expression_rows':
+        # An expression that returns a FIXED length matches the local node
+        # count on one rank only, and the check sat upstream of `fit`'s own
+        # reductions.
+        from feelmri import B0Field
+        B0Field.fit(lambda q: np.zeros(64), phantom.local_nodes,
+                    collective=True)
+    elif case == 'b0_gradient_rows':
+        # The same shape one level down: an analytic `gradient=` that returns a
+        # fixed length. The raise sat 40 lines above the `collective_raise`
+        # written to prevent exactly this, and the matching rank walked on
+        # into `_mesh_residual`'s allreduce.
+        from feelmri import B0Field
+        B0Field.on_phantom(
+            lambda q: np.sin(97.0 * q[:, 0]) * 1.0e-3, phantom,
+            gradient=lambda q: np.zeros((64, 3)))
+    elif case == 'signal_modes_per_rank':
+        # A trajectory built the documented way on one rank and per-rank on
+        # the other. The refusal was inside the branch that found it, so the
+        # clean rank walked on into `redistribute_nodal`'s Alltoallv.
+        from feelmri.Motion import POD
+        n_g = int(phantom.global_shape[0])
+        rng = np.random.default_rng(0)
+        data = rng.normal(size=(n_g, 3, 6)).astype(np.float32)
+        g2l = None if MPI_rank == 1 else np.asarray(
+            phantom.local_to_global_nodes)
+        if g2l is None:
+            data = data[np.asarray(phantom.local_to_global_nodes)]
+        pod = POD(data=data, times=np.linspace(0.0, 5.0, 6), n_modes=2,
+                  global_to_local=g2l)
+        phantom._signal_modes(pod)
     elif case == 'coil_map':
         # One global node's coil value is NaN, so it lives on one rank only --
         # the same shape as the T2 air node.
@@ -112,7 +154,9 @@ def main(argv=None):
                        'others block in the collective that reports it.')
   ap.add_argument('--refusal-case', default='',
                   choices=['', 'static_fields', 'update_mag', 'b1_map',
-                           'coil_map', 'b0_gradient'],
+                           'coil_map', 'b0_gradient', 'b0_field_present',
+                           'b0_expression_rows', 'b0_gradient_rows',
+                           'signal_modes_per_rank'],
                   help='exercise one per-node refusal whose condition is true '
                        'on a SUBSET of ranks; every rank must raise')
   ap.add_argument('--poison-at-solve', type=int, default=-1,
@@ -152,6 +196,10 @@ def main(argv=None):
     # word "Error" twice, so a "at least two ranks raised" assertion passes on
     # a single-rank raise -- which is precisely the bug under test. A rank that
     # blocks in a collective prints neither marker and the timeout catches it.
+    if args.refusal_case == 'signal_modes_per_rank':
+      phantom.enable_dual_partition(voxel_size=0.0, lorder=1, horder=1,
+                                    node_weight=1.0)
+      phantom.activate('signal')
     n_local = phantom.local_nodes.shape[0]
     globals_ = np.asarray(phantom.local_to_global_nodes)
     try:
