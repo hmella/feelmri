@@ -387,6 +387,39 @@ class Trajectory:
         # Synchronize all processes
         MPI_comm.Barrier()
 
+    @property
+    def readout_times(self):
+        """Sample times in ms, measured FROM THE SNAPSHOT.
+
+        This is what :meth:`FEMPhantom.mri_signal` wants: it applies
+        ``exp(-t/T2)`` and ``exp(-i phi t)``, both of which continue from the
+        instant the magnetization was captured, and the snapshot on a native
+        trajectory sits at ``t_start``. Passing the absolute ``times`` instead
+        applies a spurious ``exp(-t_start/T2)`` plus a spatially varying
+        off-resonance ramp, which four of the shipped examples once did.
+        """
+        return self.times.m_as('ms') - self.t_start.m_as('ms')
+
+    def empty_kspace(self, n_enc=1, n_frames=1, dtype=np.complex64):
+        """A zeroed k-space array shaped for this trajectory.
+
+        ``(ro_samples, ph_samples, slices, n_enc, n_frames)`` -- the shape
+        every caller transcribes by hand from the three attributes.
+        """
+        return np.zeros([self.ro_samples, self.ph_samples, self.slices,
+                         n_enc, n_frames], dtype=dtype)
+
+    def shot(self, shot, slice=0):
+        """``(points, times)`` for one shot of one slice.
+
+        The four-line slicing triple the shot-major examples repeat, with the
+        times already measured from the snapshot.
+        """
+        t = self.readout_times[:, shot, slice, np.newaxis]
+        points = tuple(np.ascontiguousarray(a[:, shot, slice, np.newaxis])
+                       for a in self.points)
+        return points, np.ascontiguousarray(t)
+
     def _sample_grid(self, enc_time, ro_grad0, ro_grad, dt, kz):
         """Allocate the k-space arrays and fill the sample times and kz.
 

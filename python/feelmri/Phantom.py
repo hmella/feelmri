@@ -1622,7 +1622,7 @@ class FEMPhantom:
 
     def readout(self, Mxy, trajectory, *, shot=None, slice=None, pod=None,
                 solver=None, scanner=None, maxwell_moments=None,
-                gather=False):
+                t_anchor=None, gather=False):
         """One readout window, from a magnetization column to k-space.
 
         This is the handoff between the solver and the assembler, called from
@@ -1650,6 +1650,15 @@ class FEMPhantom:
           halves cannot be modelled apart.
         * **the POD timeshift**, set to this window's anchor and restored.
 
+        .. note::
+           ``t_anchor`` defaults to ``trajectory.t_start``, so the POD weights
+           are evaluated at the sample's ABSOLUTE sequence time -- frame time
+           plus ``t_start`` plus elapsed. The shipped examples set the
+           timeshift to the frame or block time alone and omit ``t_start``,
+           which is a small cardiac-phase error of ``t_start`` against the
+           cycle. Pass ``t_anchor=0.0`` to reproduce that convention exactly,
+           which is what a result published against those examples needs.
+
         Parameters
         ----------
         Mxy : np.ndarray
@@ -1667,6 +1676,10 @@ class FEMPhantom:
             ``(N, 4)`` moments to use instead of the trajectory's own, e.g.
             from ``Trajectory.maxwell_coefficients(carried=...)`` when a
             sequence block overlaps the readout.
+        t_anchor : float, optional
+            Absolute ms of the snapshot, added to the POD's own timeshift.
+            Defaults to ``trajectory.t_start``; pass ``0.0`` for the
+            convention the shipped examples use.
         gather : bool, optional
             Reduce onto rank 0 with :func:`gather_data`. Default False, since
             the caller usually accumulates into its own array first.
@@ -1733,11 +1746,12 @@ class FEMPhantom:
         # The POD weights need ABSOLUTE sequence time -- the frame the motion
         # is defined in -- while `t` above is elapsed-since-snapshot. Composed
         # with the caller's own shift, and restored either way.
+        anchor = (float(trajectory.t_start.m_as('ms')) if t_anchor is None
+                  else float(t_anchor))
         shift = getattr(pod, 'timeshift', None) if pod is not None else None
         try:
             if shift is not None:
-                pod.update_timeshift(
-                    float(shift) + float(trajectory.t_start.m_as('ms')))
+                pod.update_timeshift(float(shift) + anchor)
             signal = self.mri_signal(list(points), t, pod, maxwell=maxwell)
         finally:
             if shift is not None:
