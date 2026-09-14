@@ -2185,8 +2185,8 @@ def test_the_signal_paths_refuse_an_assembler_with_no_static_fields(
   three paths, with and without a B0 gradient installed, so it is the assembler
   and not the B0 channel.
 
-  The twin of `require_magnetization`, which audit 5 added for the same shape
-  of hole.
+  The twin of `require_magnetization`, which guards the same shape of hole on
+  the magnetization side.
   """
   pytest.importorskip('meshio')
   pytest.importorskip('mpi4py')
@@ -2314,9 +2314,9 @@ def test_the_readout_is_exact_for_a_configuration_held_through_the_window(tmp_pa
   held through the window against **1.69** for the same 35 mm accruing linearly
   inside it.
 
-  This pins the exactness AND the discrimination, so the claim cannot quietly
-  become the other one: an audit reported the motion term as "exactly doubled"
-  on the strength of the ramping arm alone.
+  Both arms are required. The ramping one alone reads as though the motion
+  term were doubled, which is a statement about that arrangement and not about
+  the model; pinning the held arm beside it is what keeps the two apart.
   """
   pytest.importorskip('meshio')
   pytest.importorskip('mpi4py')

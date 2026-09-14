@@ -862,9 +862,8 @@ class B0Field:
 
         # The local values are computed first and the reduction is
         # UNCONDITIONAL. A rank that owns no elements returning early here
-        # would skip the allreduce its peers are already inside -- the
-        # collective-behind-a-rank-local-predicate hang this module has been
-        # bitten by in every audit, including, as it turns out, in this guard.
+        # would skip the allreduce its peers are already inside, and the others
+        # block in it for ever.
         elems = getattr(phantom, 'local_elements', None)
         gap, lo, hi = 0.0, 0.0, 0.0
         if elems is not None and len(elems) > 0:

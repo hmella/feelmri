@@ -556,10 +556,9 @@ def test_a_per_node_b0_field_survives_mpi_and_dual_partitioning(tmp_path):
   gradient through `set_b0_gradient`. Neither path had any coverage: the only
   MPI test touching the gradient exercises its REFUSAL, never a number.
 
-  The field varies in space by construction, which is the load-bearing part.
-  The audit that found this class of hole found it because a constant map made
-  a redistribution that moved the wrong rows change k-space by exactly
-  0.000e+00.
+  The field varies in space by construction, which is the load-bearing part:
+  with a constant map, a redistribution that moved the wrong rows changes
+  k-space by exactly 0.000e+00 and nothing here could fail.
   """
   pytest.importorskip('mpi4py')
   pytest.importorskip('pymetis')
