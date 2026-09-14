@@ -492,7 +492,8 @@ def test_a_rank_asymmetric_refusal_does_not_hang(tmp_path):
                                   'coil_map', 'b0_gradient',
                                   'b0_field_present', 'b0_expression_rows',
                                   'b0_gradient_rows',
-                                  'signal_modes_per_rank'])
+                                  'signal_modes_per_rank',
+                                  'signal_modes_weights_disagree'])
 def test_every_per_node_refusal_reaches_every_rank(tmp_path, case):
   """Three more refusals whose condition is true on a SUBSET of ranks, each
   sitting upstream of a collective. All three hung.
@@ -525,6 +526,12 @@ def test_every_per_node_refusal_reaches_every_rank(tmp_path, case):
   - `signal_modes_per_rank`: the per-rank-POD refusal was written INSIDE the
     branch that found the problem, so a rank holding a correctly built
     trajectory walked on into `redistribute_nodal`'s Alltoallv.
+  - `signal_modes_weights_disagree`: the same defect reached through the
+    attribute test's blind side. `_signal_modes` redistributes the MODES and
+    nothing redistributes the WEIGHTS, so the weights must be identical on
+    every rank -- that is the property, and asking which attributes the object
+    carries is only a proxy for it. A per-rank decomposition handed
+    `local_to_global_map` by hand walks straight past the proxy.
 
   The timeout is the assertion: before the fix none of these came back.
   """
@@ -559,6 +566,17 @@ def test_every_per_node_refusal_reaches_every_rank(tmp_path, case):
     f'it:\n{out[-3000:]}')
   assert 'ACCEPTED' not in out, (
     f'{case} was accepted on some rank:\n{out[-3000:]}')
+  # And refused for the RIGHT reason. Several of these fixtures can also trip
+  # an unrelated shape check, which refuses on every rank and satisfies the
+  # two assertions above while the guard under test never runs.
+  signature = {'signal_modes_weights_disagree': 'WEIGHTS differ between ranks',
+               'signal_modes_per_rank': 'without `global_to_local`',
+               'b0_gradient_rows': 'it must map (N, 3) to (N, 3)',
+               'b0_expression_rows': 'it must map (N, 3) positions to (N,)',
+               'b0_field_present': 'given on some ranks'}.get(case)
+  assert signature is None or signature in out, (
+    f'{case} was refused, but not by the guard it exists for -- no '
+    f'"{signature}" in the output:\n{out[-3000:]}')
 
 
 

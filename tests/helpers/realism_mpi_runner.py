@@ -129,6 +129,31 @@ def _run_refusal_case(case, phantom, scanner, n_local, globals_):
         pod = POD(data=data, times=np.linspace(0.0, 5.0, 6), n_modes=2,
                   global_to_local=g2l)
         phantom._signal_modes(pod)
+    elif case == 'signal_modes_weights_disagree':
+        # The structural check passes -- the attribute is there -- while the
+        # decomposition is still per rank. The INVARIANT is what catches it:
+        # `_signal_modes` redistributes the MODES and nothing redistributes
+        # the WEIGHTS, so the weights have to be identical on every rank.
+        from feelmri.Motion import POD
+        n_g = int(phantom.global_shape[0])
+        g = np.asarray(phantom.global_nodes, dtype=np.float64)
+        u = g / (np.abs(g).max() or 1.0)
+        ts = np.linspace(0.0, 300.0, 6)
+        data = np.zeros((n_g, 3, 6), dtype=np.float32)
+        for k, t in enumerate(ts):
+            for ax in range(3):
+                data[:, ax, k] = (4.0e-4
+                                  * (0.3 + 0.7 * np.cos(np.pi * u[:, ax]))
+                                  * np.sin(2.0 * np.pi * t / 300.0 + 0.6 * ax))
+        # Sliced to the BLOCH layout, which is the node count `_signal_modes`
+        # asks `get_modes` for. Built from the signal layout instead, the
+        # lengths disagree and `get_modes` raises its own size error first --
+        # a refusal for the wrong reason, which would let this case pass with
+        # the invariant check removed.
+        g2l = np.asarray(phantom._partitions['bloch']['_local_to_global_nodes'])
+        pod = POD(data=data[g2l], times=ts, n_modes=3, is_periodic=True)
+        pod.local_to_global_map = np.arange(len(g2l))   # the attribute, faked
+        phantom._signal_modes(pod)
     elif case == 'coil_map':
         # One global node's coil value is NaN, so it lives on one rank only --
         # the same shape as the T2 air node.
@@ -156,7 +181,8 @@ def main(argv=None):
                   choices=['', 'static_fields', 'update_mag', 'b1_map',
                            'coil_map', 'b0_gradient', 'b0_field_present',
                            'b0_expression_rows', 'b0_gradient_rows',
-                           'signal_modes_per_rank'],
+                           'signal_modes_per_rank',
+                           'signal_modes_weights_disagree'],
                   help='exercise one per-node refusal whose condition is true '
                        'on a SUBSET of ranks; every rank must raise')
   ap.add_argument('--poison-at-solve', type=int, default=-1,
@@ -196,7 +222,8 @@ def main(argv=None):
     # word "Error" twice, so a "at least two ranks raised" assertion passes on
     # a single-rank raise -- which is precisely the bug under test. A rank that
     # blocks in a collective prints neither marker and the timeout catches it.
-    if args.refusal_case == 'signal_modes_per_rank':
+    if args.refusal_case in ('signal_modes_per_rank',
+                             'signal_modes_weights_disagree'):
       phantom.enable_dual_partition(voxel_size=0.0, lorder=1, horder=1,
                                     node_weight=1.0)
       phantom.activate('signal')

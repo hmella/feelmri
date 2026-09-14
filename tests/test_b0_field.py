@@ -482,6 +482,17 @@ def test_a_fit_that_only_interpolates_the_nodes_falls_back_to_the_nodes(tmp_path
         shim, _Mesh(lat, np.zeros((0, 4), dtype=int)), lat, fitted, False)
     assert span0 is None
 
+    # `_mesh_residual` has the same distinction to draw and is the more
+    # dangerous of the two, because 0.0 there reads as "the per-node
+    # representation loses nothing between the nodes" -- the most reassuring
+    # answer it can give, for a check that could not run.
+    measured = B0Field._mesh_residual(shim, _Mesh(lat, elems), lat,
+                                      collective=False)
+    assert measured is not None and measured > 0.0
+    assert B0Field._mesh_residual(
+        shim, _Mesh(lat, np.zeros((0, 4), dtype=int)), lat,
+        collective=False) is None
+
     # A fit ABOVE the class cap is not a usable field: `quadratic_mT_per_m2`
     # and `in_frame_full` both refuse degree 3, so it used to be handed back
     # and raise from inside `BlochSolver` -- the outcome the docstring's

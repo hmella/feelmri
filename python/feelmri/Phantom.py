@@ -35,6 +35,20 @@ pymetis_ncommon = {
 }
 
 
+def _weight_probe_times(pod, n=8):
+    """A few times at which to compare a trajectory's weights across ranks.
+
+    Its own sample times where it has them -- that is where the weights carry
+    the most structure -- and a bare interval otherwise.
+    """
+    ts = np.asarray(getattr(pod, 'times', None)
+                    if getattr(pod, 'times', None) is not None
+                    else np.linspace(0.0, 1.0, n), dtype=np.float64).reshape(-1)
+    if ts.size > n:
+        ts = ts[np.linspace(0, ts.size - 1, n).astype(int)]
+    return ts
+
+
 def _per_rank_decompositions(pod):
     """Names of the components of `pod` whose decomposition is per rank.
 
@@ -892,6 +906,43 @@ class FEMPhantom:
             "Build it from the GLOBAL snapshots with "
             "`global_to_local=phantom.local_to_global_nodes`, the way every "
             "shipped example does.")
+        # And the INVARIANT the redistribution actually rests on, checked
+        # directly rather than by asking which attributes the object carries.
+        #
+        # `x(t) = x0 + Phi w(t)`. This function moves `Phi` between ranks and
+        # nothing ever moves `w` -- it is temporal, evaluated locally from the
+        # trajectory's own spline coefficients. So `w` has to be IDENTICAL on
+        # every rank, and a global decomposition is merely the usual way of
+        # arranging that. `calculate_pod` eigendecomposes `X^T X`, a
+        # contraction over NODES, so restricting `X` to one rank's rows gives
+        # a different temporal basis -- not a rescaled one, except in the
+        # single degenerate case below.
+        #
+        # The attribute test above only refuses the ways of getting this wrong
+        # that someone has already thought of; this one refuses the property.
+        spread, scale = 0.0, 1.0
+        if MPI_size > 1:
+            probe = np.asarray(pod.get_weights(_weight_probe_times(pod)),
+                               dtype=np.float64)
+            # A fingerprint, not a proof: two ranks whose weights differ but
+            # share both moments would pass. It is a guard, and the cost is
+            # two reductions once per (trajectory, layout).
+            m = np.array([float(probe.sum()), float((probe * probe).sum())],
+                         dtype=np.float64)
+            lo, hi = np.empty_like(m), np.empty_like(m)
+            MPI_comm.Allreduce(m, lo, op=MPI.MIN)
+            MPI_comm.Allreduce(m, hi, op=MPI.MAX)
+            spread = float(np.abs(hi - lo).max())
+            scale = float(np.abs(hi).max()) or 1.0
+        collective_raise(
+            "" if spread <= 1.0e-9 * scale else
+            f"FEMPhantom: this trajectory's WEIGHTS differ between ranks (by "
+            f"{spread:.3e} against a scale of {scale:.3e}), so its "
+            f"decomposition is per rank. Dual partitioning redistributes the "
+            f"MODES and never the weights, so a node's mode would be "
+            f"contracted with another rank's weights. Build the trajectory "
+            f"from the GLOBAL snapshots with "
+            f"`global_to_local=phantom.local_to_global_nodes`.")
         cache = self.__dict__.setdefault('_signal_modes_cache', {})
         key = id(pod)
         if key not in cache:

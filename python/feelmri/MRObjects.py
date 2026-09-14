@@ -288,9 +288,11 @@ class B0Field:
             # aborts a strict subset and the rest block at the next collective.
             peak = (float(np.abs(self._nodal_mT).max())
                     if self._nodal_mT.size else 0.0)
+            resid = ('not measured -- no element connectivity'
+                     if self.mesh_residual_mT is None
+                     else f"{self.mesh_residual_mT:.3g} mT")
             return (f"B0Field(kind='nodal', nodes={self._nodal_mT.size}, "
-                    f"peak={peak:.6g} mT, "
-                    f"within-element residual={self.mesh_residual_mT:.3g} mT)")
+                    f"peak={peak:.6g} mT, within-element residual={resid})")
         return (f"B0Field(kind={self.kind!r}, order={self.order}, "
                 f"offset={self.offset_mT:.6g} mT, "
                 f"gradient={np.round(self.gradient_mT_per_m, 9)} mT/m)")
@@ -1092,24 +1094,40 @@ class B0Field:
         expression at each element centroid against the mean of that element's
         nodal values measures exactly that -- and unlike an interpolant it needs
         no per-cell-type basis, so it is valid for every element the mesh may
-        hold. Returns 0.0 when the connectivity is not available.
+        hold.
+
+        Returns ``None`` when NO rank has the connectivity to measure it. That
+        is not the same as zero, and zero is the most reassuring answer this
+        function can give -- "the per-node representation loses nothing" --
+        which is exactly the wrong thing to return for a check that could not
+        run. Same distinction `_holdout_residual` draws.
 
         REDUCED across ranks, like every other error metric on this class. A
-        per-rank figure is worse than none: it is reported once, from rank 0,
-        whose slice may be the smoothest part of the field.
+        per-rank figure is worse than none: it was reported once, from
+        whichever rank happened to ask, and that rank's slice may be the
+        smoothest part of the field. Measured on `spamm.py` at 8 ranks, the
+        unreduced form read 4.370e-07 mT against a true 7.483e-07 -- an
+        UNDER-report, which is the dangerous direction for a number whose job
+        is to say how much of the field is being dropped.
         """
         from feelmri.MPIUtilities import MPI_comm
 
         elems = getattr(phantom, 'local_elements', None)
+        have = elems is not None and len(elems) > 0
         worst = 0.0
-        if elems is not None and len(elems) > 0:
+        if have:
             elems = np.asarray(elems)
             centroids = nodes[elems].mean(axis=1)
             nodal = cls._sample(expression, nodes)
             worst = float(np.abs(cls._sample(expression, centroids)
                                  - nodal[elems].mean(axis=1)).max())
-        # Unconditional, for the reason `_holdout_residual` gives.
-        return MPI_comm.allreduce(worst, op=MPI.MAX) if collective else worst
+        # Unconditional, for the reason `_holdout_residual` gives. A rank with
+        # no elements contributing 0.0 to a MAX over non-negative residuals is
+        # harmless, unlike the MIN/MAX pair there.
+        if collective:
+            worst = MPI_comm.allreduce(worst, op=MPI.MAX)
+            have = bool(MPI_comm.allreduce(have, op=MPI.LOR))
+        return worst if have else None
 
     @staticmethod
     def _monomial_exponents(order):
