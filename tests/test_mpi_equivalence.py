@@ -607,6 +607,22 @@ def test_the_holdout_span_ignores_a_rank_that_owns_no_elements(tmp_path):
       f'the span is {spans[0]:.6e} mT for a field whose variation is 2e-04 mT '
       f'-- it is measuring the uniform offset, so the guard cannot fire')
 
+  # The other reduction in the same class. `is_zero` reads the LOCAL slice, so
+  # a per-node field that vanishes over one rank's nodes answers differently
+  # on different ranks -- and that answer decides which kernel channels the
+  # rank passes, so a rank-local verdict has the ranks running different
+  # physics. Reduced with LAND it comes back live everywhere.
+  local_zero = [int(l.split()[3]) for l in out.splitlines()
+                if 'LOCALZERO' in l]
+  live = [int(l.split()[5]) for l in out.splitlines() if 'LOCALZERO' in l]
+  assert len(live) == 2, out[-2000:]
+  assert sum(local_zero) == 1, (
+      f'the fixture must be zero on exactly one rank, or the reduction has '
+      f'nothing to disagree about: {local_zero}')
+  assert live == [1, 1], (
+      f'a field that is zero over one rank\'s nodes came back dead on that '
+      f'rank ({live}), so the two ranks pass different kernel channels')
+
 
 @pytest.mark.slow
 @pytest.mark.requires_mpi

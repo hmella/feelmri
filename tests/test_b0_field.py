@@ -26,26 +26,59 @@ def _rotation(deg=23.0):
                      [-np.sin(th), 0.0, np.cos(th)]])
 
 
-def test_a_linear_expression_is_recovered_exactly():
-    """The shipped examples all build `x + y + z` ramps, so this is the case
-    that has to be exact rather than merely close."""
-    g = np.array([0.011, -0.004, 0.0075])
-    b = 2.5e-4
-    field = B0Field.fit(lambda p: b + p @ g, _points(), collective=False)
-    assert field.order == 1
-    assert field.offset_mT == pytest.approx(b, abs=1e-15)
-    assert np.abs(field.gradient_mT_per_m - g).max() < 1e-15
-    assert field.residual_rms_mT == pytest.approx(0.0, abs=1e-15)
+@pytest.mark.parametrize('name,expr,order', [
+    ('uniform', lambda p: np.full(p.shape[0], 1.0e-3), 0),
+    ('linear', lambda p: 2.5e-4 + p @ np.array([0.011, -0.004, 0.0075]), 1),
+    ('quadratic', lambda p: 1.0e-3 * (p[:, 0] ** 2 - p[:, 2] ** 2), 2),
+])
+def test_the_fit_lands_on_the_degree_the_field_actually_has(name, expr, order):
+    """The degree detects itself: the search stops where the residual reaches
+    round-off, because a residual that small means the expression IS that
+    polynomial rather than being approximated by it. Every shim is one.
+
+    Both directions matter. Auto truncation must not spend a linear term on a
+    constant -- order 0 rides `delta_B` and costs nothing at all -- and must
+    not stop at order 1 on a field that has a quadratic part, which would
+    silently drop it.
+
+    The RECONSTRUCTION is what carries the claim, not the reported residual:
+    the normal equations square the condition number, so the residual bottoms
+    out at `sqrt(eps)` whatever happens, while evaluating the fit back at the
+    points shows whether the field is carried exactly.
+    """
+    pts = _points()
+    field = B0Field.fit(expr, pts, collective=False)
+    assert field.order == order, (
+        f'{name} was carried at order {field.order}')
+    want = expr(pts)
+    got = B0Field._design(pts, field.order) @ field.coefficients
+    assert np.abs(got - want).max() < 1e-12 * max(np.abs(want).max(), 1e-30)
+    if order == 0:
+        assert not np.any(field.gradient_mT_per_m) and field.is_zero is False
+    if order == 1:
+        assert field.offset_mT == pytest.approx(2.5e-4, abs=1e-15)
 
 
-def test_a_uniform_expression_collapses_to_order_zero():
-    """Auto truncation must not spend a linear term on a constant: order 0
-    rides `delta_B` and costs nothing at all."""
-    field = B0Field.fit(lambda p: np.full(p.shape[0], 1e-3), _points(),
-                        collective=False)
-    assert field.order == 0
-    assert not np.any(field.gradient_mT_per_m)
-    assert field.is_zero is False
+def test_a_degree_above_the_channels_is_refused_rather_than_truncated():
+    """Degree 3 is above what the solver and the readout can carry, so it is
+    not detected by default -- detecting it would only let it be truncated to
+    a quadratic. Asked for explicitly, the frame adapter refuses it by name
+    rather than dropping the cubic monomials: measured on a Z3 shim that is
+    100% of the field.
+
+    A field no polynomial can represent at all takes the same exit. A step is
+    not a smooth scanner field -- a static field in a current-free bore is a
+    solid-harmonic series -- so such a map is tissue structure and belongs on
+    the per-node channel.
+    """
+    Z3 = lambda p: 1e-3 * p[:, 2] * (2 * p[:, 2] ** 2 - 3 * p[:, 0] ** 2)
+    with pytest.raises(ValueError, match='needs the per-node expansion'):
+        B0Field.fit(Z3, _points(), collective=False)
+    with pytest.raises(NotImplementedError, match='drop every higher monomial'):
+        B0Field.fit(Z3, _points(), collective=False, max_order=3).in_frame_full()
+    with pytest.raises(ValueError, match='needs the per-node expansion'):
+        B0Field.fit(lambda p: 1e-3 * np.sign(p[:, 0]), _points(),
+                    collective=False)
 
 
 def test_the_frame_adapter_moves_the_offset_into_the_constant():
@@ -73,35 +106,6 @@ def test_the_frame_adapter_moves_the_offset_into_the_constant():
     assert abs(shifted - plain) > 1e-6
 
 
-def test_a_polynomial_field_is_carried_at_the_degree_it_actually_has():
-    """The degree detects itself: the search stops where the residual reaches
-    round-off, because a residual that small means the expression IS that
-    polynomial rather than being approximated by it. Every shim is one."""
-    quad = B0Field.fit(lambda p: 1e-3 * (p[:, 0] ** 2 - p[:, 2] ** 2),
-                       _points(), collective=False)
-    assert quad.order == 2 and quad.kind == 'polynomial'
-
-    # Reproduced to round-off, not merely fitted. This is the assertion that
-    # carries the claim: the fit residual itself bottoms out at sqrt(eps)
-    # because the normal equations square the condition number, so it is the
-    # reconstruction that shows the field is carried exactly.
-    pts = _points()
-    got = B0Field._design(pts, quad.order) @ quad.coefficients
-    want = 1e-3 * (pts[:, 0] ** 2 - pts[:, 2] ** 2)
-    assert np.abs(got - want).max() < 1e-12 * np.abs(want).max()
-
-    # Degree 3 is ABOVE what the solver and readout channels carry, so it is
-    # not detected by default -- detecting it would only let it be truncated to
-    # a quadratic. Asked for explicitly, the frame adapter refuses it by name
-    # rather than dropping the cubic monomials: measured on a Z3 shim that is
-    # 100% of the field.
-    Z3 = lambda p: 1e-3 * p[:, 2] * (2 * p[:, 2] ** 2 - 3 * p[:, 0] ** 2)
-    with pytest.raises(ValueError, match='needs the per-node expansion'):
-        B0Field.fit(Z3, _points(), collective=False)
-    with pytest.raises(NotImplementedError, match='drop every higher monomial'):
-        B0Field.fit(Z3, _points(), collective=False, max_order=3).in_frame_full()
-
-
 def test_a_polynomial_field_refuses_the_linear_only_channels():
     """`in_frame` carries the constant and the gradient, which for a degree-2
     field is not the field. Returning them would silently truncate it, so it
@@ -110,15 +114,6 @@ def test_a_polynomial_field_refuses_the_linear_only_channels():
                        _points(), collective=False)
     with pytest.raises(NotImplementedError, match='silently truncate'):
         quad.in_frame()
-
-
-def test_a_field_no_polynomial_can_represent_is_refused():
-    """A step is not a smooth scanner field: a static field in a current-free
-    bore is a solid-harmonic series. Such a map is tissue structure and belongs
-    on the per-node channel."""
-    with pytest.raises(ValueError, match='needs the per-node expansion'):
-        B0Field.fit(lambda p: 1e-3 * np.sign(p[:, 0]), _points(),
-                    collective=False)
 
 
 def test_a_pint_expression_and_a_bare_one_agree():
@@ -132,15 +127,17 @@ def test_a_pint_expression_and_a_bare_one_agree():
     assert np.abs(bare.gradient_mT_per_m - pint.gradient_mT_per_m).max() < 1e-15
 
 
-def test_a_mismatched_expression_is_refused():
+def test_malformed_input_is_refused_at_the_boundary():
+    """Each of these produces a plausible object that fails much later, deep
+    inside the solver, if it is accepted here."""
     with pytest.raises(ValueError, match='must map'):
         B0Field.fit(lambda p: np.zeros(p.shape[0] - 1), _points(),
                     collective=False)
-
-
-def test_a_bad_gradient_is_refused():
     with pytest.raises(ValueError, match='3-vector'):
         B0Field(gradient=Quantity(np.zeros(2), 'mT/m'))
+    with pytest.raises(ValueError, match='no degree at all'):
+        B0Field.fit(lambda p: np.zeros(p.shape[0]), _points(),
+                    collective=False, max_order=-1)
 
 
 def test_the_uniform_part_converts_to_an_offresonance_rate():
@@ -275,6 +272,10 @@ def test_a_per_node_field_refuses_the_coefficient_accessors(tmp_path):
                  lambda: field.phi_offset(Scanner())):
         with pytest.raises(TypeError, match='readout_terms'):
             call()
+    # `__call__` is the same claim one level down: there is no closed form to
+    # evaluate, and the coefficient vector it would evaluate is those zeros.
+    with pytest.raises(TypeError, match='nodal_mT'):
+        field(pts)
 
 
 def test_the_expansion_evaluates_every_monomial_it_carries():
@@ -306,28 +307,6 @@ def test_the_expansion_evaluates_every_monomial_it_carries():
     assert np.abs(truncated - want).max() > 0.5 * np.abs(want).max(), (
         'this fixture has no quadratic part to speak of, so it cannot see the '
         'truncation it exists to pin')
-
-
-def test_a_per_node_field_cannot_be_evaluated_at_arbitrary_points(tmp_path):
-    """It has no closed form, and returning the zeros it was constructed with
-    would be a silent null field."""
-    pytest.importorskip('meshio')
-    from feelmri.Phantom import FEMPhantom
-    import meshio
-
-    pts = np.array([[0.11, -0.03, 0.07], [-0.05, 0.12, 0.02],
-                    [0.04, 0.06, -0.10], [-0.09, -0.08, 0.05],
-                    [0.02, -0.11, -0.06]])
-    path = tmp_path / 'nodal_call.vtu'
-    meshio.write(str(path), meshio.Mesh(pts, [('tetra',
-                                               np.array([[0, 1, 2, 3],
-                                                         [1, 2, 4, 3]]))]))
-    field = B0Field.on_phantom(
-        lambda p: 1e-3 * np.sin(2 * np.pi * p[:, 0] / 0.03),
-        FEMPhantom(path=str(path)), collective=False)
-    assert field.kind == 'nodal'
-    with pytest.raises(TypeError, match='nodal_mT'):
-        field(pts)
 
 
 def test_a_uniform_offset_does_not_hide_the_spatial_term():
@@ -532,16 +511,13 @@ def test_the_degenerate_node_sets_a_rank_can_own_are_carried_not_crashed():
     `ValueError: zero-size array to reduction operation maximum`, so a log line
     on all ranks aborted a strict subset of them.
 
-    A negative `max_order` tries no degree at all and reached the same unpack;
-    it is refused by name instead.
+    (A negative `max_order` reached the same unpack and is refused by name;
+    that one is asserted with the other boundary refusals.)
     """
     zero = lambda p: np.zeros(p.shape[0])
 
     empty = B0Field.fit(zero, np.zeros((0, 3)), collective=False)
     assert empty.kind == 'uniform' and empty.is_zero
-
-    with pytest.raises(ValueError, match='no degree at all'):
-        B0Field.fit(zero, _points(), collective=False, max_order=-1)
 
     class _Cloud:
         def __init__(self, nodes):

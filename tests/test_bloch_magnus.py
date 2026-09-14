@@ -92,98 +92,52 @@ METHODS = ('cayley_klein', 'magnus2', 'magnus4')
 # 1. Closed-form / hard-pulse equivalence
 # ---------------------------------------------------------------------------
 
-def test_t1_recovery(minimal_phantom):
-  T1_ms = 200.0
-  dur_ms = 0.5 * T1_ms
-  expected_Mz = 1.0 - np.exp(-0.5)
-  seq = make_single_block_sequence(make_empty_block(dur_ms, dt_ms=1.0))
-  solver = BlochSolver(
-    seq, minimal_phantom,
-    M0=1.0,
-    T1=Quantity(T1_ms, 'ms'),
-    T2=Quantity(50.0, 'ms'),
-    initial_Mxy=0.0,
-    initial_Mz=0.0,
-    perfect_spoiling=False,
-  )
-  _, Mz = solver.solve()
-  # The kernel returns only the final state, one column, not a history.
-  assert Mz.shape[1] == 1
-  np.testing.assert_allclose(Mz[:, 0], expected_Mz, atol=5e-3)
+def _one_block(phantom, block, **kw):
+  base = dict(M0=1.0, T1=Quantity(1e6, 'ms'), T2=Quantity(1e6, 'ms'),
+              initial_Mxy=0.0, initial_Mz=1.0, perfect_spoiling=False)
+  base.update(kw)
+  return BlochSolver(make_single_block_sequence(block), phantom, **base).solve()
 
 
-def test_t2_decay(minimal_phantom):
-  T2_ms = 50.0
-  dur_ms = 2.0 * T2_ms
-  expected_abs = np.exp(-2.0)
-  seq = make_single_block_sequence(make_empty_block(dur_ms, dt_ms=1.0))
-  solver = BlochSolver(
-    seq, minimal_phantom,
-    M0=1.0,
-    T1=Quantity(1e6, 'ms'),
-    T2=Quantity(T2_ms, 'ms'),
-    initial_Mxy=1.0 + 0.0j,
-    initial_Mz=1.0,
-    perfect_spoiling=False,
-  )
-  Mxy, _ = solver.solve()
-  np.testing.assert_allclose(np.abs(Mxy[:, 0]), expected_abs, atol=5e-3)
+def test_the_bare_bloch_closed_forms(minimal_phantom):
+  """T1 recovery, T2 decay and free precession, each against its closed form.
 
+  One test rather than three: they share a fixture and a single empty block,
+  and each is one line of algebra with no interaction between them. The kernel
+  returning only the FINAL state -- one column, not a history -- is asserted
+  here because every other test in this file depends on it.
+  """
+  T1_ms, T2_ms, dB0_mT = 200.0, 50.0, 1.0e-3
 
-def test_free_precession(minimal_phantom):
+  _mxy, Mz = _one_block(minimal_phantom, make_empty_block(0.5 * T1_ms, dt_ms=1.0),
+                        T1=Quantity(T1_ms, 'ms'), T2=Quantity(50.0, 'ms'),
+                        initial_Mz=0.0)
+  assert Mz.shape[1] == 1, 'the kernel returned a history, not a final state'
+  np.testing.assert_allclose(Mz[:, 0], 1.0 - np.exp(-0.5), atol=5e-3)
+
+  Mxy, _mz = _one_block(minimal_phantom, make_empty_block(2.0 * T2_ms, dt_ms=1.0),
+                        T2=Quantity(T2_ms, 'ms'), initial_Mxy=1.0 + 0.0j)
+  np.testing.assert_allclose(np.abs(Mxy[:, 0]), np.exp(-2.0), atol=5e-3)
+
   T_ms = 5.0
-  dB0_mT = 1e-3
-  gammabar = 42.576e6  # Hz/T
-  expected_phase = -2.0 * np.pi * gammabar * (dB0_mT * 1e-3) * (T_ms * 1e-3)
-  expected_phase = np.angle(np.exp(1j * expected_phase))
-  seq = make_single_block_sequence(make_empty_block(T_ms, dt_ms=0.05))
-  solver = BlochSolver(
-    seq, minimal_phantom,
-    M0=1.0,
-    T1=Quantity(1e6, 'ms'),
-    T2=Quantity(1e6, 'ms'),
-    delta_B=dB0_mT,
-    initial_Mxy=1.0 + 0.0j,
-    initial_Mz=1.0,
-    perfect_spoiling=False,
-  )
-  Mxy, _ = solver.solve()
-  measured = np.angle(Mxy[:, 0])
-  np.testing.assert_allclose(measured, expected_phase, atol=2e-2)
+  want = np.angle(np.exp(-2.0j * np.pi * 42.576e6
+                         * (dB0_mT * 1e-3) * (T_ms * 1e-3)))
+  Mxy, _mz = _one_block(minimal_phantom, make_empty_block(T_ms, dt_ms=0.05),
+                        delta_B=dB0_mT, initial_Mxy=1.0 + 0.0j)
+  np.testing.assert_allclose(np.angle(Mxy[:, 0]), want, atol=2e-2)
 
 
-def test_hard_90(minimal_phantom):
-  block = make_hard_pulse_block(np.pi / 2, dur_ms=0.2)
-  seq = make_single_block_sequence(block)
-  solver = BlochSolver(
-    seq, minimal_phantom,
-    M0=1.0,
-    T1=Quantity(1e6, 'ms'),
-    T2=Quantity(1e6, 'ms'),
-    initial_Mxy=0.0,
-    initial_Mz=1.0,
-    perfect_spoiling=False,
-  )
-  Mxy, Mz = solver.solve()
-  np.testing.assert_allclose(np.abs(Mxy[:, 0]), 1.0, atol=5e-2)
-  np.testing.assert_allclose(Mz[:, 0], 0.0, atol=5e-2)
-
-
-def test_hard_180(minimal_phantom):
-  block = make_hard_pulse_block(np.pi, dur_ms=0.2)
-  seq = make_single_block_sequence(block)
-  solver = BlochSolver(
-    seq, minimal_phantom,
-    M0=1.0,
-    T1=Quantity(1e6, 'ms'),
-    T2=Quantity(1e6, 'ms'),
-    initial_Mxy=0.0,
-    initial_Mz=1.0,
-    perfect_spoiling=False,
-  )
-  Mxy, Mz = solver.solve()
-  np.testing.assert_allclose(Mz[:, 0], -1.0, atol=5e-2)
-  np.testing.assert_allclose(np.abs(Mxy[:, 0]), 0.0, atol=5e-2)
+@pytest.mark.parametrize('flip,want_mz,want_mxy', [
+    (np.pi / 2, 0.0, 1.0),
+    (np.pi, -1.0, 0.0),
+])
+def test_a_hard_pulse_delivers_its_nominal_flip(minimal_phantom, flip, want_mz,
+                                                want_mxy):
+  """The 90 and the 180 are the same assertion at two angles; the 180 is not a
+  special case of the kernel, only of the trigonometry."""
+  Mxy, Mz = _one_block(minimal_phantom, make_hard_pulse_block(flip, dur_ms=0.2))
+  np.testing.assert_allclose(Mz[:, 0], want_mz, atol=5e-2)
+  np.testing.assert_allclose(np.abs(Mxy[:, 0]), want_mxy, atol=5e-2)
 
 
 def test_hard_pulse_orders_agree_on_constant_field(minimal_phantom):
