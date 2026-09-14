@@ -564,6 +564,52 @@ def test_every_per_node_refusal_reaches_every_rank(tmp_path, case):
 
 @pytest.mark.slow
 @pytest.mark.requires_mpi
+@pytest.mark.timeout(120)
+def test_the_holdout_span_ignores_a_rank_that_owns_no_elements(tmp_path):
+  """The interpolation guard compares a residual against the field's RANGE, and
+  that range is reduced with MIN/MAX across ranks.
+
+  A rank owning no elements has no opinion about it, so it must contribute the
+  reduction IDENTITIES. It contributed 0.0, which makes the span straddle zero
+  -- and on a field that does not, the span becomes the DC offset instead of
+  the variation and the threshold can never fire. Measured on a 1 ppm shim
+  spelling at 1.5 T, rank 0 holding every element and rank 1 none:
+
+  | | span |
+  |---|---|
+  | zero sentinels | **5.000067e+00 mT** |
+  | identities | **1.166667e-04 mT** |
+
+  a factor of 42858, against a real variation of 2e-04 mT. Serially invisible:
+  with `collective=False` the reductions never run, so this is the one arm
+  that can see it.
+  """
+  pytest.importorskip('mpi4py')
+  if shutil.which('mpirun') is None:
+    pytest.skip('mpirun not on PATH')
+
+  env = os.environ.copy()
+  env.setdefault('OPENBLAS_NUM_THREADS', '1')
+  env.setdefault('MPLBACKEND', 'Agg')
+  runner = Path(__file__).resolve().parent / 'helpers' / 'span_reduction_runner.py'
+  proc = subprocess.run(
+    ['mpirun', '--allow-run-as-root', '--oversubscribe', '-n', '2',
+     sys.executable, str(runner)],
+    env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=90)
+  out = proc.stdout.decode(errors='replace')
+  assert proc.returncode == 0, out[-2000:]
+  spans = [float(line.split()[-1]) for line in out.splitlines()
+           if line.startswith('RANK') and 'SPAN' in line]
+  assert len(spans) == 2 and spans[0] == spans[1], (
+      f'the ranks disagree about the span, so the reduction is not reaching '
+      f'them all: {spans}\n{out[-2000:]}')
+  assert spans[0] < 1.0e-3, (
+      f'the span is {spans[0]:.6e} mT for a field whose variation is 2e-04 mT '
+      f'-- it is measuring the uniform offset, so the guard cannot fire')
+
+
+@pytest.mark.slow
+@pytest.mark.requires_mpi
 @pytest.mark.pulseq
 @pytest.mark.timeout(420)
 def test_a_per_node_b0_field_survives_mpi_and_dual_partitioning(tmp_path):

@@ -202,6 +202,19 @@ class B0Field:
                 f"{self.coefficients.size} coefficients were given. A vector "
                 f"that does not match its order is not a polynomial, and it "
                 f"fails later inside the solver rather than here.")
+        # The mirrors have to AGREE with the vector, not merely be the right
+        # length. `__call__` evaluates the coefficients while `in_frame_full`
+        # and `phi_offset` read the mirrors, so a hand-built field could answer
+        # 0 at a point and still report a 5 mT offset -- two different fields
+        # from one object, each self-consistent on its own accessors.
+        keep = min(4, n_terms)
+        mirrors = np.concatenate(([self.offset_mT], g))[:keep]
+        if not np.array_equal(self.coefficients[:keep], mirrors):
+            raise ValueError(
+                f"B0Field: the coefficient vector's constant and linear terms "
+                f"{self.coefficients[:keep]} disagree with the offset and "
+                f"gradient given alongside them {mirrors}. They describe the "
+                f"same field and are read by different callers.")
         # Per-node fallback, set by `on_phantom` when no polynomial fits. The
         # stamp records which node set it was built on -- a per-node array
         # means nothing under a different partition or ordering.
@@ -506,8 +519,7 @@ class B0Field:
         bracket = nodal - np.einsum('ij,ij->i', x, g)
         return SolverTerms(0.0, bracket.reshape(-1, 1), None, None, g)
 
-    def readout_terms(self, phantom, scanner, moving, rotation=None,
-                      location=None):
+    def readout_terms(self, phantom, scanner, moving, rotation=None):
         """What the signal evaluator needs, in the imaging frame it works in.
 
         Returns ``(phi_nodal, node_gradient)`` in rad/ms and rad/ms/m: the
@@ -564,8 +576,12 @@ class B0Field:
 
         ``expression`` takes an ``(N, 3)`` array of SCANNER-frame positions in
         metres and returns ``(N,)`` in mT, or a pint Quantity. Orders 0, 1, 2
-        are tried in turn and the first whose residual RMS falls below
-        ``rtol`` times the field RMS is kept.
+        are tried in turn and the first whose residual RMS falls below ``rtol``
+        times the RMS of the field's VARIATION is kept -- the mean is removed
+        first, so a large uniform offset cannot flatter the fit. A shim spelled
+        as a big constant plus a small spatial term is therefore judged on the
+        spatial term alone, and reaches the per-node fallback more readily than
+        a ratio against the raw values would suggest.
 
         Under MPI the normal equations are accumulated locally and reduced, so
         every rank solves the same system and gets a bit-identical field.
@@ -617,10 +633,22 @@ class B0Field:
         #    round-off.
         n_tot = float(p.shape[0])
         fs = float(f.sum())
+        pp = float((p * p).sum())
         if collective:
             n_tot = MPI_comm.allreduce(n_tot, op=MPI.SUM)
             fs = MPI_comm.allreduce(fs, op=MPI.SUM)
+            pp = MPI_comm.allreduce(pp, op=MPI.SUM)
         mean = fs / n_tot if n_tot else 0.0
+        # The design is built on positions scaled to unit RMS radius, and the
+        # coefficients are scaled back at the end. Without it the monomial
+        # columns span `L^degree`, so on a cloud a millimetre across the
+        # quadratic columns are ~1e-6 of the constant one and the NORMAL
+        # matrix squares that: the degree-2 fit of an exact degree-2 field
+        # over a 0.1 mm box came back with a residual equal to its own
+        # variation. The fit is a property of the field, not of the units the
+        # geometry happens to be in.
+        radius = np.sqrt(pp / (3.0 * n_tot)) if n_tot and pp > 0.0 else 1.0
+        p = p / radius
         f = f - mean
         ff = float(f @ f)
         if collective:
@@ -650,7 +678,17 @@ class B0Field:
             if collective:
                 A = MPI_comm.allreduce(A, op=MPI.SUM)
                 b = MPI_comm.allreduce(b, op=MPI.SUM)
-            coef, _res, rank, _sv = np.linalg.lstsq(A, b, rcond=None)
+            coef, _res, _rank_A, _sv = np.linalg.lstsq(A, b, rcond=None)
+            # The rank is taken from the DESIGN's spectrum, not the normal
+            # matrix's. `A` is symmetric positive semidefinite, so its singular
+            # values are the SQUARED singular values of the design -- testing
+            # `_rank_A` refuses at `cond(design) ~ 1.5e7`, about half the
+            # decades a rank test on the design allows, and calls a
+            # sub-millimetre cloud degenerate when it is merely small.
+            sv = np.sqrt(np.maximum(np.asarray(_sv, dtype=np.float64), 0.0))
+            rank = (int(np.count_nonzero(
+                sv > sv[0] * max(A.shape) * np.finfo(np.float64).eps))
+                if sv.size and sv[0] > 0.0 else 0)
             # The point count is not enough: monomials that are linearly
             # dependent ON THESE POINTS make the fit exact and arbitrary off
             # the sampled manifold. Measured on a coplanar z = 0 cloud,
@@ -692,7 +730,12 @@ class B0Field:
                 f"global one -- build it with `B0Field.on_phantom`, which "
                 f"falls back to that.")
 
+        # Back into physical units: the monomial `x^a y^b z^c` was fitted on
+        # `p / radius`, so its coefficient carries `radius^(a+b+c)`.
         coef = np.asarray(coef, dtype=np.float64).copy()
+        degrees = np.array([sum(e) for e in cls._monomial_exponents(order)],
+                           dtype=np.float64)
+        coef = coef / (radius ** degrees)
         coef[0] += mean
         gradient = np.zeros(3)
         if order >= 1:
@@ -721,6 +764,18 @@ class B0Field:
         nodes = cls._scanner_nodes(phantom)
         try:
             fitted = cls.fit(expression, nodes, **kwargs)
+            # A caller-supplied `max_order` above the class cap produces a fit
+            # nothing downstream can consume: `quadratic_mT_per_m2` and
+            # `in_frame_full` both refuse degree 3, so the field would raise
+            # from inside `BlochSolver` instead of falling back here -- which
+            # is the outcome the docstring promises and the constructor check
+            # exists to prevent.
+            if fitted.order > cls.MAX_ORDER:
+                raise NoPolynomialFits(
+                    f"B0Field.on_phantom: the expression fits at degree "
+                    f"{fitted.order}, above the cap of {cls.MAX_ORDER} that "
+                    f"the solver and the readout can carry. It needs the "
+                    f"per-node expansion.")
             gap, span = cls._holdout_residual(expression, phantom, nodes, fitted,
                                               kwargs.get('collective', True))
             rtol = float(kwargs.get('rtol', 1.0e-3))
@@ -785,14 +840,23 @@ class B0Field:
         if nodes.size == 0:
             # A rank may legitimately own no nodes; indexing one here would
             # raise from inside every per-node accessor instead.
-            return (part, nodes.shape, 0.0, 0.0)
+            return (part, nodes.shape, 0.0, 0.0, 0.0)
         # The first and last coordinate alone miss a rigid translation -- a
         # pure shift along y left the stamp bit-identical while every node had
-        # moved, which is exactly the pairing the stamp exists to refuse. The
-        # two moments below move under any translation, rotation or reordering.
+        # moved, which is exactly the pairing the stamp exists to refuse.
+        #
+        # The two MOMENTS catch a translation and a change of shape and neither
+        # can see a REORDERING: both are symmetric functions of the rows, so a
+        # permuted node set gives a bit-identical stamp -- and a reordering is
+        # exactly the pairing this exists to refuse, since every value stays
+        # valid while the node it belongs to moves. The index-weighted sum is
+        # the term that sees it. (`flat @ flat` is also invariant under a
+        # rotation about the origin, which cannot arise here: `orient` after
+        # `set_assembler` is refused.)
         flat = nodes.reshape(-1)
+        idx = np.arange(1, nodes.shape[0] + 1, dtype=np.float64)
         return (part, nodes.shape, float(nodes.sum(axis=0).sum()),
-                float(flat @ flat))
+                float(flat @ flat), float(idx @ nodes.sum(axis=1)))
 
     @staticmethod
     def _sample(expression, points):
@@ -903,7 +967,11 @@ class B0Field:
         scale = float(np.abs(g).max()) if g.size else 0.0
         if collective:
             scale = MPI_comm.allreduce(scale, op=MPI.MAX)
-        floor = 1.0e-3 * scale
+        # A CONSTANT field has `g == 0` everywhere, so `scale` and the floor
+        # are both zero and the ratio below is 0/0: a RuntimeWarning and a NaN
+        # drift, which is an exception under `-W error` and, at `collective=
+        # False` with more than one rank, only on the flat ranks.
+        floor = 1.0e-3 * scale if scale > 0.0 else 1.0
         local = np.abs(g - coarse) / np.maximum(np.abs(g), floor)
         drift = float(local.max()) * scale if local.size else 0.0
         if collective:

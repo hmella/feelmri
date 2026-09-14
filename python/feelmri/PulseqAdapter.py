@@ -3318,10 +3318,13 @@ def simulate_pulseq(seq_path,
     b0_nodal = b0_field is not None and b0_field.kind == 'nodal'
     b0_phi_nodal = None
     if b0_nodal:
+      # No `location=`: the per-node path samples the expression at the
+      # phantom's own nodes, which `_scanner_nodes` has already mapped back
+      # through `_orientation` and `_location`, so an origin argument here
+      # would be applied twice. It used to be accepted and discarded.
       b0_read = b0_field.readout_terms(
           phantom, scanner, moving=pod is not None,
-          rotation=getattr(phantom, '_orientation', None),
-          location=getattr(phantom, '_location', None))
+          rotation=getattr(phantom, '_orientation', None))
       b0_phi_nodal = np.asarray(b0_read.phi_nodal,
                                 dtype=np.float64).reshape(-1)
       # None on a static phantom, where the nodal value IS the Eulerian answer

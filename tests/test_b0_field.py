@@ -6,6 +6,8 @@ being frozen to the node. These tests cover the expansion and the frame
 algebra alone; the physics that the two channels behave differently under
 motion lives in `test_signal_analytical.py`.
 """
+import warnings
+
 import numpy as np
 import pytest
 from pint import Quantity
@@ -377,14 +379,24 @@ def test_a_degenerate_point_set_is_refused_rather_than_fitted_exactly():
     assert abs(ok.quadratic_mT_per_m2()[2] - 1.0e-3) < 1e-9
 
 
-def test_the_node_stamp_sees_a_rigid_translation(tmp_path):
-    """A per-node array paired with a mesh that has MOVED is the failure the
-    stamp exists to refuse, and a stamp built from two coordinates missed it.
+def test_the_node_stamp_sees_a_translation_and_a_reordering(tmp_path):
+    """A per-node array paired with a mesh that has MOVED, or whose nodes have
+    been RENUMBERED, is the failure the stamp exists to refuse.
 
-    The old stamp recorded `nodes[0, 0]` and `nodes[-1, -1]` -- the x of the
-    first node and the z of the last -- so a pure translation ALONG Y left it
-    bit-identical while every node had moved. It also raised `IndexError` on a
-    rank that owns no nodes, from inside every per-node accessor.
+    The original stamp recorded `nodes[0, 0]` and `nodes[-1, -1]` -- the x of
+    the first node and the z of the last -- so a pure translation ALONG Y left
+    it bit-identical while every node had moved. It also raised `IndexError` on
+    a rank that owns no nodes, from inside every per-node accessor.
+
+    Replacing those with two MOMENTS fixed the translation and silently gave
+    up the reordering: `nodes.sum(axis=0).sum()` and `flat @ flat` are both
+    symmetric functions of the rows, so a permuted node set produced a
+    BIT-IDENTICAL stamp. That is the worse half of the two -- under a
+    translation the values are at least wrong everywhere, while under a
+    renumbering every value is still valid and merely belongs to a different
+    node. The assertion that was supposed to catch it read
+    `assert ... != stamp or True`, which is true whatever the stamp does.
+    The index-weighted sum is the term that sees it.
     """
     class _Cloud:
         def __init__(self, nodes):
@@ -399,9 +411,17 @@ def test_the_node_stamp_sees_a_rigid_translation(tmp_path):
         assert B0Field._node_stamp(_Cloud(moved)) != stamp, (
             f'a rigid translation along {name} does not change the stamp')
     # A reordering is a different node-to-value pairing and must not pass.
-    assert B0Field._node_stamp(_Cloud(nodes[::-1])) != stamp or True
-    # A rank that owns nothing must produce a stamp, not an exception.
-    B0Field._node_stamp(_Cloud(np.zeros((0, 3))))
+    assert B0Field._node_stamp(_Cloud(nodes[::-1])) != stamp, (
+        'a renumbered node set produces the same stamp, so a per-node array '
+        'can be paired with the wrong nodes and accepted')
+    # And a permutation that is not a reversal, so the test is not passing on
+    # one special case.
+    order = np.array([2, 0, 3, 1])
+    assert B0Field._node_stamp(_Cloud(nodes[order])) != stamp
+    # A rank that owns nothing must produce a stamp of the same shape, not an
+    # exception and not a tuple the comparison above would fail to compare.
+    empty = B0Field._node_stamp(_Cloud(np.zeros((0, 3))))
+    assert len(empty) == len(stamp)
 
 
 def test_a_fit_that_only_interpolates_the_nodes_falls_back_to_the_nodes(tmp_path):
@@ -448,6 +468,47 @@ def test_a_fit_that_only_interpolates_the_nodes_falls_back_to_the_nodes(tmp_path
             f'n={n}: a genuine degree-2 field came back as {poly.kind} '
             f'order {poly.order}')
 
+    # The guard has to be able to RUN before its verdict means anything. It
+    # seeded the field's lo/hi at 0.0 on a rank owning no elements and reduced
+    # with MIN/MAX, so on a field that does not straddle zero -- a shim written
+    # as a large uniform offset plus a small spatial term, which is how this
+    # class documents them -- the span picked up the whole offset and the
+    # threshold could not fire. Measured: 1.8e-04 mT of real variation
+    # reported as 5.0 mT, a factor of 2.8e+04.
+    lat = np.stack(np.meshgrid(*[np.linspace(-0.1, 0.1, 4)] * 3,
+                               indexing='ij'), -1).reshape(-1, 3)
+    elems = np.random.default_rng(0).permutation(len(lat))[:60].reshape(-1, 4)
+
+    class _Mesh:
+        def __init__(self, nodes, cells):
+            self.local_nodes, self.local_elements = nodes, cells
+
+    shim = lambda q: 5.0 + 1.0e-3 * q[:, 2]
+    fitted = B0Field.fit(shim, lat, collective=False)
+    _gap, span = B0Field._holdout_residual(shim, _Mesh(lat, elems), lat,
+                                           fitted, False)
+    assert span < 1.0e-3, (
+        f'the span is {span:.4g} mT for a field whose variation is 2e-4 mT; '
+        f'it is measuring the DC offset, so the guard cannot fire')
+
+    # And no connectivity ANYWHERE is "could not check", not "checked and
+    # clean" -- the one input class the guard cannot inspect was the one it
+    # waved through.
+    _gap0, span0 = B0Field._holdout_residual(
+        shim, _Mesh(lat, np.zeros((0, 4), dtype=int)), lat, fitted, False)
+    assert span0 is None
+
+    # A fit ABOVE the class cap is not a usable field: `quadratic_mT_per_m2`
+    # and `in_frame_full` both refuse degree 3, so it used to be handed back
+    # and raise from inside `BlochSolver` -- the outcome the docstring's
+    # promised fallback exists to prevent.
+    cubic = B0Field.on_phantom(lambda q: 1.0e-3 * q[:, 2] ** 3,
+                               _Mesh(lat, elems), collective=False,
+                               max_order=3)
+    assert cubic.kind == 'nodal', (
+        f'a degree-3 fit came back as a {cubic.kind} expansion of order '
+        f'{cubic.order}, which nothing downstream can consume')
+
 
 def test_the_degenerate_node_sets_a_rank_can_own_are_carried_not_crashed():
     """Under MPI a rank can own no nodes at all, and an audit-6 guard turned
@@ -488,3 +549,74 @@ def test_the_degenerate_node_sets_a_rank_can_own_are_carried_not_crashed():
     # done: the fit is global, the sampling is local and local is empty.
     rough._nodal_mT = np.zeros(0)
     assert 'nodes=0' in repr(rough)
+
+
+def test_the_fit_is_a_property_of_the_field_not_of_the_geometry_it_is_sampled_on():
+    """The same field on the same shape of cloud must fit the same way whether
+    that cloud is 20 cm across or 2 microns.
+
+    It did not. The design's monomial columns span `L^degree`, so on a cloud a
+    millimetre across the quadratic columns are ~1e-6 of the constant one, and
+    the NORMAL equations square that. Two separate failures followed, and the
+    first hid the second:
+
+    * the rank was read off the normal matrix, whose condition number is the
+      square of the design's, so the effective refusal threshold was
+      `cond(design) ~ 1.5e7` -- about half the decades a rank test on the
+      design allows. An exact degree-2 field over a 0.1 mm box was reported as
+      "linearly dependent on these points", which is a false diagnosis: the
+      points are fine, the normal equations are not.
+    * with that corrected the fit still failed, now honestly -- it came back
+      with a residual of 4.388e-12 mT against a variation of 4.403e-12, i.e.
+      99.7%, for a field it represents exactly.
+
+    Fitting on positions scaled to unit RMS radius and scaling the
+    coefficients back fixes both, and makes the answer independent of the
+    units the geometry happens to be in.
+    """
+    truth = lambda p: 1.0e-3 * (p[:, 0] ** 2 + p[:, 1] * p[:, 2])
+    for half in (1.0e-1, 1.0e-3, 1.0e-5):
+        pts = np.random.default_rng(0).uniform(-half, half, size=(400, 3))
+        field = B0Field.fit(truth, pts, collective=False)
+        want = truth(pts)
+        err = np.abs(field(pts) - want).max() / np.abs(want).max()
+        assert field.order == 2, (
+            f'a cloud {2 * half:g} m across was refused or truncated; the fit '
+            f'came back at order {field.order}')
+        assert err < 1.0e-12, (
+            f'at a half-extent of {half:g} m the degree-2 fit of an exact '
+            f'degree-2 field is {err:.3e} off')
+
+    # A CONSTANT field divides 0/0 in the finite-difference smoothness check:
+    # its gradient is zero everywhere, so the pointwise floor derived from the
+    # peak gradient is zero too. It produced a RuntimeWarning and a NaN drift,
+    # which is an exception under `-W error`.
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        g = B0Field._sample_gradient(lambda p: np.full(p.shape[0], 2.0),
+                                     _points(60), collective=False)
+    assert np.all(np.isfinite(g)) and not np.any(g)
+
+
+def test_the_accessors_of_one_field_cannot_describe_two_different_fields():
+    """`__call__` evaluates the coefficient vector; `in_frame_full`, `phi_offset`
+    and `in_frame` read the `offset_mT` / `gradient_mT_per_m` mirrors.
+
+    The constructor checked only that the vector had the right LENGTH for its
+    order, so a hand-built field could answer 0 at a point while reporting a
+    5 mT offset -- two fields in one object, each self-consistent on its own
+    accessors, and which one the solver sees depends on which path it takes.
+    `fit` builds both halves together so its fields were always consistent;
+    this bites exactly the hand-built spelling the tests use.
+    """
+    with pytest.raises(ValueError, match='disagree'):
+        B0Field(Quantity(5.0, 'mT'), Quantity([1.0, 0.0, 0.0], 'mT/m'),
+                order=2, coefficients=np.zeros(10))
+
+    # The consistent spelling still constructs, and the two halves agree.
+    coef = np.zeros(10)
+    coef[0], coef[1] = 5.0, 1.0
+    field = B0Field(Quantity(5.0, 'mT'), Quantity([1.0, 0.0, 0.0], 'mT/m'),
+                    order=2, coefficients=coef)
+    b, g = field.in_frame()
+    assert field([[1.0, 0.0, 0.0]])[0] == pytest.approx(b + g[0])
