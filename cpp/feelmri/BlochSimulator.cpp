@@ -88,12 +88,22 @@ MagnetizationState<T> solve_mri_impl(
   // Loop-invariant: zero disables the concomitant term exactly. A NEGATIVE B0
   // is not a sentinel, it is malformed input -- treating it as "off" made an
   // explicit concomitant_fields=True a silent no-op.
+  //
+  // Both tests read the IEEE bit pattern rather than comparing the float.
+  // Under -ffinite-math-only a NaN loses BOTH comparisons, so `B0 < 0` would
+  // let it through and `B0 > 0` would then silently switch the term off --
+  // reinstating exactly the no-op the refusal above exists to prevent.
+  if (!feelmri_is_finite(B0)) {
+    throw std::invalid_argument(
+        "solve_mri: B0 must be a finite field strength in mT (0 disables the "
+        "concomitant term); got a non-finite value");
+  }
   if (B0 < T(0)) {
     throw std::invalid_argument(
         "solve_mri: B0 must be >= 0 (0 disables the concomitant term); got a "
         "negative field strength");
   }
-  const bool concomitant = (B0 > T(0));
+  const bool concomitant = feelmri_is_positive(B0);
   const T inv_2B0 = concomitant ? T(1) / (T(2) * B0) : T(0);
 
   // Transmit (B1+) sensitivity, one complex scale per node. An EMPTY map is
