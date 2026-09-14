@@ -14,8 +14,8 @@ import pytest
 EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "examples"
 
 # Each script runs a full pipeline in a subprocess with a 180 s budget,
-# well past the global 30 s pytest-timeout default. Measured, the 16 of
-# them are 97 s -- half the suite's wall clock -- so they carry `slow`
+# well past the global 30 s pytest-timeout default. Measured, the 19 of
+# them are ~115 s -- half the suite's wall clock -- so they carry `slow`
 # and leave `-m "not slow"` a fast suite. CI does not deselect them.
 pytestmark = [
     pytest.mark.slow,
@@ -25,6 +25,7 @@ pytestmark = [
 
 @pytest.mark.parametrize("script", [
     "4dflow.py",
+    "4dflow_test.py",
     "b1_inhomogeneity.py",
     "coil_sensitivity.py",
     "concomitant_fields.py",
@@ -39,6 +40,7 @@ pytestmark = [
     "spamm.py",
     "t2_prime_spin_echo.py",
     "water_and_fat.py",
+    "water_and_fat_abdomen.py",
     # Both exit 0 with a message when pypulseq is absent, so they are safe to
     # list unconditionally. The writer redirects its .seq under
     # FEELMRI_FAST_TEST so it cannot overwrite the tracked fixture the

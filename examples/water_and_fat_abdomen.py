@@ -17,6 +17,9 @@ from feelmri.Phantom import FEMPhantom
 from feelmri.Plotter import MRIPlotter
 from feelmri.Recon import CartesianRecon
 
+# Enable fast mode for testing if the environment variable is set
+FAST_MODE = os.getenv("FEELMRI_FAST_TEST", "0") == "1"
+
 
 # Field inhomogeneity
 def spatial(x):
@@ -33,6 +36,12 @@ if __name__ == '__main__':
 
   # Import imaging parameters
   parameters = ParameterHandler(script_path/'parameters/water_and_fat_abdomen.yaml')
+
+  # A 150 x 110 acquisition at one line per shot is 110 solver passes per
+  # species; the test runner only needs the pipeline to execute end to end.
+  if FAST_MODE:
+    parameters.Imaging.RES = [60, 44, 1]
+    parameters.Imaging.LinesPerShot = 44
 
   # Import PVSM file to get the FOV, LOC and MPS orientation
   planning = PVSMParser(script_path/parameters.Formatting.planning,

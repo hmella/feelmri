@@ -92,7 +92,7 @@ if __name__ == '__main__':
   # error in 18 / 27 / 43 s, so 6 costs 63% more for nothing.
   phantom = FEMPhantom(path=script_path/'phantoms/water_fat_P1_prism.xdmf',
                        scale_factor=0.01)
-  phantom.set_assembler(voxel_size=2e-3, lorder=2, horder=6,
+  phantom.set_assembler(voxel_size=2e-3, lorder=2, horder=4,
                         nodal_approximation=False, lumped=False)
   nodes = phantom.local_nodes
   n_local = nodes.shape[0]
@@ -108,7 +108,7 @@ if __name__ == '__main__':
   # 0.6*pi across the half-width, so the ramp spans 1.2*pi end to end and
   # never wraps -- a ramp that wraps is still recovered correctly but the
   # comparison below would have to unwrap it to say so.
-  M0 = 1.0e+10
+  M0 = 1.0e+7
   reach, phase_gain = 0.10, 0.6*np.pi
   true_phase = (phase_gain * nodes[:, 0] / reach).astype(np.float32)
 
@@ -118,13 +118,15 @@ if __name__ == '__main__':
   # `Mz <- Mz*E1 + (1-E1)*M0` -- there is no M0 in the transverse update at
   # all. This block is `empty=True`, so there is no RF to tip Mz into the
   # transverse plane, `initial_Mz` is 0, and the readout takes Mxy. Measured:
-  # raising M0 from 1 to 1e10 moves Mz from 5e-10 to 5 and leaves |Mxy| at
-  # exactly 1. So M0 is still declared below because it is the honest
-  # equilibrium value, but it cannot reach this image except through here.
+  # raising `BlochSolver(M0=...)` from 1 to 1e10 moves Mz from 5e-10 to 5 and
+  # leaves |Mxy| at exactly 1. So M0 is still declared below because it is the
+  # honest equilibrium value, but it cannot reach this image except through
+  # here -- which is why changing the constant above only rescales the figure
+  # and moves none of the three checks, all of which are ratios or phases.
   initial_Mxy = (M0 * np.exp(1j * true_phase)).astype(np.complex64)
 
   # What the image level then is, end to end:
-  #     S(0)       = |Mxy| x mesh volume            = M0 x 1.569e-3
+  #     S(0)       = |Mxy| x mesh volume            = M0 x 1.569e-3   (mesh volume in m^3)
   #     image peak = 1.29 x S(0) / n_samples
   # the 1/n_samples being the adjoint NUFFT's normalisation and the 1.29 the
   # point-spread overshoot at the disc edge. Both are fixed by the geometry and

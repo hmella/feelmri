@@ -9,7 +9,7 @@ from pint import Quantity as Q_
 
 from feelmri.Bloch import BlochSolver, Sequence, SequenceBlock
 from feelmri.KSpaceTraj import CartesianStack
-from feelmri.MPIUtilities import MPI_print, gather_data
+from feelmri.MPIUtilities import MPI_print, MPI_rank, gather_data
 from feelmri.MRImaging import SliceProfile
 from feelmri.MRObjects import RF, B0Field, Scanner
 from feelmri.Noise import add_cpx_noise
@@ -140,7 +140,23 @@ if __name__ == '__main__':
                + planning.LOC.m_as('m'))
   peak = np.abs(spatial(lab_nodes).flatten()).max()
   b0_field = B0Field.on_phantom(
-      lambda x: Q_(1.5e-6 * spatial(x)**2 / peak, 'T'), phantoms[-1])
+      lambda x: Q_(1.5e-6 * spatial(x) / peak, 'T'), phantoms[-1])
+
+  # Asserted, not just printed: an example that only reports its own error
+  # exits 0 however wrong the physics has become. The bore field is the one
+  # ingredient here with a closed form. `spatial` is a polynomial, so `fit`
+  # must represent it essentially exactly and `residual_rms_mT` -- what the
+  # fit itself says it could not carry -- must sit at round-off. A residual
+  # above that means the expansion silently truncated the field, which shows
+  # up as a wrong geometric distortion and nothing else.
+  peak_mT = 1.5e-6 * 1e3
+  MPI_print('B0 field: {:s} expansion at order {:d}, fit residual {:.2e} mT '
+            'against a {:.2e} mT peak'.format(
+              b0_field.kind, b0_field.order, b0_field.residual_rms_mT, peak_mT))
+  assert b0_field.residual_rms_mT < 1e-6 * peak_mT, (
+    f'the bore field did not fit: residual {b0_field.residual_rms_mT:.3e} mT '
+    f'against a {peak_mT:.3e} mT peak. A polynomial expression must fit '
+    f'exactly at its own degree.')
 
   # Create sequence object
   seq = Sequence()
@@ -256,6 +272,13 @@ if __name__ == '__main__':
 
   # Image reconstruction
   I = CartesianRecon(K, traj)
+
+  # A NaN anywhere in the static fields turns EVERY k-space sample into NaN
+  # rather than its own contribution, so the cheapest end-to-end check is that
+  # the image is finite and carries signal at all.
+  if MPI_rank == 0:
+    assert np.all(np.isfinite(I)), 'the reconstruction carries a non-finite value'
+    assert np.abs(I).max() > 0.0, 'the reconstruction is identically zero'
 
   # Show reconstruction
   mag = np.abs(I[...,0,:])
