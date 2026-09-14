@@ -24,7 +24,10 @@ def _fields(n_coils=4, shape=(6, 5), seed=7):
     return S, m
 
 
-@pytest.mark.parametrize('n_coils', [1, 2, 8])
+# `n_coils=1` is not in this sweep: `test_none_and_rss_pass_a_single_channel
+# _through_where_roemer_divides` asserts the same roemer line verbatim, plus
+# the two claims only the single-channel case can make.
+@pytest.mark.parametrize('n_coils', [2, 8])
 def test_roemer_inverts_a_known_sensitivity_exactly(n_coils):
     """`I_c = S_c m` is what the forward model produces, so the matched filter
     returns `m` itself -- magnitude shading and coil phase both removed."""
@@ -62,10 +65,13 @@ def test_rss_recovers_the_magnitude_and_discards_the_phase():
     assert np.abs(np.angle(m)).max() > 1.0, 'the object had no phase to lose'
 
 
-def test_a_single_channel_is_unwrapped_by_none_and_rss_but_divided_by_roemer():
+def test_none_and_rss_pass_a_single_channel_through_where_roemer_divides():
     """The three differ at one channel, and the difference is deliberate:
     `None` and `'rss'` keep their pre-existing behaviour, while the matched
-    filter still divides the shading out."""
+    filter still divides the shading out.
+
+    The multi-channel pass-through is asserted here too, so `None` keeping
+    every channel is covered at one channel and at three by one test."""
     S, m = _fields(1)
     img = S * m[None]
     assert np.array_equal(_combine_channels(img, None, None), img[0])
@@ -76,13 +82,12 @@ def test_a_single_channel_is_unwrapped_by_none_and_rss_but_divided_by_roemer():
     # uncombined single-coil image is off by 2.1x the object's own peak.
     assert np.abs(img[0] - m).max() > 0.5 * np.abs(m).max()
 
-
-def test_none_keeps_every_channel():
-    S, m = _fields(3)
-    img = S * m[None]
-    kept = _combine_channels(img, None, None)
-    assert kept.shape == img.shape
-    assert np.array_equal(kept, img)
+    # And at more than one channel `None` is a pass-through of the whole stack.
+    S3, m3 = _fields(3)
+    img3 = S3 * m3[None]
+    kept = _combine_channels(img3, None, None)
+    assert kept.shape == img3.shape
+    assert np.array_equal(kept, img3)
 
 
 def test_roemer_zeroes_the_region_no_coil_can_see():

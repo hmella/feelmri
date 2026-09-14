@@ -191,7 +191,7 @@ def test_using_restores_partition_even_on_error(tmp_path):
   assert phantom._active_partition == 'bloch'
 
 
-def test_redistribution_is_exact_and_total(tmp_path):
+def test_redistribution_is_exact_total_and_reversible(tmp_path):
   """Moving nodal data between layouts must be lossless and cover every node.
 
   Values are keyed to the *global* node index, so a correct redistribution
@@ -208,14 +208,10 @@ def test_redistribution_is_exact_and_total(tmp_path):
   assert out.shape == (g_dst.size, 1)
   assert np.array_equal(out.reshape(-1), want), 'redistribution is not exact'
 
-
-def test_redistribution_round_trip(tmp_path):
-  """signal -> bloch -> signal must return the original values."""
-  phantom = _graded_phantom(tmp_path)
-  phantom.enable_dual_partition(voxel_size=5.0, lorder=1, horder=6,
-                                nodal_approximation=False, lumped=False)
-  g = phantom._partitions['signal']['_local_to_global_nodes']
-  a = (np.cos(g * 0.03)).astype(np.float32).reshape(-1, 1)
+  # The other direction, and a real float32 array rather than complex64:
+  # signal -> bloch -> signal must return what it was given. Exactness above
+  # implies it, but only for the direction and dtype it was measured on.
+  a = (np.cos(g_dst * 0.03)).astype(np.float32).reshape(-1, 1)
   back = phantom.redistribute_nodal(
     phantom.redistribute_nodal(a, 'signal', 'bloch'), 'bloch', 'signal')
   assert np.array_equal(back, a)
