@@ -13,7 +13,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle
 
-from feelmri.MPIUtilities import MPI_comm, MPI_rank
+from feelmri.MPIUtilities import MPI_comm, MPI_rank, collective_raise
 
 
 LINESHAPES = ('gaussian', 'uniform', 'lorentzian')
@@ -311,13 +311,19 @@ def plot_isochromat_voxel(positions, *, R=None, ax=None,
   returns ``None`` to mirror the convention used by
   :meth:`SequenceBlock.plot` and :meth:`Sequence.plot`.
   """
+  # Validated BEFORE the rank split and through the collective, because
+  # `positions` is per-rank data: a bare raise on rank 0 left every other rank
+  # already waiting in the Barrier below, turning a one-line shape mistake
+  # into a hang.
+  positions = np.asarray(positions)
+  collective_raise(
+      '' if positions.ndim == 2 and positions.shape[1] == 3 else
+      f'plot_isochromat_voxel: rank {MPI_rank} was given positions of shape '
+      f'{positions.shape}; it must be (K, 3).')
+
   if MPI_rank != 0:
     MPI_comm.Barrier()
     return None
-
-  positions = np.asarray(positions)
-  if positions.ndim != 2 or positions.shape[1] != 3:
-    raise ValueError(f'positions must have shape (K, 3); got {positions.shape}')
 
   from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 (registers 3D proj)
   if ax is None:
@@ -351,12 +357,16 @@ def plot_isochromat_voxel(positions, *, R=None, ax=None,
   except (NotImplementedError, ValueError):
     pass
 
-  if export_to is not None:
-    fig.savefig(export_to, bbox_inches='tight')
-  if show:
-    plt.show()
-
-  MPI_comm.Barrier()
+  # The other ranks are already in this Barrier, so rank 0 must reach it
+  # whatever the drawing does -- a savefig onto an unwritable path would
+  # otherwise strand them.
+  try:
+    if export_to is not None:
+      fig.savefig(export_to, bbox_inches='tight')
+    if show:
+      plt.show()
+  finally:
+    MPI_comm.Barrier()
   return ax
 
 
@@ -423,7 +433,9 @@ def plot_multi_isochromat_dephasing(
         elem_radius=None,
         t_index=None,
         show_positions=True,
-        title_prefix="Isochromat Dephasing"):
+        title_prefix="Isochromat Dephasing",
+        show=True,
+        export_to=None):
     """
     Visualizes the K isochromats from original FE node idx in the complex plane,
     together with the original node and element radius.
@@ -444,7 +456,18 @@ def plot_multi_isochromat_dephasing(
         Original node coordinates. Only used for plotting reference.
     elem_radius : float, optional
         Radius for element visualization around original node.
+    show : bool, optional
+        Call ``plt.show()`` when done.
+    export_to : str or path-like, optional
+        Save the figure to this path.
     """
+
+    # Rank-0 guarded, like `plot_isochromat_voxel`: without it every rank
+    # opened its own window. There is no collective in this body, so no
+    # Barrier is needed -- and adding one would create the hazard rather
+    # than remove it.
+    if MPI_rank != 0:
+        return None
 
     # Determine which rows in x_big / Mxy_big correspond to node idx
     start = idx * K
@@ -525,4 +548,8 @@ def plot_multi_isochromat_dephasing(
         ax2.legend()
 
     plt.tight_layout()
-    plt.show()
+    if export_to is not None:
+        fig.savefig(export_to, bbox_inches='tight')
+    if show:
+        plt.show()
+    return fig

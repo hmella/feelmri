@@ -52,7 +52,7 @@ def _per_rank_decompositions(pod):
     """Names of the components of `pod` whose decomposition is per rank.
 
     Only a `POD` has a decomposition to get wrong: built without
-    `global_to_local` it runs its SVD on this rank's slice, so its modes carry
+    `local_to_global_nodes` it runs its SVD on this rank's slice, so its modes carry
     a normalisation its weights undo and neither survives being moved to
     another rank. A trajectory that carries no decomposition is safe by
     construction -- `RespiratoryMotion` broadcasts ONE direction vector to
@@ -125,7 +125,7 @@ class FEMPhantom:
         self.local_elements = mesh['elements']
         self.local_nodes = mesh['nodes']
         self.local_shape = self.global_nodes.shape
-        self.bbox = self.bounding_box()
+        self.bounding_box()
 
         # Calculate element size
         self._element_size_assembler = SignalAssembler(self.global_elements, self.global_nodes, self.cell_type, 1)
@@ -231,7 +231,7 @@ class FEMPhantom:
         return hit[1], hit[2], hit[3]
 
     @staticmethod
-    def _maxwell_inputs(maxwell, kspace_times):
+    def _maxwell_inputs(who, maxwell, kspace_times):
         """Split concomitant phase coefficients into the assembler's container.
 
         ``maxwell`` is ``(N, 6)`` in rad/m^2 -- the output of
@@ -246,14 +246,14 @@ class FEMPhantom:
         m = np.asarray(maxwell)
         if m.ndim != 2 or m.shape[1] != 6:
             raise ValueError(
-                f"mri_signal: maxwell must be (N, 6) phase coefficients in "
+                f"{who}: maxwell must be (N, 6) phase coefficients in "
                 f"rad/m^2 over x^2, y^2, z^2, xy, xz and yz, got shape "
                 f"{m.shape}. Build it with maxwell_phase_coefficients, which "
                 f"carries the signs, the 1/B0 and any orientation.")
         shape = np.shape(kspace_times)
         if m.shape[0] != int(np.prod(shape)):
             raise ValueError(
-                f"mri_signal: {m.shape[0]} maxwell coefficients against "
+                f"{who}: {m.shape[0]} maxwell coefficients against "
                 f"{int(np.prod(shape))} k-space samples.")
         return [np.ascontiguousarray(m[:, c].reshape(shape), dtype=np.float32)
                 for c in range(6)]
@@ -323,7 +323,7 @@ class FEMPhantom:
         Notes
         -----
         This method modifies the global mesh in place. The original mesh is
-        preserved in ``_global_nodes`` and ``_global_elements``.
+        node array is preserved in ``_global_nodes``.
         """
         # Get element indexes where profile is non-zero (given a tolerance)
         submesh_elems = self.global_elements[markers, :]
@@ -339,11 +339,10 @@ class FEMPhantom:
         # Remap the element node indices to the new submesh node indices
         submesh_elems = mapped_nodes[submesh_elems]
 
-        # Backup original mesh
+        # Backup the original node array. Only the nodes are kept: the other
+        # three were stored and read by nothing, while `_global_nodes` is
+        # what `to_submesh` checks an incoming array's length against.
         self._global_nodes = self.global_nodes
-        self._global_elements = self.global_elements
-        self._global_elem_size = self.global_elem_size
-        self._global_shape = self.global_shape
 
         # Update mesh parameters and backup original mesh
         self.global_nodes = submesh_nodes
@@ -566,7 +565,7 @@ class FEMPhantom:
         """Global index of each local node.
 
         Reading this binds the caller to the current partition -- it is what a POD
-        trajectory captures via ``global_to_local`` -- so a later repartition would
+        trajectory captures via ``local_to_global_nodes`` -- so a later repartition would
         silently invalidate whatever was built from it. Accessing it therefore marks
         the partition as in use, and :meth:`enable_dual_partition` then refuses.
         """
@@ -896,7 +895,7 @@ class FEMPhantom:
         collective_raise(
             "" if not offenders else
             f"FEMPhantom: {' and '.join(sorted(set(offenders)))} in this "
-            "trajectory was built without `global_to_local`, so its "
+            "trajectory was built without `local_to_global_nodes`, so its "
             "decomposition is per rank -- each rank's modes carry its own "
             "normalisation. Dual partitioning redistributes them between "
             "ranks, which pairs a node's mode with another rank's weights. "
@@ -985,6 +984,28 @@ class FEMPhantom:
         size = np.asarray(self.global_elem_size, dtype=np.float64)
         return np.where(size < voxel_size, nq_lo, nq_hi) / float(cost_ratio)
 
+    @staticmethod
+    def _agreed_field_names(who, local_data):
+        """The field list every rank will gather, agreed before any collective.
+
+        Returns the sorted field names, or ``None`` when every rank passed
+        ``None``. The comparison is made on a value every rank already holds
+        after one allgather, so the refusal is symmetric and a bare raise is
+        correct here -- the same shape ``_check_bin_preconditions`` uses.
+        """
+        names = None if local_data is None else tuple(sorted(local_data))
+        if MPI_size == 1:
+            return names
+        seen = MPI_comm.allgather(names)
+        if any(s != seen[0] for s in seen[1:]):
+            shown = ', '.join(
+                'none' if s is None else '{' + ', '.join(s) + '}' for s in seen)
+            raise ValueError(
+                f"{who}: every rank must pass the same fields, because each "
+                f"one costs a collective and they are entered in order. Rank "
+                f"by rank: {shown}.")
+        return seen[0]
+
     def gather_to_global(self, local_point_data=None, local_cell_data=None):
         """Gather local point/cell data from all MPI ranks into global arrays on rank 0.
 
@@ -1001,13 +1022,25 @@ class FEMPhantom:
             ``(global_pd, global_cd)`` where each is a dict of global arrays
             on rank 0, or ``(None, None)`` on ranks > 0.
         """
+        # Every `gather` below is a collective, and both arguments are
+        # per-rank: iterating each rank's own dict makes the NUMBER of
+        # collectives, and their order, depend on what that rank was handed.
+        # A rank passing None, or the same fields in a different order,
+        # desynchronises every collective after it. The field list is agreed
+        # first and the loops walk the agreed list.
+        point_names = self._agreed_field_names(
+            'gather_to_global point data', local_point_data)
+        cell_names = self._agreed_field_names(
+            'gather_to_global cell data', local_cell_data)
+
         global_pd = None
         global_cd = None
 
         # Process Point Data
-        if local_point_data is not None:
+        if point_names is not None:
             global_pd = {}
-            for key, local_array in local_point_data.items():
+            for key in point_names:
+                local_array = local_point_data[key]
                 # Gather all local arrays and their global indices to Rank 0
                 gathered_data = MPI_comm.gather(local_array, root=0)
                 gathered_indices = MPI_comm.gather(self._local_to_global_nodes, root=0)
@@ -1026,9 +1059,10 @@ class FEMPhantom:
                     global_pd[key] = global_array
 
         # Process Cell Data
-        if local_cell_data is not None:
+        if cell_names is not None:
             global_cd = {}
-            for key, local_array in local_cell_data.items():
+            for key in cell_names:
+                local_array = local_cell_data[key]
                 gathered_data = MPI_comm.gather(local_array, root=0)
                 gathered_indices = MPI_comm.gather(self.local_to_global_elems, root=0)
 
@@ -1660,16 +1694,22 @@ class FEMPhantom:
         ``IndexError`` rank-locally, inside a loop whose next step is a
         collective.
 
-        The element count IS per-rank, so the message is computed everywhere
-        and the collective is entered unconditionally.
+        Both conditions read per-rank state, so both messages are computed
+        everywhere and both collectives are entered unconditionally.
         """
+        # BOTH conditions read per-rank state, so both go through the
+        # collective. Whether `assembler` exists at all is rank-local too --
+        # a `set_assembler` reached under `if MPI_rank == 0:` gives one rank
+        # the attribute and not the others -- and a bare raise there left
+        # every other rank inside the allgather of the check below it.
         groups = getattr(self, 'assembler', None)
-        if groups is None:
-            raise RuntimeError(
-                f"{who}: this phantom has no assembler. Call `set_assembler` "
-                f"first -- the voxel size and the quadrature orders are "
-                f"modelling decisions, and guessing them would be worse than "
-                f"saying so.")
+        collective_raise(
+            '' if groups is not None else
+            f"{who}: rank {MPI_rank} has no assembler. Call `set_assembler` "
+            f"on EVERY rank -- the voxel size and the quadrature orders are "
+            f"modelling decisions, and guessing them would be worse than "
+            f"saying so.", RuntimeError)
+        # Reaching here means every rank has the attribute, so `len` is safe.
         collective_raise(
             '' if len(groups) else
             f"{who}: rank {MPI_rank} was given no elements by the partition, "
@@ -1692,7 +1732,7 @@ class FEMPhantom:
         with self._using('signal'):
             t_cpp, m_x, m_y, m_z, w, has_traj = self._prepare_pod_data(kspace_times, pod)
             yield (t_cpp, m_x, m_y, m_z, w, has_traj,
-                   self._maxwell_inputs(maxwell, kspace_times))
+                   self._maxwell_inputs(who, maxwell, kspace_times))
 
     def mri_signal(self, kspace_points, kspace_times, pod=None,
                    maxwell=None):

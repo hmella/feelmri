@@ -87,6 +87,16 @@ def _run_refusal_case(case, phantom, scanner, n_local, globals_):
         g = np.zeros((n_local, 3), dtype=np.float64)
         g[globals_ == 0, 1] = np.nan
         phantom.set_b0_gradient(g)
+    elif case == 'no_assembler':
+        # `set_assembler` reached on rank 0 only -- the shape the repo's own
+        # rank-0-only mesh idiom invites. Whether `self.assembler` exists is
+        # rank-local state, and the guard's first arm raised bare while its
+        # second arm was the collective that reports such things.
+        if MPI_rank == 0:
+            phantom.set_assembler(voxel_size=1e3, lorder=1, horder=1,
+                                  nodal_approximation=True, lumped=True)
+        k = [np.zeros((2, 1), dtype=np.float32) for _ in range(3)]
+        phantom.mri_signal(k, np.zeros((2, 1), dtype=np.float32))
     elif case == 'b0_field_present':
         # SPMD code that builds the field from a rank-local condition leaves
         # one rank with None. `field is not None and field.is_zero_everywhere()`
@@ -182,7 +192,7 @@ def main(argv=None):
                            'coil_map', 'b0_gradient', 'b0_field_present',
                            'b0_expression_rows', 'b0_gradient_rows',
                            'signal_modes_per_rank',
-                           'signal_modes_weights_disagree'],
+                           'signal_modes_weights_disagree', 'no_assembler'],
                   help='exercise one per-node refusal whose condition is true '
                        'on a SUBSET of ranks; every rank must raise')
   ap.add_argument('--poison-at-solve', type=int, default=-1,

@@ -493,7 +493,8 @@ def test_a_rank_asymmetric_refusal_does_not_hang(tmp_path):
                                   'b0_field_present', 'b0_expression_rows',
                                   'b0_gradient_rows',
                                   'signal_modes_per_rank',
-                                  'signal_modes_weights_disagree'])
+                                  'signal_modes_weights_disagree',
+                                  'no_assembler'])
 def test_every_per_node_refusal_reaches_every_rank(tmp_path, case):
   """Three more refusals whose condition is true on a SUBSET of ranks, each
   sitting upstream of a collective. All three hung.
@@ -526,6 +527,16 @@ def test_every_per_node_refusal_reaches_every_rank(tmp_path, case):
   - `signal_modes_per_rank`: the per-rank-POD refusal was written INSIDE the
     branch that found the problem, so a rank holding a correctly built
     trajectory walked on into `redistribute_nodal`'s Alltoallv.
+  And one from the pass after THAT, in a guard written the session before it
+  whose own docstring claimed the collective was already unconditional:
+
+  - `no_assembler`: `_require_assembler` checked two per-rank conditions and
+    made only the second collective. Whether the phantom HAS an assembler is
+    rank-local too -- a `set_assembler` under `if MPI_rank == 0:` gives it to
+    one rank -- and that arm raised bare, two lines above the allgather the
+    others were entering. Measured under `mpirun -n 2`: **the job timed out
+    (exit 124)**; it now raises on both ranks naming the rank that is short.
+
   - `signal_modes_weights_disagree`: the same defect reached through the
     attribute test's blind side. `_signal_modes` redistributes the MODES and
     nothing redistributes the WEIGHTS, so the weights must be identical on
@@ -569,8 +580,9 @@ def test_every_per_node_refusal_reaches_every_rank(tmp_path, case):
   # And refused for the RIGHT reason. Several of these fixtures can also trip
   # an unrelated shape check, which refuses on every rank and satisfies the
   # two assertions above while the guard under test never runs.
-  signature = {'signal_modes_weights_disagree': 'WEIGHTS differ between ranks',
-               'signal_modes_per_rank': 'without `global_to_local`',
+  signature = {'no_assembler': 'has no assembler',
+               'signal_modes_weights_disagree': 'WEIGHTS differ between ranks',
+               'signal_modes_per_rank': 'without `local_to_global_nodes`',
                'b0_gradient_rows': 'it must map (N, 3) to (N, 3)',
                'b0_expression_rows': 'it must map (N, 3) positions to (N,)',
                'b0_field_present': 'given on some ranks'}.get(case)
@@ -739,7 +751,7 @@ def test_a_per_rank_trajectory_is_refused_under_dual_partitioning(tmp_path):
     with another rank's weights -- and the displacement comes out wrong,
     silently. Measured on a 4 mm cube at 2 ranks: **1.76e-02 of peak**, against
     **8.8e-07** for the same motion built the documented way, from the global
-    snapshots plus `global_to_local`.
+    snapshots plus `local_to_global_nodes`.
 
     A rigid-translation fixture cannot see it as a mispairing, which is how it
     survived: every node has the same displacement, so only the normalisation
@@ -786,8 +798,8 @@ def test_a_per_rank_trajectory_is_refused_under_dual_partitioning(tmp_path):
                  sys.executable, str(script), str(mesh_path)], env)
     out = proc.stdout.decode(errors='replace')
     assert proc.returncode != 0, f'a per-rank trajectory was accepted:\n{out[-2000:]}'
-    assert 'global_to_local' in out, out[-3000:]
+    assert 'local_to_global_nodes' in out, out[-3000:]
     # Every rank, not just the one that noticed: the refusal sits upstream of
     # the redistribution's Alltoallv.
-    assert out.count('global_to_local') >= 2, (
+    assert out.count('local_to_global_nodes') >= 2, (
         f'the refusal reached fewer than both ranks:\n{out[-3000:]}')

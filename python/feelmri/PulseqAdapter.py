@@ -711,11 +711,6 @@ class PulseqImport:
     return block
 
 
-# RF use labels that open a coherence period. Kept for reference and for
-# callers that reason about grouping; the ANCHOR itself is not chosen from this
-# set -- see _identify_readout_groups for why any RF must anchor.
-_ANCHOR_USES = frozenset(('excitation', 'refocusing', 'undefined'))
-
 
 def _block_use_label(pulseq_seq: PulseqSequence, idx: int) -> Optional[str]:
   """Return the canonical 'use' label of the RF pulse on block ``idx``,
@@ -1883,7 +1878,13 @@ def simulate_pulseq(seq_path,
     # caller set, which the phantom remembers for exactly this.
     bins = None
     if getattr(solver, 'bin_magnetization', None) is not None:
+      # `phantom._static_fields` is rank-local, so the two arms below can be
+      # taken by different ranks. The message is computed on both and the
+      # collective is entered once, after the branch: with the raise inside
+      # the `else`, a rank that only warned walked on while its peers blocked
+      # in the allgather.
       remembered = getattr(phantom, '_static_fields', None)
+      mismatch = ''
       if remembered is None:
         logger.warning(
             "t2_prime is set but set_static_fields was never called, so the "
@@ -1892,9 +1893,7 @@ def simulate_pulseq(seq_path,
       else:
         offsets = solver.bin_offsets
         # The row counts are compared on local data, so under dual partitioning
-        # this fires on some ranks and not others. Every rank reaches the
-        # collective, with an empty message when clean.
-        mismatch = ''
+        # this fires on some ranks and not others.
         if (remembered[0].shape[0] != offsets.shape[0]
                 or remembered[1].shape[0] != offsets.shape[0]):
           mismatch = (
@@ -1903,8 +1902,9 @@ def simulate_pulseq(seq_path,
               f"(phi_dB0) rows against {offsets.shape[0]} sub-spin offsets. "
               f"set_static_fields must be called under the same partition the "
               f"solver was built on, or the two describe different nodes")
-        _collective_raise(mismatch)
-        bins = (solver.bin_magnetization, offsets,
+      _collective_raise(mismatch)
+      if remembered is not None:
+        bins = (solver.bin_magnetization, solver.bin_offsets,
                 solver.bin_weights, remembered[0], remembered[1])
 
     # Under dual partitioning every set_static_fields and update_magnetization
