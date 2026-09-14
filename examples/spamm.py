@@ -237,8 +237,6 @@ if __name__ == '__main__':
   # The reconstruction grids on the NOMINAL trajectory, and it stays nominal:
   # this field displaces the signal through the phase above rather than through
   # k, and the difference between the two is the geometric distortion.
-  kspace_points = traj.points
-  kspace_times = traj.times.m_as('ms') - traj.t_start.m_as('ms')
   for fr in range(Nb_frames):
 
     # Print progress
@@ -247,11 +245,14 @@ if __name__ == '__main__':
     # Update reference time of POD trajectory
     pod_trajectory.update_timeshift(fr * parameters.Imaging.TimeSpacing.m_as('ms'))
 
-    # Update magnetization
-    phantom.update_magnetization(Mxy_spamm[:, fr, :])
-
-    # Generate 4D flow image
-    K[:,:,:,:,fr] = phantom.mri_signal(kspace_points, kspace_times, pod_trajectory)
+    # The readout handoff. No `solver=` here on purpose: this field needs the
+    # per-node expansion, so it rides the phantom through `phi_dB0` and
+    # `set_b0_gradient` above rather than the trajectory, and `readout` would
+    # refuse to carry it a second time. `t_anchor=0.0` keeps this loop's own
+    # POD convention, where the timeshift above already carries the frame time.
+    K[:,:,:,:,fr] = phantom.readout(Mxy_spamm[:, fr, :], traj,
+                                    pod=pod_trajectory, scanner=scanner,
+                                    t_anchor=0.0)
 
   # Gather results
   K = gather_data(K)

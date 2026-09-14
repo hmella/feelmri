@@ -189,18 +189,13 @@ if __name__ == '__main__':
   vxsz = planning.FOV.m_as('m')/np.array(parameters.Imaging.RES)
   phantom.set_assembler(voxel_size=vxsz[0], lorder=1, horder=6, nodal_approximation=False)
 
-  # Set static fields. Only the uniform part of the scanner field rides on the
-  # off-resonance channel -- it is spatially constant, so no k-space offset can
-  # carry it; the rest of it becomes the shift below.
-  phantom.set_static_fields(
-      T2=T2star.m_as('ms'),
-      phi_dB0=np.full(T2star.shape,
-                      b0_field.uniform_phi_rate(scanner, location=traj.LOC),
-                      dtype=np.float32))
-
-  # The reconstruction grids on the NOMINAL trajectory, so the shift is kept
-  # apart from it: the difference between the two is the geometric distortion.
-  b0_points = traj.b0_shifted_points(b0_field, scanner)
+  # Only the tissue off-resonance rides this channel. The scanner field is
+  # handled by `phantom.readout` below, which routes its uniform part to a
+  # per-sample phase and the rest to a k-space shift kept apart from the
+  # nominal trajectory -- the difference between the two is the geometric
+  # distortion, and the reconstruction grids on the nominal one.
+  phantom.set_static_fields(T2=T2star.m_as('ms'),
+                            phi_dB0=np.zeros(T2star.shape, dtype=np.float32))
 
   # Fast mode for CI testing
   if FAST_MODE:
@@ -222,17 +217,11 @@ if __name__ == '__main__':
       seq.add_block(time_spacing)  # Delay between imaging blocks
       Mxy, Mz = solver.solve(start=-2)
 
-      # Update magnetization
-      phantom.update_magnetization(Mxy)
-
-      # k-space points per shot
-      kspace_points = (b0_points[0][:,sh,s,np.newaxis], 
-                      b0_points[1][:,sh,s,np.newaxis], 
-                      b0_points[2][:,sh,s,np.newaxis])
-      kspace_times = traj.times.m_as('ms')[:,sh,s,np.newaxis] - traj.t_start.m_as('ms')
-
-      # Generate 4D flow image
-      tmp = phantom.mri_signal(kspace_points, kspace_times, pod_sum)
+      # The readout handoff: the time origin, the scanner field's routing and
+      # the POD timeshift. `t_anchor=0.0` keeps this loop's own convention,
+      # where the timeshift below already carries the sequence time.
+      tmp = phantom.readout(Mxy, traj, shot=sh, slice=s, pod=pod_sum,
+                            solver=solver, t_anchor=0.0)
       K[:,sh,s,:,0] = tmp.swapaxes(0, 1)[:,:,0]
 
       # Update reference time of POD trajectory

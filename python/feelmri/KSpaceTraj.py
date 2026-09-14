@@ -206,6 +206,20 @@ class Trajectory:
         self._maxwell_moments = moments
         return _coef(moments, scanner, rotation=R)
 
+    def maxwell_moments(self, scanner, **kwargs):
+        """The ``(N, 4)`` concomitant moments this readout accumulates.
+
+        :meth:`maxwell_coefficients` and :meth:`maxwell_recentre` are both
+        derived from these, and deriving them from ONE call is the point:
+        the recentre reuses the last coefficients call's moments only when the
+        arguments match, so passing `carried=` or a `t0` to one and not the
+        other silently mixes time origins. Hand these to
+        ``FEMPhantom.readout(maxwell_moments=...)`` and both halves come from
+        the same integration.
+        """
+        self.maxwell_coefficients(scanner, **kwargs)
+        return self._maxwell_moments
+
     def maxwell_recentre(self, scanner, **kwargs):
         """The k-space shift and uniform phase that put ``Bc`` on isocentre.
 

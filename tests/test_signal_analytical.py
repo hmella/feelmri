@@ -2532,3 +2532,40 @@ def test_readout_measures_time_from_the_snapshot(tmp_path):
   # exp(-40/120) = 0.717, so the wrong origin is a 28% amplitude error.
   ratio = np.abs(absolute).max() / np.abs(got).max()
   assert ratio == pytest.approx(np.exp(-40.0 / 120.0), rel=1e-3)
+
+
+def test_readout_keeps_the_nv_axis(tmp_path):
+  """`readout` must hand `Mxy` to the assembler unchanged.
+
+  The second axis is `MRIAssemble`'s free `nv` axis -- velocity encodings,
+  coils, sub-spins -- and `4dflow.py` passes four encodings at once as
+  `Mxy_PC[:, fr, :]`. A `readout` that took the last column instead collapsed
+  all four onto one, which moved that example's k-space by 5.2e-02 while
+  leaving the single-encoding examples at 3e-06.
+  """
+  from pint import Quantity as Q_
+  from feelmri import CartesianStack, Scanner
+
+  scanner = Scanner()
+  ph, n = _readout_fixture(tmp_path, 'readout_nv.vtu')
+  traj = CartesianStack(FOV=Q_(np.array([0.2, 0.2, 0.01]), 'm'),
+                        res=np.array([8, 4, 1]), oversampling=1,
+                        scanner=scanner, t_start=Q_(1.5, 'ms'))
+
+  class _Solver:
+    b0_field = None
+    concomitant_fields = False
+  solver = _Solver()
+  solver.scanner = scanner
+
+  # Four distinguishable encodings.
+  Mxy = np.stack([np.full(n, c, dtype=np.complex64) for c in (1.0, 2.0, 3.0, 4.0)],
+                 axis=1)
+  got = np.asarray(ph.readout(Mxy, traj, solver=solver))
+  assert got.shape[-1] == 4, f'the nv axis was collapsed: {got.shape}'
+
+  # Linear in Mxy, so the four channels must stand in 1:2:3:4.
+  peak = np.abs(got).reshape(-1, 4).max(axis=0)
+  assert peak[0] > 0
+  for c in range(4):
+    assert peak[c] / peak[0] == pytest.approx(c + 1.0, rel=1e-5)

@@ -1662,8 +1662,10 @@ class FEMPhantom:
         Parameters
         ----------
         Mxy : np.ndarray
-            The magnetization column the solver returned. A ``(n, k)`` array is
-            taken as the last column, which is what ``solve()`` leaves.
+            Handed to :meth:`update_magnetization` unchanged. A second axis is
+            the assembler's free ``nv`` axis -- velocity encodings, coils,
+            sub-spins -- so it is NOT collapsed here; slice the solver's
+            stored columns yourself, as ``Mxy[:, frame, :]``.
         trajectory : Trajectory
             Supplies the k-space points, the sample times and ``t_start``.
         shot, slice : int, optional
@@ -1691,10 +1693,6 @@ class FEMPhantom:
         """
         from feelmri.PulseqAdapter import readout_phase_terms
         from feelmri.MPIUtilities import gather_data
-
-        Mxy = np.asarray(Mxy)
-        if Mxy.ndim > 1 and Mxy.shape[1] > 1:
-            Mxy = Mxy[:, -1]
 
         pts = trajectory.points
         t_all = trajectory.times.m_as('ms') - trajectory.t_start.m_as('ms')
