@@ -1620,6 +1620,142 @@ class FEMPhantom:
             yield (t_cpp, m_x, m_y, m_z, w, has_traj,
                    self._maxwell_inputs(maxwell, kspace_times))
 
+    def readout(self, Mxy, trajectory, *, shot=None, slice=None, pod=None,
+                solver=None, scanner=None, maxwell_moments=None,
+                gather=False):
+        """One readout window, from a magnetization column to k-space.
+
+        This is the handoff between the solver and the assembler, called from
+        inside the caller's own loop:
+
+            for i, sh in enumerate(traj.shots):
+                seq.add_block(imaging)
+                Mxy, Mz = solver.solve(start=-2)
+                K[:, sh, s] = phantom.readout(Mxy, traj, shot=sh, slice=s,
+                                              pod=pod, solver=solver)
+
+        `solve`, the loop order and the sequence stay the caller's. What moves
+        here is the part that has repeatedly been assembled by hand and got
+        wrong:
+
+        * **the time origin.** ``mri_signal``'s ``t`` is elapsed time since the
+          SNAPSHOT, and a native trajectory's snapshot sits at ``t_start``.
+          Passing absolute times applies a spurious ``exp(-t_start/T2)`` plus a
+          spatially varying off-resonance ramp -- 1.688 rad peak to peak on the
+          shipped phase-contrast geometry.
+        * **the lab field.** A polynomial one becomes a k-space shift and a
+          phase; one needing the per-node expansion rides the phantom and is
+          refused here by name rather than silently ignored.
+        * **the concomitant half**, taken from the solver's own flag so the two
+          halves cannot be modelled apart.
+        * **the POD timeshift**, set to this window's anchor and restored.
+
+        Parameters
+        ----------
+        Mxy : np.ndarray
+            The magnetization column the solver returned. A ``(n, k)`` array is
+            taken as the last column, which is what ``solve()`` leaves.
+        trajectory : Trajectory
+            Supplies the k-space points, the sample times and ``t_start``.
+        shot, slice : int, optional
+            Index into the trajectory's shot / slice axes. Omit both to
+            evaluate the whole trajectory in one call.
+        solver : BlochSolver, optional
+            Read for ``b0_field``, ``concomitant_fields`` and the orientation,
+            so the readout carries what the solve carried.
+        maxwell_moments : np.ndarray, optional
+            ``(N, 4)`` moments to use instead of the trajectory's own, e.g.
+            from ``Trajectory.maxwell_coefficients(carried=...)`` when a
+            sequence block overlaps the readout.
+        gather : bool, optional
+            Reduce onto rank 0 with :func:`gather_data`. Default False, since
+            the caller usually accumulates into its own array first.
+
+        Returns
+        -------
+        np.ndarray
+            The k-space signal for this window.
+        """
+        from feelmri.PulseqAdapter import readout_phase_terms
+        from feelmri.MPIUtilities import gather_data
+
+        Mxy = np.asarray(Mxy)
+        if Mxy.ndim > 1 and Mxy.shape[1] > 1:
+            Mxy = Mxy[:, -1]
+
+        pts = trajectory.points
+        t_all = trajectory.times.m_as('ms') - trajectory.t_start.m_as('ms')
+        if shot is None and slice is None:
+            points = [np.ascontiguousarray(a) for a in pts]
+            t = np.ascontiguousarray(t_all)
+        else:
+            sh = np.s_[:] if shot is None else shot
+            sl = np.s_[:] if slice is None else slice
+            points = [np.ascontiguousarray(a[:, sh, sl, np.newaxis])
+                      for a in pts]
+            t = np.ascontiguousarray(t_all[:, sh, sl, np.newaxis])
+
+        scanner = scanner if scanner is not None else getattr(
+            solver, 'scanner', None)
+        b0_field = getattr(solver, 'b0_field', None)
+        # Reduced and reached from every rank: spelled as a short-circuiting
+        # `and`, a rank whose field is None would skip the allreduce the others
+        # are inside.
+        from feelmri.B0Field import B0Field as _B0Field
+        if not _B0Field.is_live(b0_field):
+            b0_field = None
+        if b0_field is not None and b0_field.kind == 'nodal':
+            collective_raise(
+                "FEMPhantom.readout: this b0_field needs a per-node expansion, "
+                "which rides the phantom rather than the trajectory. Call "
+                "`field.readout_terms(...)`, add `phi_nodal` to the map you "
+                "pass `set_static_fields`, and hand "
+                "`node_gradient_rad_per_ms_per_m` to `set_b0_gradient`; then "
+                "call this without a `b0_field` on the solver.")
+
+        if maxwell_moments is None and getattr(
+                solver, 'concomitant_fields', False):
+            maxwell_moments = trajectory.maxwell_coefficients()
+
+        dk, phase, maxwell = readout_phase_terms(
+            t, scanner=scanner, b0_field=b0_field,
+            maxwell_moments=maxwell_moments,
+            rotation=getattr(self, '_orientation', None),
+            location=getattr(self, '_location', None))
+
+        if dk is not None:
+            points = [np.ascontiguousarray(points[i] + dk[..., i].reshape(
+                          points[i].shape), dtype=points[i].dtype)
+                      for i in range(3)]
+
+        self.update_magnetization(Mxy)
+
+        # The POD weights need ABSOLUTE sequence time -- the frame the motion
+        # is defined in -- while `t` above is elapsed-since-snapshot. Composed
+        # with the caller's own shift, and restored either way.
+        shift = getattr(pod, 'timeshift', None) if pod is not None else None
+        try:
+            if shift is not None:
+                pod.update_timeshift(
+                    float(shift) + float(trajectory.t_start.m_as('ms')))
+            signal = self.mri_signal(list(points), t, pod, maxwell=maxwell)
+        finally:
+            if shift is not None:
+                pod.update_timeshift(shift)
+
+        if phase is not None and np.any(phase):
+            # Not `apply_demodulation`: that reshapes the phase against the
+            # signal's FIRST axis, which is right for a flat (N, nv) window and
+            # wrong for the (ro, ph, slice, nv) grid a native trajectory
+            # produces, where the phase varies over all three leading axes.
+            out = np.asarray(signal)
+            factor = np.exp(-1j * np.asarray(phase).reshape(
+                out.shape[:-1] + (1,)))
+            if np.iscomplexobj(out):
+                factor = factor.astype(out.dtype, copy=False)
+            signal = out * factor
+        return gather_data(signal) if gather else signal
+
     def mri_signal(self, kspace_points, kspace_times, pod=None,
                    maxwell=None):
         """Compute the MRI k-space signal using the configured assembler(s).

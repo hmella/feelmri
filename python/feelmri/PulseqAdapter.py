@@ -1670,6 +1670,73 @@ def _no_layout_change():
   yield
 
 
+def readout_phase_terms(t_ms, *, scanner, b0_field=None, maxwell_moments=None,
+                        rotation=None, location=None):
+  """The k-space shift, the extra per-sample phase and the quadratic
+  coefficients one readout window needs.
+
+  This is the algebra between "I have a magnetization column" and "I can call
+  `mri_signal`", and it is the part that has repeatedly been assembled by hand
+  and got wrong: the lab field routed five different ways, the concomitant
+  half left uncoupled from the solver's own flag, the off-isocentre recentring
+  dropped. Both `simulate_pulseq` and `FEMPhantom.readout` go through here, so
+  the two cannot drift.
+
+  Parameters
+  ----------
+  t_ms : np.ndarray
+      Sample times measured FROM THE SNAPSHOT, not from the start of the file.
+  b0_field : B0Field or None
+      The scanner-fixed field, if a polynomial carries it. A field needing the
+      per-node expansion rides the phantom instead and must not be passed here.
+  maxwell_moments : np.ndarray or None
+      ``(N, 4)`` concomitant moments for this window, or None when the solver
+      did not model the term. Pass them exactly when the solver had
+      ``concomitant_fields=True``: modelling it up to the snapshot and then
+      dropping it for the readout is worse than not modelling it at all.
+
+  Returns
+  -------
+  (dk, phase, maxwell)
+      ``dk`` is ``(N, 3)`` to ADD to the sample's k, or None. ``phase`` is a
+      per-sample phase in rad, or None. ``maxwell`` is the six-coefficient
+      array for ``mri_signal(maxwell=)``, or None. A degree-2 lab field and
+      the concomitant term share those six coefficients, so they add.
+  """
+  dk = None
+  phase = None
+  maxwell = None
+
+  if b0_field is not None:
+    dk, phase, maxwell = b0_readout_terms(
+        b0_field, t_ms, scanner, rotation=rotation, location=location)
+
+  if maxwell_moments is not None:
+    conc = maxwell_phase_coefficients(maxwell_moments, scanner,
+                                      rotation=rotation)
+    maxwell = conc if maxwell is None else maxwell + conc
+    # `Bc` is a quadratic form about ISOCENTRE while the assembler's nodes are
+    # measured from the slice centre, so the rest of the expansion travels
+    # with the six coefficients or an off-isocentre slab is imaged as though
+    # it sat in the middle of the bore.
+    conc_dk, conc_phase = maxwell_recentre(
+        maxwell_moments, scanner, rotation=rotation, location=location)
+    # `maxwell_recentre` works on a flat sample list while `b0_readout_terms`
+    # follows the shape of `t_ms` -- a native trajectory hands in a
+    # (ro, ph, slice) grid. Put both in the caller's own shape before adding,
+    # or they broadcast against each other instead of summing.
+    grid = np.shape(t_ms)
+    if np.any(conc_dk):
+      conc_dk = np.asarray(conc_dk).reshape(grid + (3,))
+      dk = conc_dk if dk is None else dk + conc_dk
+    if np.any(conc_phase):
+      conc_phase = np.asarray(conc_phase).reshape(grid)
+      phase = (conc_phase if phase is None
+               else np.asarray(phase).reshape(grid) + conc_phase)
+
+  return dk, phase, maxwell
+
+
 def simulate_pulseq(seq_path,
                     phantom,
                     *,
@@ -1914,13 +1981,17 @@ def simulate_pulseq(seq_path,
       # The shift stays LOCAL to this call: `rw.kspace` is the nominal
       # trajectory the reconstruction grids on, and the difference between the
       # two is the distortion the field produces.
-      b0_phase = None
-      b0_maxwell = None
-      if b0_field is not None and not b0_nodal:
-        dk, b0_phase, b0_maxwell = b0_readout_terms(
-            b0_field, t, scanner,
-            rotation=getattr(phantom, '_orientation', None),
-            location=getattr(phantom, '_location', None))
+      # The shift stays LOCAL to this call, and the readout carries the
+      # concomitant term exactly when the SOLVER did. `FEMPhantom.readout`
+      # goes through the same builder, so the native path and this one cannot
+      # drift on the algebra.
+      dk, b0_phase, maxwell = readout_phase_terms(
+          t, scanner=scanner,
+          b0_field=(b0_field if not b0_nodal else None),
+          maxwell_moments=(rw.maxwell if concomitant_readout else None),
+          rotation=getattr(phantom, '_orientation', None),
+          location=getattr(phantom, '_location', None))
+      if dk is not None:
         points = [np.ascontiguousarray(points[i] + dk[..., i],
                                        dtype=points[i].dtype)
                   for i in range(3)]
@@ -1928,28 +1999,6 @@ def simulate_pulseq(seq_path,
       # factors need, but the POD weights need absolute sequence time, the frame
       # the motion is defined in. `get_weights` adds the trajectory's own
       # `timeshift`, so point it at this window's anchor and restore it after.
-      # A degree-2 lab field rides the same six coefficients the concomitant
-      # term uses, so the two ADD rather than compete for the channel.
-      maxwell = b0_maxwell
-      if concomitant_readout and rw.maxwell is not None:
-        rotation = getattr(phantom, '_orientation', None)
-        conc_coef = maxwell_phase_coefficients(rw.maxwell, scanner,
-                                               rotation=rotation)
-        maxwell = conc_coef if maxwell is None else maxwell + conc_coef
-        # `Bc` is a quadratic form about ISOCENTRE while the assembler's nodes
-        # are measured from the slice centre, so the rest of the expansion --
-        # a k-space shift and a uniform phase -- has to travel with the six
-        # coefficients or an off-isocentre slab is imaged as though it sat in
-        # the middle of the bore.
-        conc_dk, conc_phase = maxwell_recentre(
-            rw.maxwell, scanner, rotation=rotation,
-            location=getattr(phantom, '_location', None))
-        if np.any(conc_dk) or np.any(conc_phase):
-          points = [np.ascontiguousarray(
-                        points[i] + conc_dk[:, i].reshape(points[i].shape),
-                        dtype=points[i].dtype) for i in range(3)]
-          b0_phase = (conc_phase if b0_phase is None
-                      else b0_phase.reshape(-1) + conc_phase)
       # Composed with the caller's own shift, which `get_weights` folds in to
       # reach the cardiac phase, and restored in the finally below.
       shift = getattr(pod, 'timeshift', None) if pod is not None else None
