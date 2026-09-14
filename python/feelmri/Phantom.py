@@ -1604,8 +1604,80 @@ class FEMPhantom:
         return np.ascontiguousarray(
             (flat[:, :, None] * C[:, None, :]).reshape(flat.shape[0], -1))
 
+    @staticmethod
+    def _check_kspace_inputs(who, kspace_points, kspace_times):
+        """Refuse a trajectory the kernel would read out of bounds.
+
+        The kernel takes its loop bounds from ``kspace_points[0]`` alone and
+        then indexes ``[1]`` and ``[2]`` at those bounds, so a short sibling is
+        an out-of-bounds READ under ``-DEIGEN_NO_DEBUG`` rather than an
+        assertion -- the same failure class the static fields already guard
+        against. Measured before this check, on a (4, 2, 1) trajectory: two
+        component arrays SEGFAULTED, four were silently truncated to three, and
+        a short ``ky`` or a short ``kspace_times`` each returned a full-size,
+        entirely plausible, wrong answer.
+
+        A bare raise is correct here, unlike the guards on per-node data: the
+        trajectory is replicated on every rank -- each rank loops all k-points
+        over its own nodes -- so every rank reaches the same verdict and none
+        is left waiting in a collective.
+        """
+        try:
+            n_axes = len(kspace_points)
+        except TypeError:
+            raise TypeError(
+                f"{who}: kspace_points must be a sequence of three arrays "
+                f"(kx, ky, kz), got {type(kspace_points).__name__}.") from None
+        if n_axes != 3:
+            raise ValueError(
+                f"{who}: kspace_points must hold exactly three component "
+                f"arrays (kx, ky, kz), got {n_axes}. The kernel reads all "
+                f"three whatever the length of this list.")
+
+        shapes = [np.shape(a) for a in kspace_points]
+        if any(shape != shapes[0] for shape in shapes[1:]):
+            raise ValueError(
+                f"{who}: kx, ky and kz describe the SAME samples and must "
+                f"have one shape; got {shapes[0]}, {shapes[1]} and "
+                f"{shapes[2]}.")
+
+        t_shape = np.shape(kspace_times)
+        if t_shape != shapes[0]:
+            raise ValueError(
+                f"{who}: one acquisition time per k-space sample is needed, "
+                f"so kspace_times must have the trajectory's own shape; got "
+                f"points {shapes[0]} against times {t_shape}.")
+
+    def _require_assembler(self, who):
+        """Refuse a signal call no assembler can serve, the same way on all four.
+
+        Without :meth:`set_assembler` there is no ``assembler`` attribute at
+        all, which surfaced as a bare ``AttributeError`` naming a private name.
+        With it, a rank holding no local ELEMENTS gets an empty group list, and
+        the four entry points then disagreed: ``mri_signal`` and ``signal``
+        returned the Python ``int`` 0 from ``sum([])`` -- the wrong type, no
+        shape, no complaint -- while ``signal_nodal`` and ``signal_sum`` raised
+        ``IndexError`` rank-locally, inside a loop whose next step is a
+        collective.
+
+        The element count IS per-rank, so the message is computed everywhere
+        and the collective is entered unconditionally.
+        """
+        groups = getattr(self, 'assembler', None)
+        if groups is None:
+            raise RuntimeError(
+                f"{who}: this phantom has no assembler. Call `set_assembler` "
+                f"first -- the voxel size and the quadrature orders are "
+                f"modelling decisions, and guessing them would be worse than "
+                f"saying so.")
+        collective_raise(
+            '' if len(groups) else
+            f"{who}: rank {MPI_rank} was given no elements by the partition, "
+            f"so it has no assembler group to integrate over. Use fewer ranks "
+            f"than the mesh has elements.")
+
     @contextmanager
-    def _signal_call(self, kspace_times, pod, maxwell):
+    def _signal_call(self, who, kspace_points, kspace_times, pod, maxwell):
         """The prologue the four signal entry points share.
 
         Yields the C++ argument tuple that follows ``kspace_points``. The
@@ -1615,6 +1687,8 @@ class FEMPhantom:
         if isinstance(pod, list):
             raise NotImplementedError(
                 "Lists of trajectories must be combined using PODSum before evaluation.")
+        self._check_kspace_inputs(who, kspace_points, kspace_times)
+        self._require_assembler(who)
         with self._using('signal'):
             t_cpp, m_x, m_y, m_z, w, has_traj = self._prepare_pod_data(kspace_times, pod)
             yield (t_cpp, m_x, m_y, m_z, w, has_traj,
@@ -1643,7 +1717,7 @@ class FEMPhantom:
         np.ndarray
             Complex k-space signal summed over all assembler groups.
         """
-        with self._signal_call(kspace_times, pod, maxwell) as args:
+        with self._signal_call('mri_signal', kspace_points, kspace_times, pod, maxwell) as args:
             eval_helper = []
             for i, a in enumerate(self.assembler):
                 if i == 0 and self.nodal_approximation__:
@@ -1671,7 +1745,7 @@ class FEMPhantom:
         np.ndarray
             Complex k-space signal.
         """
-        with self._signal_call(kspace_times, pod, maxwell) as args:
+        with self._signal_call('signal', kspace_points, kspace_times, pod, maxwell) as args:
             return sum([a.signal(kspace_points, *args) for a in self.assembler])
 
     def signal_nodal(self, kspace_points, kspace_times, pod=None,
@@ -1697,7 +1771,7 @@ class FEMPhantom:
         # from the *small*-element group alone, so on a mesh that splits, this
         # integrates only that group -- use ``mri_signal``, which routes the
         # large-element group through the quadrature path, for the whole mesh.
-        with self._signal_call(kspace_times, pod, maxwell) as args:
+        with self._signal_call('signal_nodal', kspace_points, kspace_times, pod, maxwell) as args:
             return self.assembler[0].signal_nodal(kspace_points, *args)
 
     def signal_sum(self, kspace_points, kspace_times, pod=None,
@@ -1722,5 +1796,5 @@ class FEMPhantom:
         # Evaluated on ONE group only. Every assembler group is constructed with the
         # rank's *entire* node set (only the element subset differs), so summing this
         # nodal quantity over groups would count each node once per group.
-        with self._signal_call(kspace_times, pod, maxwell) as args:
+        with self._signal_call('signal_sum', kspace_points, kspace_times, pod, maxwell) as args:
             return self.assembler[0].signal_sum(kspace_points, *args)

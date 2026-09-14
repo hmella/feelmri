@@ -2398,3 +2398,109 @@ def test_the_receive_sensitivity_map_end_to_end(tmp_path):
   _a_receive_map_weights_the_node_it_belongs_to(tmp_path)
   _clearing_the_receive_map_restores_the_plain_signal(tmp_path)
   _a_receive_map_does_not_survive_a_repartition(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# What the signal entry points refuse
+# ---------------------------------------------------------------------------
+def _tiny_phantom(tmp_path, tag):
+  """A small tet phantom ready to evaluate a signal."""
+  import meshio
+  from feelmri.Phantom import FEMPhantom
+
+  g = np.linspace(-0.05, 0.05, 3)
+  P = np.array([[x, y, z] for x in g for y in g for z in g], dtype=np.float64)
+  n = P.shape[0]
+  rng = np.random.default_rng(4)
+  cells = np.asarray([rng.choice(n, size=4, replace=False) for _ in range(48)],
+                     dtype=np.int64)
+  path = tmp_path / tag
+  meshio.write(str(path), meshio.Mesh(P, [('tetra', cells)]))
+  ph = FEMPhantom(path=str(path))
+  ph.set_assembler(voxel_size=1e3, lorder=2, nodal_approximation=True,
+                   lumped=True)
+  ph.set_static_fields(T2=np.full(n, 100.0, dtype=np.float32),
+                       phi_dB0=np.zeros(n, dtype=np.float32))
+  ph.update_magnetization(np.ones(n, dtype=np.complex64))
+  return ph, n
+
+
+@pytest.mark.parametrize('bad, match', [
+    ('two', 'exactly three component arrays'),
+    ('four', 'exactly three component arrays'),
+    ('short_ky', 'SAME samples'),
+    ('short_times', 'one acquisition time per'),
+    ('flat_times', 'one acquisition time per'),
+])
+def test_a_malformed_trajectory_is_refused_by_name(tmp_path, bad, match):
+  """The kernel takes its loop bounds from `kspace_points[0]` alone and then
+  indexes [1] and [2] at those bounds, so a short sibling is an out-of-bounds
+  READ under -DEIGEN_NO_DEBUG rather than an assertion.
+
+  Measured on this fixture before the guard, and this is why it is worth
+  having: two component arrays SEGFAULTED the interpreter; four were silently
+  truncated to three; and a short `ky` or a short `kspace_times` each returned
+  a full-size, entirely plausible, WRONG answer with no complaint. Only the
+  1-D case raised, and it named `signal_nodal` rather than the method called.
+  """
+  ph, n = _tiny_phantom(tmp_path, f'refuse_{bad}.vtu')
+  shape = (4, 2, 1)
+  points = [np.zeros(shape, dtype=np.float32) for _ in range(3)]
+  times = np.zeros(shape, dtype=np.float32)
+
+  if bad == 'two':
+    points = points[:2]
+  elif bad == 'four':
+    points = points + [np.zeros(shape, dtype=np.float32)]
+  elif bad == 'short_ky':
+    points[1] = np.zeros((2, 2, 1), dtype=np.float32)
+  elif bad == 'short_times':
+    times = np.zeros((2, 2, 1), dtype=np.float32)
+  elif bad == 'flat_times':
+    times = np.zeros(8, dtype=np.float32)
+
+  with pytest.raises(ValueError, match=match):
+    ph.mri_signal(points, times)
+
+  # The well-formed control still evaluates, so the guard is not simply
+  # refusing everything.
+  good = [np.zeros(shape, dtype=np.float32) for _ in range(3)]
+  assert np.shape(ph.mri_signal(good, np.zeros(shape, dtype=np.float32))) \
+      == shape + (1,)
+
+
+def test_every_signal_entry_point_refuses_a_malformed_trajectory(tmp_path):
+  """All four, not just the one the examples use.
+
+  They share `_signal_call`, so this is one guard; the test exists because the
+  four previously disagreed about what a malformed call does, and the two that
+  are group-0 only are the ones a benchmark reaches for directly.
+  """
+  ph, n = _tiny_phantom(tmp_path, 'refuse_all.vtu')
+  shape = (4, 2, 1)
+  points = [np.zeros(shape, dtype=np.float32) for _ in range(2)]   # only two
+  times = np.zeros(shape, dtype=np.float32)
+
+  for name in ('mri_signal', 'signal', 'signal_nodal', 'signal_sum'):
+    with pytest.raises(ValueError, match='exactly three component arrays'):
+      getattr(ph, name)(points, times)
+
+
+def test_a_signal_call_before_set_assembler_says_so(tmp_path):
+  """It used to be a bare `AttributeError` naming a private attribute."""
+  import meshio
+  from feelmri.Phantom import FEMPhantom
+
+  g = np.linspace(-0.05, 0.05, 3)
+  P = np.array([[x, y, z] for x in g for y in g for z in g], dtype=np.float64)
+  rng = np.random.default_rng(4)
+  cells = np.asarray([rng.choice(P.shape[0], size=4, replace=False)
+                      for _ in range(48)], dtype=np.int64)
+  path = tmp_path / 'no_assembler.vtu'
+  meshio.write(str(path), meshio.Mesh(P, [('tetra', cells)]))
+  ph = FEMPhantom(path=str(path))
+
+  shape = (4, 2, 1)
+  points = [np.zeros(shape, dtype=np.float32) for _ in range(3)]
+  with pytest.raises(RuntimeError, match='no assembler'):
+    ph.mri_signal(points, np.zeros(shape, dtype=np.float32))
