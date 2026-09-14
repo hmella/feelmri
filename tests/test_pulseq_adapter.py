@@ -1276,3 +1276,61 @@ def test_the_import_partitions_and_mirrors_every_fixture(seq_path, pulseq_import
       skipped.append(f'{fn.__name__}: {exc}')
   if len(skipped) == len(checks):
     pytest.skip('; '.join(skipped))
+
+
+# ---------------------------------------------------------------------------
+# Shape compression
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize('name, waveform', [
+    # A run of equal derivative is what the encoding exists for, and what it
+    # used to get wrong: a trapezoid and a ramp are the shapes a gradient
+    # actually has.
+    ('trapezoid', np.concatenate([np.linspace(0.0, 1.0, 20),
+                                  np.ones(40),
+                                  np.linspace(1.0, 0.0, 20)])),
+    ('ramp', np.linspace(0.0, 1.0, 100)),
+    ('staircase', np.repeat(np.arange(8, dtype=float), 7)),
+    # One run only: the degenerate case, correct under either layout.
+    ('constant', np.ones(50)),
+    ('zeros', np.zeros(30)),
+    # No run at all, so every sample is its own entry.
+    ('sine', np.sin(np.linspace(0.0, 2.0 * np.pi, 128))),
+    ('short', np.array([0.0, 0.5, 1.0, 0.5])),
+])
+def test_shape_compression_round_trips(name, waveform):
+  """`compress_shape` and `decompress_shape` are inverses.
+
+  Reachable only for a Pulseq v1.2/v1.3 file carrying an uncompressed shape,
+  which no bundled fixture is -- so nothing exercised this pair, and the
+  encoder emitted every value and then every run length instead of
+  interleaving them per run. `decompress_shape` raised `Unsuccessful
+  unpacking of samples` on a ramp and on a trapezoid; a constant waveform
+  passed, because with a single run the two layouts coincide.
+  """
+  from feelmri.PulseqAdapter import compress_shape, decompress_shape
+
+  n, packed = compress_shape(waveform, force_compression=True)
+  assert n == waveform.size
+  back = decompress_shape(n, packed, force_decompression=True)
+
+  # The encoder quantises the derivative at 1e-7, so this is a floor, not a
+  # tolerance to be loosened.
+  assert back.shape == waveform.shape
+  assert np.abs(back - waveform).max() < 1.0e-6
+
+
+def test_shape_compression_actually_compresses_a_run():
+  """A waveform with long constant-derivative runs must come out shorter.
+
+  The round trip alone does not prove this: an encoder that gave up and
+  emitted the samples verbatim would also round-trip exactly.
+  """
+  from feelmri.PulseqAdapter import compress_shape
+
+  ramp = np.linspace(0.0, 1.0, 100)
+  n, packed = compress_shape(ramp, force_compression=True)
+  assert packed.size < n
+
+  # And the uncompressed branch is the waveform itself, not the derivative.
+  n2, plain = compress_shape(np.sin(np.linspace(0.0, 2.0 * np.pi, 16)))
+  assert plain.size == n2

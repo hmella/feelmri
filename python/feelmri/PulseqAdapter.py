@@ -490,16 +490,20 @@ def compress_shape(w: Union[np.ndarray, List[float]],
     k = np.nonzero(np.concatenate((mask_changes, [True])))[0]
     n = np.diff(k)  # number of repetitions
 
-    n_extra = n.astype(float) - 2.0
-    vals2 = vals.astype(float)
-
-    # entries where n_extra < 0 are encoded as NaN, to be dropped
-    mask_neg = n_extra < 0
-    vals2[mask_neg] = np.nan
-    n_extra[mask_neg] = np.nan
-
-    v = np.concatenate((vals, vals2, n_extra))
-    v = v[np.isfinite(v)]
+    # Pulseq spells a run of one as the value alone and a longer run as
+    # value, value, (length - 2). The three pieces are INTERLEAVED per run:
+    # the decoder finds a run by spotting two equal consecutive entries and
+    # reads the count immediately after them, so emitting all the values and
+    # then all the counts describes a different waveform. That layout happens
+    # to be correct for a single run, which is why a constant shape survived
+    # it and a ramp did not.
+    pieces = []
+    for value, run in zip(vals.astype(float), n):
+        if run == 1:
+            pieces.append(np.array([value]))
+        else:
+            pieces.append(np.array([value, value, float(run) - 2.0]))
+    v = np.concatenate(pieces) if pieces else np.zeros(0, dtype=float)
     v[np.abs(v) <= 1e-10] = 0.0
 
     if force_compression or num_samples > v.size:

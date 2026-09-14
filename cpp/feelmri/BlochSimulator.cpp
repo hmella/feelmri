@@ -634,94 +634,57 @@ MagnetizationState<T> solve_mri_dispatch(
   #undef FEELMRI_DISPATCH
 }
 
+// One binding per scalar type. The two used to be written out separately,
+// which is how a `py::arg` default could be added to one and not the other --
+// the kernel itself is already templated, and this is glue below the dispatch.
+template <typename T>
+static void bind_solve_mri(py::module_ &m, const char *name) {
+  using R0     = Eigen::Ref<const Matrix<T, Dynamic, 3, RowMajor>>;
+  using Vec    = Eigen::Ref<const Matrix<T, Dynamic, 1>>;
+  using CVec   = Eigen::Ref<const Matrix<std::complex<T>, Dynamic, 1>>;
+  using Mat3   = Eigen::Ref<const Matrix<T, Dynamic, 3>>;
+  using Bool_T = Eigen::Ref<const Matrix<bool, Dynamic, 1>>;
+  using Modes  = Eigen::Ref<const Matrix<T, Dynamic, Dynamic>>;
+  using MatDyn = Eigen::Ref<const Matrix<T, Dynamic, Dynamic, RowMajor>>;
+
+  m.def(name,
+    [](R0 r0, Vec T1, Vec T2, Vec delta_B,
+       const T &M0, const T &gamma,
+       CVec rf_all, Mat3 G_all, Vec dt, Bool_T regime_idx,
+       CVec Mxy_initial, Vec Mz_initial,
+       Modes modes, MatDyn weights, bool has_traj,
+       int order, Vec Bz_old_init, std::complex<T> rf_old_init,
+       bool store_history, const T &B0, CVec b1_map,
+       Mat3 static_lin, Vec conc_offset, Vec field_quad,
+       R0 node_lin) {
+      return solve_mri_dispatch<T>(order, r0, T1, T2, delta_B, M0, gamma,
+                                   rf_all, G_all, dt, regime_idx,
+                                   Mxy_initial, Mz_initial,
+                                   modes, weights, has_traj,
+                                   Bz_old_init, rf_old_init, store_history, B0,
+                                   b1_map, static_lin, conc_offset,
+                                   field_quad, node_lin);
+    },
+    py::arg("r0"), py::arg("T1"), py::arg("T2"), py::arg("delta_B"),
+    py::arg("M0"), py::arg("gamma"), py::arg("rf_all"), py::arg("G_all"),
+    py::arg("dt"), py::arg("regime_idx"), py::arg("Mxy_initial"),
+    py::arg("Mz_initial"), py::arg("modes"), py::arg("weights"),
+    py::arg("has_traj"),
+    py::arg("order"), py::arg("Bz_old_init"), py::arg("rf_old_init"),
+    py::arg("store_history") = false,
+    py::arg("B0") = 0.0,
+    // Empty by default: an absent map, not a map of ones.
+    py::arg("b1_map") = Matrix<std::complex<T>, Dynamic, 1>(),
+    // Empty by default: no lab-frame static field.
+    py::arg("static_lin") = Matrix<T, Dynamic, 3>(),
+    py::arg("conc_offset") = Matrix<T, Dynamic, 1>(),
+    // Empty by default: no quadratic lab-frame field.
+    py::arg("field_quad") = Matrix<T, Dynamic, 1>(),
+    // Empty by default: no per-node field gradient.
+    py::arg("node_lin") = Matrix<T, Dynamic, 3, RowMajor>());
+}
+
 PYBIND11_MODULE(BlochSimulator, m) {
-  using f32 = float;
-  using f64 = double;
-
-  using R0_f32     = Eigen::Ref<const Matrix<f32, Dynamic, 3, RowMajor>>;
-  using Vec_f32    = Eigen::Ref<const Matrix<f32, Dynamic, 1>>;
-  using CVec_f32   = Eigen::Ref<const Matrix<std::complex<f32>, Dynamic, 1>>;
-  using Mat3_f32   = Eigen::Ref<const Matrix<f32, Dynamic, 3>>;
-  using Bool_T     = Eigen::Ref<const Matrix<bool, Dynamic, 1>>;
-  using Modes_f32  = Eigen::Ref<const Matrix<f32, Dynamic, Dynamic>>;
-  using MatDyn_f32 = Eigen::Ref<const Matrix<f32, Dynamic, Dynamic, RowMajor>>;
-
-  using R0_f64     = Eigen::Ref<const Matrix<f64, Dynamic, 3, RowMajor>>;
-  using Vec_f64    = Eigen::Ref<const Matrix<f64, Dynamic, 1>>;
-  using CVec_f64   = Eigen::Ref<const Matrix<std::complex<f64>, Dynamic, 1>>;
-  using Mat3_f64   = Eigen::Ref<const Matrix<f64, Dynamic, 3>>;
-  using Modes_f64  = Eigen::Ref<const Matrix<f64, Dynamic, Dynamic>>;
-  using MatDyn_f64 = Eigen::Ref<const Matrix<f64, Dynamic, Dynamic, RowMajor>>;
-
-  m.def("solve_mri_f32",
-    [](R0_f32 r0, Vec_f32 T1, Vec_f32 T2, Vec_f32 delta_B,
-       const f32 &M0, const f32 &gamma,
-       CVec_f32 rf_all, Mat3_f32 G_all, Vec_f32 dt, Bool_T regime_idx,
-       CVec_f32 Mxy_initial, Vec_f32 Mz_initial,
-       Modes_f32 modes, MatDyn_f32 weights, bool has_traj,
-       int order, Vec_f32 Bz_old_init, std::complex<f32> rf_old_init,
-       bool store_history, const f32 &B0, CVec_f32 b1_map,
-       Mat3_f32 static_lin, Vec_f32 conc_offset, Vec_f32 field_quad,
-       R0_f32 node_lin) {
-      return solve_mri_dispatch<f32>(order, r0, T1, T2, delta_B, M0, gamma,
-                                     rf_all, G_all, dt, regime_idx,
-                                     Mxy_initial, Mz_initial,
-                                     modes, weights, has_traj,
-                                     Bz_old_init, rf_old_init, store_history, B0,
-                                     b1_map, static_lin, conc_offset,
-                                     field_quad, node_lin);
-    },
-    py::arg("r0"), py::arg("T1"), py::arg("T2"), py::arg("delta_B"),
-    py::arg("M0"), py::arg("gamma"), py::arg("rf_all"), py::arg("G_all"),
-    py::arg("dt"), py::arg("regime_idx"), py::arg("Mxy_initial"),
-    py::arg("Mz_initial"), py::arg("modes"), py::arg("weights"),
-    py::arg("has_traj"),
-    py::arg("order"), py::arg("Bz_old_init"), py::arg("rf_old_init"),
-    py::arg("store_history") = false,
-    py::arg("B0") = 0.0,
-    // Empty by default: an absent map, not a map of ones.
-    py::arg("b1_map") = Matrix<std::complex<f32>, Dynamic, 1>(),
-    // Empty by default: no lab-frame static field.
-    py::arg("static_lin") = Matrix<f32, Dynamic, 3>(),
-    py::arg("conc_offset") = Matrix<f32, Dynamic, 1>(),
-    // Empty by default: no quadratic lab-frame field.
-    py::arg("field_quad") = Matrix<f32, Dynamic, 1>(),
-    // Empty by default: no per-node field gradient.
-    py::arg("node_lin") = Matrix<f32, Dynamic, 3, RowMajor>());
-
-  m.def("solve_mri_f64",
-    [](R0_f64 r0, Vec_f64 T1, Vec_f64 T2, Vec_f64 delta_B,
-       const f64 &M0, const f64 &gamma,
-       CVec_f64 rf_all, Mat3_f64 G_all, Vec_f64 dt, Bool_T regime_idx,
-       CVec_f64 Mxy_initial, Vec_f64 Mz_initial,
-       Modes_f64 modes, MatDyn_f64 weights, bool has_traj,
-       int order, Vec_f64 Bz_old_init, std::complex<f64> rf_old_init,
-       bool store_history, const f64 &B0, CVec_f64 b1_map,
-       Mat3_f64 static_lin, Vec_f64 conc_offset, Vec_f64 field_quad,
-       R0_f64 node_lin) {
-      return solve_mri_dispatch<f64>(order, r0, T1, T2, delta_B, M0, gamma,
-                                     rf_all, G_all, dt, regime_idx,
-                                     Mxy_initial, Mz_initial,
-                                     modes, weights, has_traj,
-                                     Bz_old_init, rf_old_init, store_history, B0,
-                                     b1_map, static_lin, conc_offset,
-                                     field_quad, node_lin);
-    },
-    py::arg("r0"), py::arg("T1"), py::arg("T2"), py::arg("delta_B"),
-    py::arg("M0"), py::arg("gamma"), py::arg("rf_all"), py::arg("G_all"),
-    py::arg("dt"), py::arg("regime_idx"), py::arg("Mxy_initial"),
-    py::arg("Mz_initial"), py::arg("modes"), py::arg("weights"),
-    py::arg("has_traj"),
-    py::arg("order"), py::arg("Bz_old_init"), py::arg("rf_old_init"),
-    py::arg("store_history") = false,
-    py::arg("B0") = 0.0,
-    // Empty by default: an absent map, not a map of ones.
-    py::arg("b1_map") = Matrix<std::complex<f64>, Dynamic, 1>(),
-    // Empty by default: no lab-frame static field.
-    py::arg("static_lin") = Matrix<f64, Dynamic, 3>(),
-    py::arg("conc_offset") = Matrix<f64, Dynamic, 1>(),
-    // Empty by default: no quadratic lab-frame field.
-    py::arg("field_quad") = Matrix<f64, Dynamic, 1>(),
-    // Empty by default: no per-node field gradient.
-    py::arg("node_lin") = Matrix<f64, Dynamic, 3, RowMajor>());
+  bind_solve_mri<float>(m, "solve_mri_f32");
+  bind_solve_mri<double>(m, "solve_mri_f64");
 }
