@@ -308,7 +308,7 @@ class FEMPhantom:
                 bmin[0], bmin[1], bmin[2], bmax[0], bmax[1], bmax[2]))
         return (bmin, bmax)
 
-    def create_submesh(self, markers, refine=False):
+    def create_submesh(self, markers):
         """Restrict the global mesh to a subset of elements defined by ``markers``.
 
         The original mesh is backed up and can be restored. After this call
@@ -319,8 +319,6 @@ class FEMPhantom:
         markers : np.ndarray
             Boolean array of length ``N_elements`` selecting which elements
             to include in the submesh.
-        refine : bool, optional
-            Reserved for future use. Default is False.
 
         Notes
         -----

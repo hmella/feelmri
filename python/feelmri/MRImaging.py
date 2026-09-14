@@ -57,27 +57,23 @@ class Bloch:
     def __call__(self, t, M):
         return self.equation(t, M)
 
-    def bloch(self, t, M):
-        # Frequency offset
+    def _transverse(self, t, M):
+        """The two transverse rates, shared by both forms."""
         dw = self.gamma * self.eval_gradient(t) * (self.z - self.z0)
+        b1 = self.B1e(t)
+        dMxdt = dw * M[1] - self.gamma * np.imag(b1) * M[2]
+        dMydt = -dw * M[0] + self.gamma * np.real(b1) * M[2]
+        return dMxdt, dMydt, b1
 
-        # Bloch equations
-        dMxdt = dw * M[1] - self.gamma * np.imag(self.B1e(t)) * M[2]
-        dMydt = -dw * M[0] + self.gamma * np.real(self.B1e(t)) * M[2]
-        dMzdt = self.gamma * np.imag(self.B1e(t)) * M[0] - self.gamma * np.real(self.B1e(t)) * M[1]
-
+    def bloch(self, t, M):
+        dMxdt, dMydt, b1 = self._transverse(t, M)
+        dMzdt = self.gamma * (np.imag(b1) * M[0] - np.real(b1) * M[1])
         return np.array([dMxdt, dMydt, dMzdt]).reshape((3,))
 
     def bloch_small(self, t, M):
-        # Frequency offset
-        dw = self.gamma * self.eval_gradient(t) * (self.z - self.z0)
-
-        # Bloch equations
-        dMxdt = dw * M[1] - self.gamma * np.imag(self.B1e(t)) * M[2]
-        dMydt = self.gamma * np.real(self.B1e(t)) * M[2] - dw * M[0]
-        dMzdt = -self.gamma * np.real(self.B1e(t)) * M[1] * 0.0
-
-        return np.array([dMxdt, dMydt, dMzdt]).reshape((3,))
+        """Small-angle form: Mz is held at equilibrium, so its rate is zero."""
+        dMxdt, dMydt, _ = self._transverse(t, M)
+        return np.array([dMxdt, dMydt, 0.0]).reshape((3,))
 
 
 class SliceProfile:

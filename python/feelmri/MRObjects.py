@@ -1351,21 +1351,6 @@ class Gradient:
     # ======================================================================
     # Gradient Construction Helpers
     # ======================================================================
-    def evaluate(self, t):
-        """Evaluate the gradient interpolator at a given time point.
-
-        Parameters
-        ----------
-        t : float
-            Time at which to evaluate the gradient (ms).
-
-        Returns
-        -------
-        float
-            Gradient amplitude at time ``t`` (mT/m).
-        """
-        return self.interpolator(t)
-
     def group_timings(self):
         """Generate timing and amplitude arrays for a trapezoidal or triangular gradient.
 

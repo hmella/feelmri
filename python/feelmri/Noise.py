@@ -4,7 +4,7 @@ Complex noise generation utilities for MR image simulation.
 import numpy as np
 
 
-def add_cpx_noise(image, mask=1, std=[], relative_std=[], SNR=20, ref=0, recover_noise=False):
+def add_cpx_noise(image, mask=1, std=[], relative_std=[], recover_noise=False):
     """Add complex Gaussian noise to an input image.
 
     Parameters
@@ -18,10 +18,6 @@ def add_cpx_noise(image, mask=1, std=[], relative_std=[], SNR=20, ref=0, recover
     relative_std : float or np.ndarray, optional
         Relative standard deviation of the noise (fraction of peak magnitude).
         Default is an empty list.
-    SNR : float, optional
-        Signal-to-noise ratio. Default is 20.
-    ref : int, optional
-        Reference index for noise calculation. Default is 0.
     recover_noise : bool, optional
         If True, also return the noise array. Default is False.
 
