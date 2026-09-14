@@ -86,8 +86,7 @@ def _forward_reference_applies(ref, t_anchor_s):
     return True, ''
 
 
-@pytest.mark.parametrize('seq_path', SEQ_FILES, ids=seq_ids(SEQ_FILES))
-def test_readout_anchor_invariant(seq_path, pulseq_import, pypulseq_ref):
+def _readout_anchor_invariant(seq_path, pulseq_import, pypulseq_ref):
     """Each window's k-space must be the file's trajectory MINUS the gradient
     moment already carried by the magnetization at its anchor.
 
@@ -146,8 +145,7 @@ def test_readout_anchor_invariant(seq_path, pulseq_import, pypulseq_ref):
             f'that is being applied twice')
 
 
-@pytest.mark.parametrize('seq_path', SEQ_FILES, ids=seq_ids(SEQ_FILES))
-def test_raster_spans_every_block(seq_path, pulseq_import):
+def _raster_spans_every_block(seq_path, pulseq_import):
     """The integration raster must cover each block exactly, and carry no
     zero-length steps.
 
@@ -196,8 +194,7 @@ def test_raster_spans_every_block(seq_path, pulseq_import):
         f'({100 * integrated / total:.2f}%)')
 
 
-@pytest.mark.parametrize('seq_path', SEQ_FILES, ids=seq_ids(SEQ_FILES))
-def test_no_rf_plays_inside_a_readout_window(seq_path, pulseq_import):
+def _no_rf_plays_inside_a_readout_window(seq_path, pulseq_import):
     """The dual path solves the sequence ONCE and then synthesizes each readout
     from its trajectory. That is equivalent to evolving through the readout only
     while no RF plays between the magnetization snapshot and the last sample:
@@ -233,3 +230,30 @@ def test_no_rf_plays_inside_a_readout_window(seq_path, pulseq_import):
                 f'would ignore it')
         checked += 1
     assert checked > 0, 'no window had a usable anchor, so nothing was checked'
+
+@pytest.mark.parametrize('seq_path', SEQ_FILES, ids=seq_ids(SEQ_FILES))
+def test_the_import_invariants_hold_on_every_fixture(seq_path, pulseq_import, pypulseq_ref):
+  """Three invariants of ONE import, on one fixture.
+
+  They shared a fixture, an import and a parametrisation and differed only in
+  which property they read off it, so sweeping fifteen files three times
+  re-imported nothing and asserted three unrelated things separately. Each
+  helper keeps its own assertions and messages, so a failure still names which
+  invariant broke -- only the test COUNT changes.
+  """
+  checks = (
+      (_readout_anchor_invariant, (seq_path, pulseq_import, pypulseq_ref,)),
+      (_raster_spans_every_block, (seq_path, pulseq_import,)),
+      (_no_rf_plays_inside_a_readout_window, (seq_path, pulseq_import,)),
+  )
+  skipped = []
+  for fn, fn_args in checks:
+    try:
+      fn(*fn_args)
+    except pytest.skip.Exception as exc:
+      # Per CHECK, not per test. A skip inside one helper would otherwise
+      # abort the others, so a fixture with no ADC would silently stop being
+      # checked for everything else -- a coverage loss disguised as a skip.
+      skipped.append(f'{fn.__name__}: {exc}')
+  if len(skipped) == len(checks):
+    pytest.skip('; '.join(skipped))

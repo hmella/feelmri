@@ -60,8 +60,7 @@ def _imp(pulseq_import, seq_path):
 # Dual-path partition API
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize('seq_path', SEQ_FILES, ids=seq_ids(SEQ_FILES))
-def test_import_pulseq_partitions_blocks(pulseq_import, seq_path):
+def _import_pulseq_partitions_blocks(pulseq_import, seq_path):
   imp = _imp(pulseq_import, seq_path)
   n = len(imp.pulseq_seq)
   prep = set(imp.prep_block_indices)
@@ -315,8 +314,7 @@ def test_labelset_filter(adapter, tmp_path):
 # Readout-placeholder substitution: feelmri_sim_seq
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize('seq_path', SEQ_FILES, ids=seq_ids(SEQ_FILES))
-def test_feelmri_sim_seq_default_matches_seq(pulseq_import, seq_path):
+def _feelmri_sim_seq_default_matches_seq(pulseq_import, seq_path):
   """With the default ``readout_set_values=(3,)`` the simulation
   sequence has identical block count and absolute duration as
   ``feelmri_seq``. Per-block durations match exactly so the global
@@ -1256,3 +1254,25 @@ def test_a_degree_two_b0_field_reaches_the_readout_through_simulate_pulseq(
   assert np.abs(together[0] - want_sum).max() <= 1e-12 * np.abs(want_sum).max(), (
       'the readout coefficients with both channels on are not the sum of the '
       'two; one set is overwriting the other')
+
+@pytest.mark.parametrize('seq_path', SEQ_FILES, ids=seq_ids(SEQ_FILES))
+def test_the_import_partitions_and_mirrors_every_fixture(seq_path, pulseq_import):
+  """The block partition and the sim-sequence mirror, on one import.
+
+  Both read the same `PulseqImport` and differ only in which half they check.
+  """
+  checks = (
+      (_import_pulseq_partitions_blocks, (pulseq_import, seq_path,)),
+      (_feelmri_sim_seq_default_matches_seq, (pulseq_import, seq_path,)),
+  )
+  skipped = []
+  for fn, fn_args in checks:
+    try:
+      fn(*fn_args)
+    except pytest.skip.Exception as exc:
+      # Per CHECK, not per test. A skip inside one helper would otherwise
+      # abort the others, so a fixture with no ADC would silently stop being
+      # checked for everything else -- a coverage loss disguised as a skip.
+      skipped.append(f'{fn.__name__}: {exc}')
+  if len(skipped) == len(checks):
+    pytest.skip('; '.join(skipped))

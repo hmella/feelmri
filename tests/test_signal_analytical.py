@@ -1027,7 +1027,7 @@ def _dc_signal(phantom, mxy):
       (zero.copy(), zero.copy(), zero.copy()), zero.copy(), None)).reshape(-1)
 
 
-def test_a_receive_map_folds_onto_the_coil_axis(tmp_path):
+def _a_receive_map_folds_onto_the_coil_axis(tmp_path):
   """`S[e*n_coils + c] = sum_n m_n C[n,c] Mxy[n,e]`, exactly.
 
   The nodal weights are measured off the assembler first, so this is a closed
@@ -1063,7 +1063,7 @@ def test_a_receive_map_folds_onto_the_coil_axis(tmp_path):
     'distinguish the two orderings')
 
 
-def test_a_receive_map_weights_the_node_it_belongs_to(tmp_path):
+def _a_receive_map_weights_the_node_it_belongs_to(tmp_path):
   """Permuting the map must permute which node each coil hears, not merely
   change the answer. A fold that applied the map in the wrong row order, or
   broadcast one node's value everywhere, satisfies "the signal moved"."""
@@ -1087,7 +1087,7 @@ def test_a_receive_map_weights_the_node_it_belongs_to(tmp_path):
     'this permutation left the signal unchanged, so it pins nothing')
 
 
-def test_clearing_the_receive_map_restores_the_plain_signal(tmp_path):
+def _clearing_the_receive_map_restores_the_plain_signal(tmp_path):
   """`None` must leave no trace -- bit-identical, not merely close, since the
   fold is skipped rather than multiplied by ones."""
   phantom = _irregular_phantom(tmp_path / 'clear.vtu')
@@ -1442,7 +1442,7 @@ def test_the_concomitant_phase_vanishes_on_its_null_line(tmp_path):
     'proves nothing')
 
 
-def test_a_receive_map_does_not_survive_a_repartition(tmp_path):
+def _a_receive_map_does_not_survive_a_repartition(tmp_path):
   """The map is one value per LOCAL node, so a repartition invalidates it.
 
   `set_receive_sensitivity` did not mark the partition as bound, so
@@ -2386,3 +2386,15 @@ def test_the_readout_is_exact_for_a_configuration_held_through_the_window(tmp_pa
   assert ramping > 100.0 * held, (
       f'moving the SAME 35 mm inside the window costs only {ramping:.3e} '
       f'against {held:.3e} held, so this fixture cannot separate the two')
+
+def test_the_receive_sensitivity_map_end_to_end(tmp_path):
+  """One feature in four facets, all on a `tmp_path` phantom.
+
+  The coil axis it folds onto, the node each value weights, what clearing it
+  restores, and that a repartition drops it rather than pairing it with the
+  wrong nodes. Each helper keeps its own closed form and its own message.
+  """
+  _a_receive_map_folds_onto_the_coil_axis(tmp_path)
+  _a_receive_map_weights_the_node_it_belongs_to(tmp_path)
+  _clearing_the_receive_map_restores_the_plain_signal(tmp_path)
+  _a_receive_map_does_not_survive_a_repartition(tmp_path)

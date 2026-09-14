@@ -23,8 +23,7 @@ pytestmark = pytest.mark.pulseq
 TOL_MS = 1e-9
 
 
-@pytest.mark.parametrize('seq_path', SEQ_FILES, ids=seq_ids(SEQ_FILES))
-def test_timing_grid_matches(seq_path, pulseq_import, pypulseq_ref):
+def _timing_grid_matches(seq_path, pulseq_import, pypulseq_ref):
     """Block count, per-block duration, absolute start and total duration.
 
     The four are one property. `time_extent[0]` is the running sum of the
@@ -68,8 +67,7 @@ def _pp_gradients_hz_per_m(wf, t_ms, t0, t1):
     return out
 
 
-@pytest.mark.parametrize('seq_path', SEQ_FILES, ids=seq_ids(SEQ_FILES))
-def test_gradient_waveforms_match(seq_path, pulseq_import, pypulseq_ref):
+def _gradient_waveforms_match(seq_path, pulseq_import, pypulseq_ref):
     # The gradient the solver integrates must be the gradient pypulseq plays.
     # This is what catches a shaped gradient laid down half a raster off, one
     # missing the first/last boundary samples of a v1.5 file, or a gamma that
@@ -115,8 +113,7 @@ def test_gradient_waveforms_match(seq_path, pulseq_import, pypulseq_ref):
         f'max |delta| = {worst:.4g} Hz/m against a peak of {peak:.4g}')
 
 
-@pytest.mark.parametrize('seq_path', SEQ_FILES, ids=seq_ids(SEQ_FILES))
-def test_adc_times_match(seq_path, pulseq_import, pypulseq_ref):
+def _adc_times_match(seq_path, pulseq_import, pypulseq_ref):
     """The in-house read_ADC, and the readout-window partition over it.
 
     Two different claims, and only the first tests our own parser.
@@ -146,8 +143,7 @@ def test_adc_times_match(seq_path, pulseq_import, pypulseq_ref):
     assert np.abs(windowed - expected).max() < 1e-6, 'readout window coverage'
 
 
-@pytest.mark.parametrize('seq_path', SEQ_FILES, ids=seq_ids(SEQ_FILES))
-def test_rf_waveforms_match(seq_path, pulseq_import, pypulseq_ref):
+def _rf_waveforms_match(seq_path, pulseq_import, pypulseq_ref):
     # The last leg of the in-house-parser-vs-pypulseq comparison. RF has the
     # same half-raster convention that the gradients do: read_RF shifts the
     # delay by dt_rf/2 for a uniform raster, and this is what pins it.
@@ -185,3 +181,30 @@ def test_rf_waveforms_match(seq_path, pulseq_import, pypulseq_ref):
 
     if n_checked == 0:
         pytest.skip('no RF in this sequence')
+
+@pytest.mark.parametrize('seq_path', SEQ_FILES, ids=seq_ids(SEQ_FILES))
+def test_the_in_house_parser_agrees_with_pypulseq_on_every_fixture(seq_path, pulseq_import, pypulseq_ref):
+  """Every quantity the in-house parser and pypulseq must agree on.
+
+  Four legs of ONE comparison -- timing grid, gradients, ADC sample times, RF
+  waveforms -- over the same fixture, the same import and the same reference.
+  Sweeping fifteen files four times re-read nothing; each helper keeps its own
+  tolerances and messages, so a failure still names which leg broke.
+  """
+  checks = (
+      (_timing_grid_matches, (seq_path, pulseq_import, pypulseq_ref,)),
+      (_gradient_waveforms_match, (seq_path, pulseq_import, pypulseq_ref,)),
+      (_adc_times_match, (seq_path, pulseq_import, pypulseq_ref,)),
+      (_rf_waveforms_match, (seq_path, pulseq_import, pypulseq_ref,)),
+  )
+  skipped = []
+  for fn, fn_args in checks:
+    try:
+      fn(*fn_args)
+    except pytest.skip.Exception as exc:
+      # Per CHECK, not per test. A skip inside one helper would otherwise
+      # abort the others, so a fixture with no ADC would silently stop being
+      # checked for everything else -- a coverage loss disguised as a skip.
+      skipped.append(f'{fn.__name__}: {exc}')
+  if len(skipped) == len(checks):
+    pytest.skip('; '.join(skipped))

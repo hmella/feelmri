@@ -13,7 +13,6 @@ import meshio
 import numpy as np
 import pymetis
 from pint import Quantity
-from scipy.interpolate import RBFInterpolator
 from scipy.sparse import lil_matrix
 
 from contextlib import contextmanager
@@ -1133,56 +1132,6 @@ class FEMPhantom:
 
         return data[idx, ...]
 
-    def interpolate_to_submesh(self, data, local=True, kernel='linear', neighbors=25):
-        """Interpolate a field from the main mesh to submesh nodes using RBF.
-
-        Parameters
-        ----------
-        data : np.ndarray
-            Source data of shape ``(N_nodes, M)`` defined on the main mesh.
-        local : bool, optional
-            If True, interpolate to the local (rank-owned) submesh nodes;
-            if False, to all global submesh nodes. Default is True.
-        kernel : str, optional
-            RBF kernel passed to :class:`scipy.interpolate.RBFInterpolator`.
-            Default is ``'linear'``.
-        neighbors : int, optional
-            Number of nearest neighbors used in the RBF. Default is 25.
-
-        Returns
-        -------
-        np.ndarray
-            Interpolated data at the target submesh nodes.
-        """
-        try:
-            self.mesh_to_submesh_nodes
-        except KeyError:
-            raise ValueError("Submesh not created. Please create a submesh first using `create_submesh`.")
-
-        # Main mesh nodes and submesh nodes
-        idx = self.mesh_to_submesh_nodes
-        mesh_nodes = self._global_nodes[idx, :]
-
-        # Stacked data
-        if data.shape[1] > 0:
-            data = np.column_stack(tuple([data[..., i].flatten()[idx] for i in range(data.shape[1])]))
-
-        # Define dummy interpolator to save time
-        if hasattr(self, 'submesh_interp'):
-            d_dtype = complex if np.iscomplexobj(data) else float
-            data = np.asarray(data, dtype=d_dtype, order="C")
-            self.submesh_interp.d = data
-        else:
-            self.submesh_interp = RBFInterpolator(mesh_nodes, data, neighbors=neighbors, kernel=kernel, degree=1)
-
-        # Interpolate data
-        if local:
-            interp_data = self.submesh_interp(self.local_nodes)
-        else:
-            interp_data = self.submesh_interp(self.global_nodes)
-
-        return interp_data
-
     def orient(self, MPS_ori: np.ndarray, LOC: Quantity):
         """Transform node coordinates from phantom space to scanner image space.
 
@@ -1261,60 +1210,6 @@ class FEMPhantom:
         # Translate and rotate
         self.global_nodes = self.global_nodes @ MPS_ori.T + loc_m
         self.local_nodes = self.local_nodes @ MPS_ori.T + loc_m
-
-    def mass_matrix(self, lumped=False, quadrature_order=2):
-        """Assemble the finite element mass matrix on the local mesh partition.
-
-        Parameters
-        ----------
-        lumped : bool, optional
-            If True, lump the mass matrix to a diagonal by row-summing.
-            Default is False.
-        quadrature_order : int, optional
-            Quadrature rule order for numerical integration. Default is 2.
-
-        Returns
-        -------
-        scipy.sparse matrix
-            Assembled (optionally lumped) mass matrix.
-        """
-        # Assemble mass matrix
-        M = bMassAssemble(self.local_elements, self.local_nodes, self.cell_type, 'equispaced', 'default', quadrature_order)
-
-        # Make matrix lumped if requested
-        if lumped:
-            diag = M.sum(axis=1)
-            M = lil_matrix(M.shape, dtype=M.dtype)
-            M.setdiag(diag)
-        return M
-
-    def moving_mass_matrix(self, local_nodes, lumped=False, quadrature_order=2):
-        """Assemble the mass matrix using externally provided (deformed) node positions.
-
-        Parameters
-        ----------
-        local_nodes : np.ndarray
-            Node coordinate array for the current deformed configuration.
-        lumped : bool, optional
-            If True, lump the mass matrix to a diagonal. Default is False.
-        quadrature_order : int, optional
-            Quadrature rule order. Default is 2.
-
-        Returns
-        -------
-        scipy.sparse matrix
-            Assembled mass matrix for the given node positions.
-        """
-        # Assemble mass matrix
-        M = bMassAssemble(self.local_elements, local_nodes, self.cell_type, 'equispaced', 'default', quadrature_order)
-
-        # Make matrix lumped if requested
-        if lumped:
-            diag = M.sum(axis=1)
-            M = lil_matrix(M.shape, dtype=M.dtype)
-            M.setdiag(diag)
-
-        return M
 
     def set_assembler(self, voxel_size, lorder=1, horder=1, nodal_approximation=False,
                       lumped=True):
@@ -1444,21 +1339,6 @@ class FEMPhantom:
                 # first `signal` / `signal_full` call on this group, so workloads
                 # that use only signal_sum / signal_nodal never pay it.
                 a.update_magnetization(Mxy)
-
-    def precompute_trajectory(self, pod):
-        """Pre-compute the motion trajectory for all assembler instances.
-
-        Parameters
-        ----------
-        pod : POD or callable
-            Motion trajectory object.
-
-        Returns
-        -------
-        list
-            List of pre-computed trajectory objects, one per assembler.
-        """
-        return [a.precompute_trajectory(pod) for a in self.assembler]
 
     def set_static_fields(self, T2, phi_dB0):
         """Push per-node relaxation and off-resonance into the assembler groups.
