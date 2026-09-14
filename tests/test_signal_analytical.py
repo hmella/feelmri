@@ -2295,3 +2295,85 @@ def test_a_per_node_field_and_the_maxwell_channel_compose_in_one_readout(
         + np.einsum('ij,j->i', terms.node_gradient, shift)) * t_ms))))
   assert abs(no_grad - want) > 1e-2 * scale
   assert abs(no_max - want) > 1e-2 * scale
+
+
+def test_the_readout_is_exact_for_a_configuration_held_through_the_window(tmp_path):
+  """A displacement present for the WHOLE readout costs nothing, however large.
+
+  The assembler forms `-2 pi k(t).x(t)` and `-gamma phi(x(t)) t`, evaluating
+  the position at the sample instant rather than integrating over the window.
+  That reads like a rectangle rule and is not one: both terms factor when the
+  configuration is fixed across the window, because `k(t)` already IS the
+  integrated gradient moment and `u` comes out of both integrals --
+
+      2 pi k(t).(x0+u)   ==  gamma int G(s).(x0+u) ds
+      gamma dB0(x0+u) t  ==  gamma int dB0(x0+u) ds
+
+  so the only thing the model cannot see is the CHANGE in configuration during
+  the readout. Measured on this fixture with a 35 mm displacement: **7.8e-06**
+  held through the window against **1.69** for the same 35 mm accruing linearly
+  inside it.
+
+  This pins the exactness AND the discrimination, so the claim cannot quietly
+  become the other one: an audit reported the motion term as "exactly doubled"
+  on the strength of the ramping arm alone.
+  """
+  pytest.importorskip('meshio')
+  pytest.importorskip('mpi4py')
+  import meshio
+  from feelmri.Motion import POD
+  from feelmri.MRObjects import Scanner
+  from _phantom_fixtures import make_cube_mesh
+
+  scanner = Scanner()
+  gamma = scanner.gamma.m_as('rad/ms/mT')
+  seed, _v = make_cube_mesh(tmp_path / 'hold.vtu', 'tetra', n=2, scale=0.12)
+  mesh = meshio.read(str(seed))
+  P = np.asarray(mesh.points, dtype=np.float64)
+  cells = mesh.cells_dict['tetra']
+  n = P.shape[0]
+  u0 = np.array([0.024, -0.016, 0.020])            # 35 mm
+  g = np.array([2.0e-3, -1.0e-3, 1.5e-3])          # mT/m lab field
+  T = 8.0
+
+  def build(nodes, tag, phi):
+    path = tmp_path / tag
+    meshio.write(str(path), meshio.Mesh(nodes, [('tetra', cells)]))
+    ph = FEMPhantom(path=str(path))
+    ph.set_assembler(voxel_size=1e3, lorder=2,
+                     nodal_approximation=True, lumped=True)
+    ph.set_static_fields(T2=np.full(n, 1e9, dtype=np.float32),
+                         phi_dB0=phi.astype(np.float32))
+    ph.update_magnetization(np.ones(n, dtype=np.complex64))
+    return ph
+
+  rng = np.random.default_rng(4)
+  S = 16
+  k = [(rng.normal(size=(S, 1, 1)) * 40).astype(np.float32) for _ in range(3)]
+  t = np.linspace(0.5, T, S).astype(np.float32).reshape(S, 1, 1)
+
+  def run(kind):
+    ts = np.linspace(0.0, T, 6)
+    data = np.zeros((n, 3, 6), dtype=np.float32)
+    for axis in range(3):
+      data[:, axis, :] = u0[axis] if kind == 'held' else u0[axis] * ts / T
+    ph = build(P, f'run_{kind}.vtu', gamma * (P @ g))
+    ph.set_b0_gradient(np.tile(gamma * g, (n, 1)))
+    return np.asarray(ph.mri_signal(
+        list(k), t, POD(data=data, times=ts, n_modes=2))).reshape(-1)
+
+  # The exact answer for the held case needs no integration at all: it is the
+  # same mesh built where the spins are, with nothing moving.
+  ref = build(P + u0, 'hold_ref.vtu', gamma * ((P + u0) @ g))
+  exact = np.asarray(ref.mri_signal(list(k), t, None)).reshape(-1)
+  scale = np.abs(exact).max()
+
+  held = np.abs(run('held') - exact).max() / scale
+  assert held < 1e-4, (
+      f'a displacement held through the window costs {held:.3e}; both phase '
+      f'terms are supposed to factor')
+
+  ramping = np.abs(run('ramping') - exact).max() / scale
+  assert ramping > 100.0 * held, (
+      f'moving the SAME 35 mm inside the window costs only {ramping:.3e} '
+      f'against {held:.3e} held, so this fixture cannot separate the two')
