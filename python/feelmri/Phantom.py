@@ -1696,26 +1696,60 @@ class FEMPhantom:
 
     def mri_signal(self, kspace_points, kspace_times, pod=None,
                    maxwell=None):
-        """Compute the MRI k-space signal using the configured assembler(s).
+        """The k-space signal over EVERY assembler group -- the default entry point.
 
-        Uses nodal integration for the first assembler group when
-        ``nodal_approximation`` is active, and full Gauss integration
-        otherwise.
+        This is the dispatcher, and on a mesh whose elements straddle
+        ``voxel_size`` it is the only one of the four that integrates the whole
+        phantom: group 0 goes through nodal integration when
+        ``nodal_approximation`` is active and every other group through full
+        Gauss quadrature, and the groups are summed. Reach for this one unless
+        you have a specific reason not to.
 
         Parameters
         ----------
-        kspace_points : np.ndarray
-            K-space sample coordinates.
+        kspace_points : sequence of three np.ndarray
+            ``(kx, ky, kz)`` in **1/m**, each with the trajectory's own shape
+            ``(ro_samples, ph_samples, slices)``. All three describe the same
+            samples and must share one shape.
         kspace_times : np.ndarray
-            Acquisition times corresponding to each k-space sample.
-        pod : POD, list of POD, or None
-            Motion trajectory. Pass a list when multiple assembler groups
-            each have a pre-computed trajectory.
+            One acquisition time per sample, in **ms**, measured **from the
+            magnetization snapshot** -- not from the start of the sequence.
+            `exp(-t/T2)` and `exp(-i phi t)` both continue from the instant
+            `update_magnetization` captured, and on a native trajectory that
+            instant is ``traj.t_start``, so the argument is
+            ``traj.times.m_as('ms') - traj.t_start.m_as('ms')``. Absolute times
+            apply a spurious `exp(-t_start/T2)` and, worse, a spatially varying
+            `phi*t_start` -- measured at 1.688 rad peak-to-peak across the
+            object on `examples/phase_contrast.py`.
+        pod : POD, PODSum or None
+            Motion trajectory. The weights are evaluated at
+            ``t + pod.timeshift``, and ``kspace_times`` is elapsed-since-
+            snapshot, so the caller folds the sample's ABSOLUTE sequence time
+            into the trajectory's own shift before calling -- that is what the
+            ``pod.update_timeshift(...)`` in every readout loop is for. A
+            ``list`` is refused; combine trajectories with :class:`PODSum`.
+        maxwell : np.ndarray or None
+            ``(N, 6)`` concomitant phase coefficients in **rad/m^2**, ordered
+            ``x^2, y^2, z^2, xy, xz, yz`` and flattened like ``kspace_times``.
+            Build them with
+            :func:`~feelmri.PulseqAdapter.maxwell_phase_coefficients`, which
+            owns the sign, the 1/B0 and both rotations; the ``(N, 4)`` MOMENTS
+            that feed it are a different quantity and are refused here.
 
         Returns
         -------
         np.ndarray
-            Complex k-space signal summed over all assembler groups.
+            Complex k-space signal, shaped ``kspace_times.shape + (nv,)``. The
+            trailing axis is the assembler's free channel axis -- velocity
+            encodings times receive coils -- and is present even at ``nv == 1``,
+            which is what the ``swapaxes(0, 1)[:, :, 0]`` in the shot-major
+            examples is unpicking.
+
+        See Also
+        --------
+        signal_quadrature : full quadrature on every group.
+        signal_nodal_group0, signal_sum_group0 : group 0 ONLY -- see their own
+            warnings.
         """
         with self._signal_call('mri_signal', kspace_points, kspace_times, pod, maxwell) as args:
             eval_helper = []
@@ -1727,74 +1761,207 @@ class FEMPhantom:
 
             return sum([signal(kspace_points, *args) for signal in eval_helper])
 
-    def signal(self, kspace_points, kspace_times, pod=None,
+    def signal_quadrature(self, kspace_points, kspace_times, pod=None,
                    maxwell=None):
-        """Compute the k-space signal using full Gauss integration.
+        """The k-space signal by full Gauss quadrature, over every group.
+
+        Differs from :meth:`mri_signal` only when ``nodal_approximation`` is
+        active, where `mri_signal` routes group 0 through the nodal path and
+        this one does not. With the flag off the two are the same computation.
 
         Parameters
         ----------
-        kspace_points : np.ndarray
-            K-space sample coordinates.
+        kspace_points : sequence of three np.ndarray
+            ``(kx, ky, kz)`` in **1/m**, each with the trajectory's own shape
+            ``(ro_samples, ph_samples, slices)``. All three describe the same
+            samples and must share one shape.
         kspace_times : np.ndarray
-            Acquisition times.
-        pod : POD, list of POD, or None
-            Motion trajectory.
+            One acquisition time per sample, in **ms**, measured **from the
+            magnetization snapshot** -- not from the start of the sequence.
+            `exp(-t/T2)` and `exp(-i phi t)` both continue from the instant
+            `update_magnetization` captured, and on a native trajectory that
+            instant is ``traj.t_start``, so the argument is
+            ``traj.times.m_as('ms') - traj.t_start.m_as('ms')``. Absolute times
+            apply a spurious `exp(-t_start/T2)` and, worse, a spatially varying
+            `phi*t_start` -- measured at 1.688 rad peak-to-peak across the
+            object on `examples/phase_contrast.py`.
+        pod : POD, PODSum or None
+            Motion trajectory. The weights are evaluated at
+            ``t + pod.timeshift``, and ``kspace_times`` is elapsed-since-
+            snapshot, so the caller folds the sample's ABSOLUTE sequence time
+            into the trajectory's own shift before calling -- that is what the
+            ``pod.update_timeshift(...)`` in every readout loop is for. A
+            ``list`` is refused; combine trajectories with :class:`PODSum`.
+        maxwell : np.ndarray or None
+            ``(N, 6)`` concomitant phase coefficients in **rad/m^2**, ordered
+            ``x^2, y^2, z^2, xy, xz, yz`` and flattened like ``kspace_times``.
+            Build them with
+            :func:`~feelmri.PulseqAdapter.maxwell_phase_coefficients`, which
+            owns the sign, the 1/B0 and both rotations; the ``(N, 4)`` MOMENTS
+            that feed it are a different quantity and are refused here.
 
         Returns
         -------
         np.ndarray
-            Complex k-space signal.
+            Complex k-space signal, shaped ``kspace_times.shape + (nv,)``. The
+            trailing axis is the assembler's free channel axis -- velocity
+            encodings times receive coils -- and is present even at ``nv == 1``,
+            which is what the ``swapaxes(0, 1)[:, :, 0]`` in the shot-major
+            examples is unpicking.
         """
-        with self._signal_call('signal', kspace_points, kspace_times, pod, maxwell) as args:
+        with self._signal_call('signal_quadrature', kspace_points, kspace_times, pod, maxwell) as args:
             return sum([a.signal(kspace_points, *args) for a in self.assembler])
 
-    def signal_nodal(self, kspace_points, kspace_times, pod=None,
+    def signal_nodal_group0(self, kspace_points, kspace_times, pod=None,
                    maxwell=None):
-        """Compute the k-space signal using ultra-fast nodal mass matrix integration.
+        """The k-space signal by mass-matrix nodal integration, on GROUP 0 ONLY.
+
+        .. warning::
+           Evaluated on ``assembler[0]`` alone. Every group is built with the
+           rank's ENTIRE node set and only the element subset differs, so this
+           is a per-node quantity that must not be summed over groups -- doing
+           so counted every node once per group, measured as 346 950 for
+           173 475 nodes, exactly 2x. The mass matrix ``M_`` is also assembled
+           from the SMALL-element group alone, so on a mesh that splits this
+           integrates only that group. Use :meth:`mri_signal` for the whole
+           phantom.
 
         Parameters
         ----------
-        kspace_points : np.ndarray
-            K-space sample coordinates.
+        kspace_points : sequence of three np.ndarray
+            ``(kx, ky, kz)`` in **1/m**, each with the trajectory's own shape
+            ``(ro_samples, ph_samples, slices)``. All three describe the same
+            samples and must share one shape.
         kspace_times : np.ndarray
-            Acquisition times.
-        pod : POD, list of POD, or None
-            Motion trajectory.
+            One acquisition time per sample, in **ms**, measured **from the
+            magnetization snapshot** -- not from the start of the sequence.
+            `exp(-t/T2)` and `exp(-i phi t)` both continue from the instant
+            `update_magnetization` captured, and on a native trajectory that
+            instant is ``traj.t_start``, so the argument is
+            ``traj.times.m_as('ms') - traj.t_start.m_as('ms')``. Absolute times
+            apply a spurious `exp(-t_start/T2)` and, worse, a spatially varying
+            `phi*t_start` -- measured at 1.688 rad peak-to-peak across the
+            object on `examples/phase_contrast.py`.
+        pod : POD, PODSum or None
+            Motion trajectory. The weights are evaluated at
+            ``t + pod.timeshift``, and ``kspace_times`` is elapsed-since-
+            snapshot, so the caller folds the sample's ABSOLUTE sequence time
+            into the trajectory's own shift before calling -- that is what the
+            ``pod.update_timeshift(...)`` in every readout loop is for. A
+            ``list`` is refused; combine trajectories with :class:`PODSum`.
+        maxwell : np.ndarray or None
+            ``(N, 6)`` concomitant phase coefficients in **rad/m^2**, ordered
+            ``x^2, y^2, z^2, xy, xz, yz`` and flattened like ``kspace_times``.
+            Build them with
+            :func:`~feelmri.PulseqAdapter.maxwell_phase_coefficients`, which
+            owns the sign, the 1/B0 and both rotations; the ``(N, 4)`` MOMENTS
+            that feed it are a different quantity and are refused here.
 
         Returns
         -------
         np.ndarray
-            Complex k-space signal.
+            Complex k-space signal, shaped ``kspace_times.shape + (nv,)``. The
+            trailing axis is the assembler's free channel axis -- velocity
+            encodings times receive coils -- and is present even at ``nv == 1``,
+            which is what the ``swapaxes(0, 1)[:, :, 0]`` in the shot-major
+            examples is unpicking.
         """
         # Evaluated on ONE group only, for the same reason as ``signal_sum``: every
         # group carries the full node set. Note the mass matrix ``M_`` is assembled
         # from the *small*-element group alone, so on a mesh that splits, this
         # integrates only that group -- use ``mri_signal``, which routes the
         # large-element group through the quadrature path, for the whole mesh.
-        with self._signal_call('signal_nodal', kspace_points, kspace_times, pod, maxwell) as args:
+        with self._signal_call('signal_nodal_group0', kspace_points, kspace_times, pod, maxwell) as args:
             return self.assembler[0].signal_nodal(kspace_points, *args)
 
-    def signal_sum(self, kspace_points, kspace_times, pod=None,
+    def signal_sum_group0(self, kspace_points, kspace_times, pod=None,
                    maxwell=None):
-        """Compute the k-space signal by summing nodal contributions.
+        """The raw nodal sum, carrying no element volume, on GROUP 0 ONLY.
+
+        .. warning::
+           Evaluated on ``assembler[0]`` alone, for the reason
+           :meth:`signal_nodal_group0` spells out. It also carries no element volume,
+           so its absolute scale is arbitrary -- compare it only after removing
+           a complex scale factor. Interface nodes are handled by the ownership
+           mask ``set_node_ownership`` installs, so the result is rank-count
+           independent; without it, it was wrong by 6.6e-02 to 1.5e-01.
 
         Parameters
         ----------
-        kspace_points : np.ndarray
-            K-space sample coordinates.
+        kspace_points : sequence of three np.ndarray
+            ``(kx, ky, kz)`` in **1/m**, each with the trajectory's own shape
+            ``(ro_samples, ph_samples, slices)``. All three describe the same
+            samples and must share one shape.
         kspace_times : np.ndarray
-            Acquisition times.
-        pod : POD, list of POD, or None
-            Motion trajectory.
+            One acquisition time per sample, in **ms**, measured **from the
+            magnetization snapshot** -- not from the start of the sequence.
+            `exp(-t/T2)` and `exp(-i phi t)` both continue from the instant
+            `update_magnetization` captured, and on a native trajectory that
+            instant is ``traj.t_start``, so the argument is
+            ``traj.times.m_as('ms') - traj.t_start.m_as('ms')``. Absolute times
+            apply a spurious `exp(-t_start/T2)` and, worse, a spatially varying
+            `phi*t_start` -- measured at 1.688 rad peak-to-peak across the
+            object on `examples/phase_contrast.py`.
+        pod : POD, PODSum or None
+            Motion trajectory. The weights are evaluated at
+            ``t + pod.timeshift``, and ``kspace_times`` is elapsed-since-
+            snapshot, so the caller folds the sample's ABSOLUTE sequence time
+            into the trajectory's own shift before calling -- that is what the
+            ``pod.update_timeshift(...)`` in every readout loop is for. A
+            ``list`` is refused; combine trajectories with :class:`PODSum`.
+        maxwell : np.ndarray or None
+            ``(N, 6)`` concomitant phase coefficients in **rad/m^2**, ordered
+            ``x^2, y^2, z^2, xy, xz, yz`` and flattened like ``kspace_times``.
+            Build them with
+            :func:`~feelmri.PulseqAdapter.maxwell_phase_coefficients`, which
+            owns the sign, the 1/B0 and both rotations; the ``(N, 4)`` MOMENTS
+            that feed it are a different quantity and are refused here.
 
         Returns
         -------
         np.ndarray
-            Complex k-space signal.
+            Complex k-space signal, shaped ``kspace_times.shape + (nv,)``. The
+            trailing axis is the assembler's free channel axis -- velocity
+            encodings times receive coils -- and is present even at ``nv == 1``,
+            which is what the ``swapaxes(0, 1)[:, :, 0]`` in the shot-major
+            examples is unpicking.
         """
 
         # Evaluated on ONE group only. Every assembler group is constructed with the
         # rank's *entire* node set (only the element subset differs), so summing this
         # nodal quantity over groups would count each node once per group.
-        with self._signal_call('signal_sum', kspace_points, kspace_times, pod, maxwell) as args:
+        with self._signal_call('signal_sum_group0', kspace_points, kspace_times, pod, maxwell) as args:
             return self.assembler[0].signal_sum(kspace_points, *args)
+
+    # ------------------------------------------------------------------
+    # Deprecated spellings
+    # ------------------------------------------------------------------
+    # The old names said which integration rule each used and not the thing a
+    # caller has to know: that two of them see assembler GROUP 0 only. Missing
+    # that counted every node once per group -- 346 950 for 173 475 nodes --
+    # and separately mis-tuned a whole benchmark sweep through `node_weight`.
+    def signal(self, *args, **kwargs):
+        """Deprecated alias for :meth:`signal_quadrature`."""
+        warnings.warn(
+            "FEMPhantom.signal is now signal_quadrature. The behaviour is "
+            "unchanged: full Gauss quadrature over every assembler group.",
+            DeprecationWarning, stacklevel=2)
+        return self.signal_quadrature(*args, **kwargs)
+
+    def signal_nodal(self, *args, **kwargs):
+        """Deprecated alias for :meth:`signal_nodal_group0`."""
+        warnings.warn(
+            "FEMPhantom.signal_nodal is now signal_nodal_group0, because it "
+            "evaluates on assembler group 0 ONLY. The behaviour is unchanged; "
+            "use mri_signal for the whole phantom.",
+            DeprecationWarning, stacklevel=2)
+        return self.signal_nodal_group0(*args, **kwargs)
+
+    def signal_sum(self, *args, **kwargs):
+        """Deprecated alias for :meth:`signal_sum_group0`."""
+        warnings.warn(
+            "FEMPhantom.signal_sum is now signal_sum_group0, because it "
+            "evaluates on assembler group 0 ONLY. The behaviour is unchanged; "
+            "use mri_signal for the whole phantom.",
+            DeprecationWarning, stacklevel=2)
+        return self.signal_sum_group0(*args, **kwargs)

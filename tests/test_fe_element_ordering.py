@@ -186,7 +186,7 @@ def _cube_signal(tmp_path, cell_type, kx):
   zeros = np.zeros(shape, dtype=np.float32)
   pts = [np.ascontiguousarray(kx.reshape(shape), dtype=np.float32), zeros, zeros]
   t3 = np.zeros(shape, dtype=np.float32)
-  return np.asarray(phantom.signal(pts, t3, None)).reshape(-1), volume
+  return np.asarray(phantom.signal_quadrature(pts, t3, None)).reshape(-1), volume
 def test_cube_signal_agrees_across_cell_types(tmp_path):
   """All four discretisations of the same cube must give the same S(k).
 

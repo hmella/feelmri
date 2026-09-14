@@ -164,7 +164,7 @@ def test_uniform_relaxation_and_offresonance_factor_out(tmp_path):
     idx = np.arange(n)
     phantom.update_magnetization(
       (np.cos(idx * 0.1) + 1j * np.sin(idx * 0.07)).astype(np.complex64).reshape(-1, 1))
-    return np.asarray(phantom.signal(pts, ts, None)).reshape(-1)
+    return np.asarray(phantom.signal_quadrature(pts, ts, None)).reshape(-1)
 
   inside = run(T2, phi_shared + dw)                       # both inside the integral
   factored = run(np.inf, phi_shared) * (
@@ -737,7 +737,7 @@ def test_the_concomitant_readout_term_matches_its_closed_form(tmp_path, scale, t
   t3 = times.reshape(2, 1, 1).astype(np.float32)
   pts = (zero.copy(), zero.copy(), zero.copy())
 
-  got = np.asarray(phantom.signal_sum(pts, t3, None, maxwell=coef)).ravel()[1]
+  got = np.asarray(phantom.signal_sum_group0(pts, t3, None, maxwell=coef)).ravel()[1]
   phase = _nodal_phase(coef[1], points)
   expected = complex(np.exp(1j * phase).sum())
 
@@ -759,12 +759,12 @@ def test_zero_coefficients_are_bit_identical_to_the_term_being_off(tmp_path):
   t3 = times.reshape(2, 1, 1).astype(np.float32)
   pts = (zero.copy(), zero.copy(), zero.copy())
 
-  off = np.asarray(phantom.signal_sum(pts, t3, None))
-  zeros = np.asarray(phantom.signal_sum(pts, t3, None,
+  off = np.asarray(phantom.signal_sum_group0(pts, t3, None))
+  zeros = np.asarray(phantom.signal_sum_group0(pts, t3, None,
                                         maxwell=np.zeros_like(coef)))
   assert np.array_equal(off, zeros), 'zero coefficients changed the signal'
   # ... and the case is not vacuous: real coefficients do change it.
-  live = np.asarray(phantom.signal_sum(pts, t3, None, maxwell=coef))
+  live = np.asarray(phantom.signal_sum_group0(pts, t3, None, maxwell=coef))
   assert not np.allclose(off, live)
 
 
@@ -805,8 +805,8 @@ def test_the_readout_term_follows_a_moving_phantom(tmp_path):
   t3 = times.reshape(2, 1, 1).astype(np.float32)
   pts = (zero.copy(), zero.copy(), zero.copy())
 
-  moving = np.asarray(phantom.signal_sum(pts, t3, pod, maxwell=coef)).ravel()[1]
-  static = np.asarray(shifted.signal_sum(pts, t3, None, maxwell=coef)).ravel()[1]
+  moving = np.asarray(phantom.signal_sum_group0(pts, t3, pod, maxwell=coef)).ravel()[1]
+  static = np.asarray(shifted.signal_sum_group0(pts, t3, None, maxwell=coef)).ravel()[1]
   assert abs(moving - static) < 1e-4 * n, (
     f'a moving phantom reads {moving:.6f} where the statically shifted one '
     f'gives {static:.6f}; the term is not following the displacement')
@@ -916,7 +916,7 @@ def test_the_concomitant_term_continues_across_the_solver_to_assembler_handoff(
       points = tuple(np.full((1, 1, 1), kvec[i] + dk[0, i], dtype=np.float32)
                      for i in range(3))
       phase = float(ph[0])
-    return complex(np.asarray(phantom.signal_sum(
+    return complex(np.asarray(phantom.signal_sum_group0(
         points, np.zeros((1, 1, 1), dtype=np.float32), None,
         maxwell=coef)).ravel()[0]) * np.exp(-1j * phase)
 
@@ -1287,12 +1287,12 @@ def test_every_maxwell_monomial_reaches_the_quadrature_path(tmp_path):
     unit = np.zeros((n, 1), dtype=np.complex64)
     unit[j, 0] = 1.0
     phantom.update_magnetization(unit)
-    w[j] = np.asarray(phantom.signal(pts, t, None, maxwell=coef)).reshape(-1)
+    w[j] = np.asarray(phantom.signal_quadrature(pts, t, None, maxwell=coef)).reshape(-1)
 
   Mxy = (rng.normal(size=(n, 2))
          + 1j * rng.normal(size=(n, 2))).astype(np.complex64)
   phantom.update_magnetization(Mxy)
-  got = np.asarray(phantom.signal(pts, t, None, maxwell=coef)).reshape(-1)
+  got = np.asarray(phantom.signal_quadrature(pts, t, None, maxwell=coef)).reshape(-1)
   predicted = np.array([(w[:, c] * Mxy[:, e]).sum()
                         for e in range(2) for c in range(3)])
   scale = float(np.abs(predicted).max())
@@ -1305,7 +1305,7 @@ def test_every_maxwell_monomial_reaches_the_quadrature_path(tmp_path):
   for j in range(6):
     flipped = coef.copy()
     flipped[0, j] = -flipped[0, j]
-    moved = np.asarray(phantom.signal(pts, t, None,
+    moved = np.asarray(phantom.signal_quadrature(pts, t, None,
                                       maxwell=flipped)).reshape(-1)
     assert float(np.abs(moved - got).max()) > 1e-3 * scale, (
       f'coefficient {j} changes nothing on the quadrature path')
@@ -1329,7 +1329,7 @@ def test_signal_nodal_refuses_a_phantom_that_never_built_its_projection(tmp_path
   phantom.update_magnetization(np.ones((n, 1), dtype=np.complex64))
   pts, t = _dc_inputs()
   with pytest.raises(RuntimeError, match='update_nodal_magnetization'):
-    phantom.signal_nodal(pts, t, None)
+    phantom.signal_nodal_group0(pts, t, None)
 
 
 def test_the_signal_paths_refuse_an_assembler_with_no_magnetization(tmp_path):
@@ -1417,8 +1417,8 @@ def test_the_concomitant_phase_vanishes_on_its_null_line(tmp_path):
   zero3 = np.zeros((2, 1, 1), dtype=np.float32)
   t3 = times.reshape(2, 1, 1).astype(np.float32)
   pts = (zero3.copy(), zero3.copy(), zero3.copy())
-  plain = np.asarray(phantom.signal(pts, t3, None)).reshape(-1)
-  with_term = np.asarray(phantom.signal(pts, t3, None,
+  plain = np.asarray(phantom.signal_quadrature(pts, t3, None)).reshape(-1)
+  with_term = np.asarray(phantom.signal_quadrature(pts, t3, None,
                                         maxwell=coef)).reshape(-1)
   scale = float(np.abs(plain).max())
   assert float(np.abs(with_term - plain).max()) < 1e-5 * scale, (
@@ -1428,7 +1428,7 @@ def test_the_concomitant_phase_vanishes_on_its_null_line(tmp_path):
   for j in (4, 5):
     flipped = coef.copy()
     flipped[:, j] = -flipped[:, j]
-    moved = np.asarray(phantom.signal(pts, t3, None,
+    moved = np.asarray(phantom.signal_quadrature(pts, t3, None,
                                       maxwell=flipped)).reshape(-1)
     assert float(np.abs(moved - plain).max()) > 0.1 * scale, (
       f'negating coefficient {j} leaves the null line where it was')
@@ -1469,7 +1469,7 @@ def _a_receive_map_does_not_survive_a_repartition(tmp_path):
   phantom.update_magnetization(np.ones(phantom.local_nodes.shape[0],
                                        dtype=np.complex64))
   pts, t = _dc_inputs()
-  assert np.asarray(phantom.signal_sum(pts, t, None)).size == 1
+  assert np.asarray(phantom.signal_sum_group0(pts, t, None)).size == 1
 
 
 def test_orienting_after_set_assembler_is_refused(tmp_path):
@@ -1535,7 +1535,7 @@ def test_coils_motion_and_the_maxwell_term_compose_in_one_readout(tmp_path):
 
   zero = np.zeros((2, 1, 1), dtype=np.float32)
   pts = (zero.copy(), zero.copy(), zero.copy())
-  got = np.asarray(phantom.signal_sum(pts, sample_times.reshape(2, 1, 1),
+  got = np.asarray(phantom.signal_sum_group0(pts, sample_times.reshape(2, 1, 1),
                                       pod, maxwell=coef)).reshape(-1)
   assert got.size == 2 * 2 * 3
 
@@ -1556,10 +1556,10 @@ def test_coils_motion_and_the_maxwell_term_compose_in_one_readout(tmp_path):
   assert float(np.abs(got - expected).max()) < 3e-6 * scale
 
   # Not vacuous on any of the three: dropping each in turn must change it.
-  still = np.asarray(phantom.signal_sum(pts, sample_times.reshape(2, 1, 1),
+  still = np.asarray(phantom.signal_sum_group0(pts, sample_times.reshape(2, 1, 1),
                                         None, maxwell=coef)).reshape(-1)
   assert float(np.abs(still - got).max()) > 1e-3 * scale, 'the motion does nothing'
-  flat = np.asarray(phantom.signal_sum(pts, sample_times.reshape(2, 1, 1),
+  flat = np.asarray(phantom.signal_sum_group0(pts, sample_times.reshape(2, 1, 1),
                                        pod)).reshape(-1)
   assert float(np.abs(flat - got).max()) > 1e-3 * scale, 'the maxwell term does nothing'
   assert float(np.abs(np.abs(C) - 1.0).max()) > 0.1, 'the coil map is trivial'
@@ -2277,12 +2277,12 @@ def test_a_per_node_field_and_the_maxwell_channel_compose_in_one_readout(
     e = np.zeros(n, dtype=np.complex64)
     e[i] = 1.0
     phantom.update_magnetization(e)
-    weights.append(complex(np.asarray(phantom.signal_nodal(
+    weights.append(complex(np.asarray(phantom.signal_nodal_group0(
         list(pts), np.zeros((1, 1, 1), dtype=np.float32), None)).reshape(-1)[0]))
   weights = np.array(weights)
 
   phantom.update_magnetization(np.ones(n, dtype=np.complex64))
-  got = complex(np.asarray(phantom.signal_nodal(list(pts), t, pod,
+  got = complex(np.asarray(phantom.signal_nodal_group0(list(pts), t, pod,
                                                 maxwell=coef)).reshape(-1)[0])
 
   moved = np.asarray(phantom.local_nodes, dtype=np.float64) + shift
@@ -2504,3 +2504,57 @@ def test_a_signal_call_before_set_assembler_says_so(tmp_path):
   points = [np.zeros(shape, dtype=np.float32) for _ in range(3)]
   with pytest.raises(RuntimeError, match='no assembler'):
     ph.mri_signal(points, np.zeros(shape, dtype=np.float32))
+
+
+def test_the_deprecated_signal_names_still_work(tmp_path):
+  """The old spellings warn and delegate, so nothing outside breaks.
+
+  They were renamed because they said which integration rule each used and not
+  the thing a caller must know: `signal_nodal` and `signal_sum` see assembler
+  GROUP 0 only. Missing that counted every node once per group -- 346 950 for
+  173 475 nodes -- and separately mis-tuned a benchmark sweep via node_weight.
+  """
+  import warnings as _w
+
+  ph, n = _tiny_phantom(tmp_path, 'deprecated_names.vtu')
+  shape = (4, 2, 1)
+  pts = [np.zeros(shape, dtype=np.float32) for _ in range(3)]
+  t = np.zeros(shape, dtype=np.float32)
+
+  for old, new in (('signal', 'signal_quadrature'),
+                   ('signal_nodal', 'signal_nodal_group0'),
+                   ('signal_sum', 'signal_sum_group0')):
+    with _w.catch_warnings(record=True) as caught:
+      _w.simplefilter('always')
+      got = np.asarray(getattr(ph, old)(pts, t))
+      dep = [x for x in caught if issubclass(x.category, DeprecationWarning)]
+      assert len(dep) == 1, f'{old} did not warn once: {[str(x.message) for x in caught]}'
+      assert new in str(dep[0].message)
+    want = np.asarray(getattr(ph, new)(pts, t))
+    assert np.array_equal(got, want), f'{old} and {new} disagree'
+
+
+def test_mri_signal_keeps_the_nv_axis(tmp_path):
+  """`nv > 1` is listed in the rules as deliberately uncovered, and it is the
+  axis a caller is most likely to lose.
+
+  `MRIAssemble`'s `nv` is velocity encodings times receive coils, and
+  `examples/4dflow.py` hands over four encodings at once as `Mxy[:, fr, :]`.
+  The signal is linear in the magnetization, so four channels built at
+  1, 2, 3 and 4 must come back standing in exactly that ratio.
+  """
+  ph, n = _tiny_phantom(tmp_path, 'nv_axis.vtu')
+  shape = (4, 2, 1)
+  pts = [np.zeros(shape, dtype=np.float32) for _ in range(3)]
+  t = np.zeros(shape, dtype=np.float32)
+
+  Mxy = np.stack([np.full(n, c, dtype=np.complex64)
+                  for c in (1.0, 2.0, 3.0, 4.0)], axis=1)
+  ph.update_magnetization(Mxy)
+  got = np.asarray(ph.mri_signal(pts, t))
+
+  assert got.shape == shape + (4,), f'the nv axis was lost: {got.shape}'
+  peak = np.abs(got).reshape(-1, 4).max(axis=0)
+  assert peak[0] > 0
+  for c in range(4):
+    assert peak[c] / peak[0] == pytest.approx(c + 1.0, rel=1e-5)

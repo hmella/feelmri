@@ -277,12 +277,12 @@ def test_node_ownership_mask_drops_masked_nodes(tmp_path):
   keep[::2] = 1.0
 
   phantom.update_magnetization(Mxy)
-  full = np.asarray(phantom.signal_sum(pts, ts, None)).reshape(-1)
+  full = np.asarray(phantom.signal_sum_group0(pts, ts, None)).reshape(-1)
   phantom.assembler[0].set_node_ownership(keep)
-  masked = np.asarray(phantom.signal_sum(pts, ts, None)).reshape(-1)
+  masked = np.asarray(phantom.signal_sum_group0(pts, ts, None)).reshape(-1)
   phantom.assembler[0].set_node_ownership(np.ones(n, dtype=np.float32))
   phantom.update_magnetization(Mxy * keep.reshape(-1, 1))
-  reference = np.asarray(phantom.signal_sum(pts, ts, None)).reshape(-1)
+  reference = np.asarray(phantom.signal_sum_group0(pts, ts, None)).reshape(-1)
 
   assert np.allclose(masked, reference, rtol=1e-5, atol=1e-12)
   assert not np.allclose(masked, full, rtol=1e-3), 'mask had no effect'
