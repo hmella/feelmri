@@ -64,6 +64,10 @@ class Shell:
     if self.label_panel is not None:
       self._tabs.add(self.label_panel.widget, text='Labels')
 
+    self.run_panel = self._make_run_panel(self._tabs)
+    if self.run_panel is not None:
+      self._tabs.add(self.run_panel.widget, text='Run')
+
     # After the viewport: the View menu binds straight to its methods.
     self._build_menu()
     self._build_controls()
@@ -109,6 +113,15 @@ class Shell:
       return LabelPanel(parent, self.session, on_status=self.status)
     except Exception as exc:
       self.status(f'label panel unavailable: {exc}')
+      return None
+
+  def _make_run_panel(self, parent):
+    """The run tab, or nothing if it cannot be built."""
+    try:
+      from ..view.run_panel import RunPanel
+      return RunPanel(parent, self.session, on_status=self.status)
+    except Exception as exc:
+      self.status(f'run panel unavailable: {exc}')
       return None
 
   def _on_pick(self, block, obj=None) -> None:
@@ -329,6 +342,14 @@ class Shell:
     if pump is not None:
       try:
         self.root.after_cancel(pump)
+      except Exception:
+        pass
+    runner = getattr(self, 'run_panel', None)
+    if runner is not None:
+      # Cancel first: the ranks are in their own process group and would
+      # outlive the window otherwise.
+      try:
+        runner.close()
       except Exception:
         pass
     try:

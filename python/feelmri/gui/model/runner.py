@@ -51,6 +51,8 @@ class RunConfig:
   voxel_size: float = 1e-3
   scale_factor: float = 1.0
   submesh_axis: int = 2
+  t2_ms: float = 50.0
+  phi_dB0: float = 0.0
   solver: Dict[str, object] = field(default_factory=dict)
   env: Dict[str, str] = field(default_factory=dict)
 
@@ -66,6 +68,14 @@ class RunConfig:
     if self.submesh_axis not in (0, 1, 2):
       raise ValueError(
         f'RunConfig: submesh_axis must be 0, 1 or 2, got {self.submesh_axis}')
+    # T2 = 0 inverts to Inf and `exp(-t*Inf)` is NaN even at t = 0, so ONE bad
+    # value poisons every k-space sample rather than its own contribution. A
+    # NEGATIVE T2 is worse, being finite: no NaN to notice, the signal simply
+    # grows. The library refuses both; refusing here means the message names
+    # the field a user typed into rather than arriving from inside a solve.
+    if not (self.t2_ms > 0) or self.t2_ms == float('inf'):
+      raise ValueError(
+        f'RunConfig: t2_ms must be positive and finite, got {self.t2_ms}')
 
 
 def render_script(config: RunConfig) -> str:
@@ -132,16 +142,22 @@ def render_script(config: RunConfig) -> str:
     'progress("building the assembler")',
     f'phantom.set_assembler({config.voxel_size!r})',
     '',
+    '# Both signal paths require these, and `simulate_pulseq` refuses without',
+    '# them. Uniform maps: edit them into whatever this phantom should carry.',
+    'progress("setting the static fields")',
+    'n_local = phantom.local_nodes.shape[0]',
+    f'T2 = np.full(n_local, {float(config.t2_ms)!r}, dtype=np.float32)'
+    '        # ms',
+    f'phi_dB0 = np.full(n_local, {float(config.phi_dB0)!r}, '
+    f'dtype=np.float32)   # rad/ms',
+    'phantom.set_static_fields(T2=T2, phi_dB0=phi_dB0)',
+    '',
   ]
 
   if config.sequence is not None:
     solver = ', '.join(f'{k}={v!r}' for k, v in sorted(config.solver.items()))
     lines += [
       'from feelmri.PulseqAdapter import simulate_pulseq',
-      '',
-      '# simulate_pulseq requires set_assembler AND set_static_fields to have',
-      '# been called. Fill in the maps this phantom should carry.',
-      '# phantom.set_static_fields(T2_ms, phi_dB0_rad_per_ms)',
       '',
       f'progress("simulating {Path(config.sequence).name}")',
       f'result = simulate_pulseq({config.sequence!r}, phantom'
@@ -214,29 +230,64 @@ def parse_progress(line: str) -> Optional[str]:
   return None
 
 
-def launch(config: RunConfig, script: str, on_line=None) -> subprocess.Popen:
-  """Start the run, streaming stdout line by line to `on_line`.
+def launch(config: RunConfig, script: str) -> subprocess.Popen:
+  """Start the run and return immediately.
 
-  Returns immediately with the `Popen`. The caller pumps it; nothing here
-  blocks, because the caller is a UI thread.
+  **Nothing here reads the output**, because the caller is a UI thread and a
+  read blocks until the child has something to say. Use `stream_lines` from a
+  worker thread, or iterate it directly from a script. An earlier version took
+  an `on_line` callback and drained the pipe inline while its docstring
+  promised not to block; that would have frozen the window for the whole run.
 
-  `start_new_session` puts the child in its own process group so that
-  cancelling kills the whole `mpirun` tree rather than orphaning the ranks.
+  `start_new_session` detaches the child from this process's group, so a
+  Ctrl-C in the terminal that started the GUI does not reach the ranks, and
+  gives `cancel` a group of its own to signal.
+
+  **It does NOT put the ranks in that group**, and an earlier version of this
+  note said it did. Measured under Open MPI with `-n 2`: the group holds only
+  `mpirun`, and each rank sits in a group of its own. See `cancel` for what
+  actually stops them.
   """
-  proc = subprocess.Popen(
+  return subprocess.Popen(
     build_command(config, script),
     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
     text=True, bufsize=1, env=build_env(config),
     start_new_session=True)
-  if on_line is not None and proc.stdout is not None:
-    for line in proc.stdout:
-      on_line(line.rstrip('\n'))
-    proc.wait()
-  return proc
+
+
+def stream_lines(proc: subprocess.Popen):
+  """Yield the run's output a line at a time until it ends.
+
+  A generator rather than a callback, so the caller decides which thread
+  blocks. **Tk is not thread-safe**, so a panel runs this on a worker and
+  hands the lines to the UI through a queue; it must not touch a widget here.
+  """
+  if proc.stdout is None:
+    return
+  for line in proc.stdout:
+    yield line.rstrip('\n')
+  proc.wait()
 
 
 def cancel(proc: subprocess.Popen) -> None:
-  """Terminate a run and everything it launched."""
+  """Terminate a run and everything it launched.
+
+  **What stops the ranks is `mpirun` being asked politely.** They are not in
+  the launcher's process group -- each has its own -- so signalling the group
+  reaches `mpirun` alone, and `mpirun` then tears its ranks down. Measured
+  with two ranks spinning for five minutes:
+
+  | signal to the launcher | ranks left |
+  |---|---|
+  | `SIGTERM` (this) | **0** |
+  | `SIGKILL` | **2, orphaned** |
+
+  So this deliberately does NOT escalate to `SIGKILL` on a slow exit: that
+  would orphan exactly what it is trying to stop, and the ranks cannot be
+  found from here to kill separately. A launcher that ignores `SIGTERM` is
+  left for the user to deal with, which is visible, rather than turned into
+  detached ranks, which is not.
+  """
   if proc.poll() is not None:
     return
   try:

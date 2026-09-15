@@ -273,6 +273,9 @@ class _Stub:
   def orient(self, *a, **k): print("STUB orient")
   def create_submesh(self, m): print("STUB submesh", int(m.sum()))
   def set_assembler(self, *a, **k): print("STUB assembler")
+  local_nodes = np.zeros((64, 3))
+  def set_static_fields(self, **k):
+    print("STUB static fields", sorted(k))
 '''
   src = src.replace('phantom = FEMPhantom(', stub + '\nphantom = _Stub()  # (')
   script = tmp_path / 'run.py'
@@ -288,3 +291,89 @@ class _Stub:
   assert any('orienting' in m for m in messages)
   assert any('keeping' in m for m in messages), 'no submesh count was reported'
   assert 'STUB orient' in proc.stdout and 'STUB assembler' in proc.stdout
+
+
+# -- what the generated script must contain to actually run -----------------
+
+def test_the_script_sets_the_static_fields_or_the_run_cannot_finish():
+  """`simulate_pulseq` refuses a phantom without them, and both signal paths
+  need them.
+
+  They were a commented-out hint, so a run launched from the GUI failed at
+  the first readout. Emitting real uniform maps is what makes the generated
+  script runnable as written, which is the whole point of generating it.
+  """
+  from feelmri.gui.model.runner import RunConfig, render_script
+
+  script = render_script(RunConfig(phantom='p.xdmf', output_dir='/tmp/o',
+                                   sequence='s.seq', t2_ms=42.0,
+                                   phi_dB0=0.25))
+  assert 'phantom.set_static_fields(' in script
+  assert '42.0' in script and '0.25' in script
+
+  # Order matters, and it is compared on the STATEMENTS. A first version used
+  # `script.index('simulate_pulseq')`, which found the word in a comment
+  # emitted above the call and read the order backwards.
+  def line_of(statement):
+    for number, line in enumerate(script.splitlines()):
+      if line.strip().startswith(statement):
+        return number
+    raise AssertionError(f'{statement!r} is not in the script')
+
+  assert line_of('phantom.set_assembler(') < \
+         line_of('phantom.set_static_fields(')
+  assert line_of('phantom.set_static_fields(') < line_of('result = ')
+
+
+def test_the_generated_script_is_valid_python():
+  """It is written as text, so nothing else checks that it parses."""
+  import ast
+
+  from feelmri.gui.model.planning import FOVBox
+  from feelmri.gui.model.runner import RunConfig, render_script
+
+  box = FOVBox(fov=np.array([0.3, 0.22, 0.008]), loc=np.array([0.0, 0.0, 0.05]),
+               angles=np.radians([0.0, 0.0, 25.0]))
+  for config in (RunConfig(phantom='p.xdmf', output_dir='/tmp/o'),
+                 RunConfig(phantom='p.xdmf', output_dir='/tmp/o', box=box),
+                 RunConfig(phantom='p.xdmf', output_dir='/tmp/o', box=box,
+                           sequence='s.seq', solver={'scanner': None})):
+    ast.parse(render_script(config))
+
+
+@pytest.mark.parametrize('bad', [0.0, -1.0, float('inf')])
+def test_a_t2_that_would_poison_every_sample_is_refused(bad):
+  """T2 = 0 inverts to Inf and `exp(-t*Inf)` is NaN even at t = 0, so ONE bad
+  value poisons every k-space sample rather than its own contribution. A
+  negative one is worse: finite, no NaN to notice, the signal simply grows."""
+  from feelmri.gui.model.runner import RunConfig
+
+  with pytest.raises(ValueError, match='t2_ms'):
+    RunConfig(phantom='p.xdmf', output_dir='/tmp/o', t2_ms=bad)
+
+
+def test_launch_does_not_read_the_pipe_itself():
+  """It returns a `Popen` and nothing more.
+
+  An earlier version took an `on_line` callback and drained stdout inline
+  while its docstring promised to return immediately -- which would freeze a
+  UI thread for the whole run. `stream_lines` is the reader, so the caller
+  chooses which thread blocks.
+  """
+  import inspect
+
+  from feelmri.gui.model.runner import launch, stream_lines
+
+  assert list(inspect.signature(launch).parameters) == ['config', 'script']
+  assert inspect.isgeneratorfunction(stream_lines)
+
+
+def test_the_scale_factor_reaches_the_generated_script():
+  """The viewer scales the mesh to metres to draw the plan against it; a run
+  at a different scale would simulate a different phantom from the one on
+  screen."""
+  from feelmri.gui.model.runner import RunConfig, render_script
+
+  script = render_script(RunConfig(phantom='p.xdmf', output_dir='/tmp/o',
+                                   scale_factor=0.001))
+  assert 'scale_factor=0.001' in script
