@@ -58,6 +58,7 @@ class Window3D:
     self.on_status = on_status or (lambda _: None)
     self.alive = False
     self._actor = None
+    self._glyph_actor = None
     self._overlay = []
     self._box_widget = None
     self._box_reference = None      # (centre, extent) the widget was placed at
@@ -192,6 +193,7 @@ class Window3D:
     self.alive = False
     self._user_closed = False
     self._actor = None
+    self._glyph_actor = None
     self._overlay = []
     self._box_widget = None
     self._open()
@@ -285,6 +287,7 @@ class Window3D:
     self.alive = False
     self._box_widget = None
     self._actor = None
+    self._glyph_actor = None
     self._overlay = []
     self._destroy_plotter()
     self._note.config(text='The 3D window was closed. Reopen it below.')
@@ -328,53 +331,102 @@ class Window3D:
     pv = self._pv
 
     points = self.session.points
-    warp = self._warp_vectors()
-    if warp is not None:
+    warp = self.session.warp_vectors()
+    if warp is not None and warp.shape == points.shape:
       points = points + self.session.warp_scale * warp
 
     tris = self.session.surface
     faces = np.hstack([np.full((len(tris), 1), 3, dtype=np.int64), tris]).ravel()
     surface = pv.PolyData(np.ascontiguousarray(points, dtype=float), faces)
 
-    scalars = self._scalar_field()
-    if scalars is not None:
-      surface['field'] = scalars[:len(points)]
+    # A CELL field carries one value per element and has already been indexed
+    # through the triangle-to-element map, so it goes on `cell_data` and is
+    # drawn flat per facet -- which is what a tissue map like `cell_markers`
+    # means. `preference` is passed because a point and a cell field may share
+    # a name, and PyVista would otherwise pick for us.
+    resolved = self.session.surface_colour_values()
+    if resolved is not None:
+      values, association = resolved
+      if association == 'cell':
+        surface.cell_data['field'] = np.asarray(values)[:surface.n_cells]
+      else:
+        surface.point_data['field'] = np.asarray(values)[:len(points)]
 
     if self._actor is not None:
       self._plotter.remove_actor(self._actor, render=False)
     self._actor = self._plotter.add_mesh(
-      surface, scalars='field' if scalars is not None else None,
-      cmap='viridis', show_scalar_bar=scalars is not None,
-      color=None if scalars is not None else '#c8c8c8')
+      surface, scalars='field' if resolved is not None else None,
+      preference='cell' if resolved and resolved[1] == 'cell' else 'point',
+      cmap='viridis', show_scalar_bar=resolved is not None,
+      # The bar carries the CHOSEN label, so a component and a magnitude of
+      # the same field are told apart on the picture rather than only in the
+      # combobox the user has since looked away from.
+      scalar_bar_args={'title': str(self.session.field or '')},
+      opacity=float(self.session.opacity),
+      color=None if resolved is not None else '#c8c8c8')
 
+    self._rebuild_glyphs()
     if not keep_camera:
       self._plotter.reset_camera()
     self.refresh_overlay()
 
-  def _scalar_field(self) -> Optional[np.ndarray]:
-    name = self.session.field
-    if not name:
-      return None
-    _, point_data, _ = self.session.read_frame(self.session.frame)
-    values = point_data.get(name)
-    if values is None:
-      return None
-    values = np.asarray(values)
-    return values if values.ndim == 1 else np.linalg.norm(values, axis=1)
+  def _rebuild_glyphs(self) -> None:
+    """Arrows oriented and scaled by a vector field, coloured by its length.
 
-  def _warp_vectors(self) -> Optional[np.ndarray]:
-    name = self.session.warp_field
-    if not name:
-      return None
-    _, point_data, _ = self.session.read_frame(self.session.frame)
-    values = point_data.get(name)
-    if values is None:
-      return None
-    values = np.asarray(values)
-    return values if values.ndim == 2 and values.shape[1] == 3 else None
+    The sampling and the scale factor are the session's, so this is placement
+    only. **Subsampling is not optional**: `heart_P2_tetra` has 191 576 nodes,
+    and an arrow on each is a solid block of colour long before it is slow.
+    """
+    pv = self._pv
+    if self._glyph_actor is not None:
+      self._plotter.remove_actor(self._glyph_actor, render=False)
+      self._glyph_actor = None
+    arrows = self.session.glyph_arrows()
+    if arrows is None:
+      return
+    points, vectors, factor = arrows
+    cloud = pv.PolyData(np.ascontiguousarray(points, dtype=float))
+    cloud['vectors'] = np.ascontiguousarray(vectors, dtype=float)
+    cloud['magnitude'] = np.linalg.norm(vectors, axis=1)
+    # `factor` already carries the automatic scale and the user's multiplier,
+    # so `scale` names the array and nothing is multiplied twice.
+    glyphs = cloud.glyph(orient='vectors', scale='magnitude', factor=factor,
+                         geom=pv.Arrow())
+    self._glyph_actor = self._plotter.add_mesh(
+      glyphs, scalars='magnitude', cmap='plasma', show_scalar_bar=False,
+      render=False)
+
+  def _add_plan_solid(self, box) -> None:
+    """Draw the planned volume as a translucent solid.
+
+    The plan was a wireframe widget and nothing else, so **where it cuts the
+    phantom was invisible** -- the one thing a planner is looking at. A
+    translucent solid tints the intersection instead.
+
+    Two details it depends on. It is built in the box's own frame and then
+    transformed, because `pv.Box` takes axis-aligned bounds only and an
+    oblique plan would otherwise be drawn square. And it is NOT pickable: it
+    sits exactly where the draggable widget does, and a pickable actor there
+    would swallow the drags the widget exists for.
+    """
+    pv = self._pv
+    opacity = float(self.session.plan_opacity)
+    if opacity <= 0 or not np.all(box.fov > 0):
+      return
+    half = 0.5 * box.fov
+    solid = pv.Box(bounds=(-half[0], half[0], -half[1], half[1],
+                           -half[2], half[2]))
+    transform = np.eye(4)
+    transform[:3, :3] = box.mps
+    transform[:3, 3] = box.loc
+    solid.transform(transform, inplace=True)
+    self._overlay.append(self._plotter.add_mesh(
+      solid, color='#ffd24a', opacity=opacity, pickable=False,
+      show_scalar_bar=False, render=False))
 
   def refresh_overlay(self) -> None:
-    """The M/P/S arrows. The box itself is the widget, not an actor."""
+    """The M/P/S arrows and the translucent plan. The box outline is the
+    widget, not an actor."""
     if not self.alive:
       return
     if not self._is_open():
@@ -388,6 +440,7 @@ class Window3D:
     box = self.session.box
     if box is None:
       return
+    self._add_plan_solid(box)
     tips, names, colours = [], [], AXIS_COLOURS
     for (origin, direction, name), colour in zip(box.axis_arrows(), colours):
       arrow = pv.Arrow(start=origin, direction=direction,

@@ -20,10 +20,18 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from .fields import (MAX_GLYPHS, auto_glyph_factor, field_labels,
+                     glyph_sample, resolve, resolve_vector, vector_names)
 from .labels import LabelStore
 from .mesh import element_centroids, load_mesh, surface_triangles
 from .planning import FOVBox
 from .sequence import SequenceModel
+
+#: How solid the planned volume is drawn. Non-zero by default: the plan was a
+#: wireframe only, so where it cut the phantom was invisible, and a translucent
+#: solid is what shows the intersection. Low enough that it tints rather than
+#: hides what is behind it.
+DEFAULT_PLAN_OPACITY = 0.25
 
 
 class Signal:
@@ -87,6 +95,7 @@ class Session:
     self.n_frames: int = 0
     self._reader = None
     self._surface: Optional[np.ndarray] = None
+    self._surface_source: Optional[np.ndarray] = None
     self._centroids: Optional[np.ndarray] = None
 
     self.sequence: Optional[SequenceModel] = None
@@ -103,6 +112,11 @@ class Session:
     self._field: Optional[str] = None
     self._warp_field: Optional[str] = None
     self._warp_scale = 1.0
+    self._glyph_field: Optional[str] = None
+    self._glyph_scale = 1.0
+    self._glyph_count = MAX_GLYPHS
+    self._opacity = 1.0
+    self._plan_opacity = DEFAULT_PLAN_OPACITY
 
   # -- the mesh -------------------------------------------------------------
 
@@ -132,6 +146,7 @@ class Session:
     self.points, self.cells, self.n_frames, self._reader = (
       points, cells, n_frames, reader)
     self._surface = None
+    self._surface_source = None
     self._centroids = None
     self._frame = 0
     self._forget_result()
@@ -144,10 +159,24 @@ class Session:
   @property
   def surface(self) -> np.ndarray:
     """Boundary triangles, extracted once and cached."""
+    self._extract_surface()
+    return self._surface
+
+  @property
+  def surface_source(self) -> np.ndarray:
+    """Which ELEMENT each surface triangle came from.
+
+    A cell field carries one value per element and the surface carries
+    triangles, so this is the only thing that lets one be drawn on the other.
+    """
+    self._extract_surface()
+    return self._surface_source
+
+  def _extract_surface(self) -> None:
     self._require_mesh('surface')
     if self._surface is None:
-      self._surface = surface_triangles(self.points, self.cells)
-    return self._surface
+      self._surface, self._surface_source = surface_triangles(
+        self.points, self.cells, with_source=True)
 
   @property
   def centroids(self) -> np.ndarray:
@@ -342,12 +371,158 @@ class Session:
 
   @warp_scale.setter
   def warp_scale(self, value: float) -> None:
+    self._set_number('warp_scale', value)
+
+  @property
+  def glyph_field(self) -> Optional[str]:
+    """Vector field drawn as arrows, or None. Independent of `warp_field`:
+    warping moves the mesh, glyphs annotate it, and a user often wants one
+    field doing each."""
+    return self._glyph_field
+
+  @glyph_field.setter
+  def glyph_field(self, value: Optional[str]) -> None:
+    if value != self._glyph_field:
+      self._glyph_field = value
+      self.view_changed.emit(self)
+
+  @property
+  def glyph_scale(self) -> float:
+    """A unitless multiplier on the automatic arrow length.
+
+    Unitless on purpose: the automatic factor already puts the longest arrow
+    at a fixed fraction of the mesh, so 1.0 shows something whether the field
+    is a displacement in metres or a velocity in metres per second, which
+    differ here by two orders of magnitude.
+    """
+    return self._glyph_scale
+
+  @glyph_scale.setter
+  def glyph_scale(self, value: float) -> None:
+    self._set_number('glyph_scale', value)
+
+  @property
+  def glyph_count(self) -> int:
+    """How many arrows to draw at most, before the field is subsampled."""
+    return self._glyph_count
+
+  @glyph_count.setter
+  def glyph_count(self, value: int) -> None:
+    value = int(value)
+    if value < 1:
+      raise ValueError(f'Session.glyph_count must be >= 1, got {value}')
+    if value != self._glyph_count:
+      self._glyph_count = value
+      self.view_changed.emit(self)
+
+  @property
+  def opacity(self) -> float:
+    """How solid the phantom surface is drawn, 0 to 1."""
+    return self._opacity
+
+  @opacity.setter
+  def opacity(self, value: float) -> None:
+    self._set_number('opacity', value, low=0.0, high=1.0)
+
+  @property
+  def plan_opacity(self) -> float:
+    """How solid the planned volume is drawn, 0 to 1. 0 leaves the wireframe
+    box alone, which is what the viewer did before."""
+    return self._plan_opacity
+
+  @plan_opacity.setter
+  def plan_opacity(self, value: float) -> None:
+    self._set_number('plan_opacity', value, low=0.0, high=1.0,
+                     signal=self.plan_changed)
+
+  def _set_number(self, name: str, value, low=None, high=None,
+                  signal: Optional[Signal] = None) -> None:
+    """Assign a validated float and notify, or do nothing if it has not moved."""
     value = float(value)
     if not np.isfinite(value):
-      raise ValueError(f'Session.warp_scale must be finite, got {value}')
-    if value != self._warp_scale:
-      self._warp_scale = value
-      self.view_changed.emit(self)
+      raise ValueError(f'Session.{name} must be finite, got {value}')
+    if low is not None and not low <= value <= high:
+      raise ValueError(
+        f'Session.{name} must be between {low} and {high}, got {value}')
+    attribute = f'_{name}'
+    if value != getattr(self, attribute):
+      setattr(self, attribute, value)
+      (signal or self.view_changed).emit(self)
+
+  # -- what the display resolves to ----------------------------------------
+  #
+  # Both viewport backends -- the native window and the blitting canvas -- ask
+  # these rather than reading the frame themselves. They used to carry a copy
+  # of the resolution each, which is the shape of duplication this project has
+  # already been bitten by: a copy cannot fail when the original is wrong.
+
+  def field_choices(self, frame: Optional[int] = None):
+    """`(colour labels, vector names)` for a frame, ready for two comboboxes."""
+    if not self.has_mesh:
+      return [], []
+    _, point_data, cell_data = self.read_frame(
+      self._frame if frame is None else frame)
+    return field_labels(point_data, cell_data), vector_names(point_data)
+
+  def colour_values(self):
+    """`(values, association)` for the chosen field, or None.
+
+    A CELL field is returned per element; it is the caller's job to map it
+    onto the surface with `surface_source`, since only the caller knows what
+    geometry it is drawing.
+    """
+    if not self._field:
+      return None
+    _, point_data, cell_data = self.read_frame(self._frame)
+    return resolve(self._field, point_data, cell_data)
+
+  def surface_colour_values(self):
+    """The chosen field as one value per surface TRIANGLE or per node.
+
+    Returns `(values, association)`, where a point field comes back untouched
+    and a cell field has been indexed through `surface_source`.
+    """
+    resolved = self.colour_values()
+    if resolved is None:
+      return None
+    values, association = resolved
+    # A field that does not describe THIS mesh is reported absent rather than
+    # drawn short: a truncated colour array is a picture of the right shape
+    # carrying the wrong numbers, which is the failure mode with no symptom.
+    if association != 'cell':
+      return (values, association) if values.shape[0] >= len(self.points) \
+        else None
+    source = self.surface_source
+    if source.size and values.shape[0] <= int(source.max()):
+      return None
+    return values[source], association
+
+  def warp_vectors(self) -> Optional[np.ndarray]:
+    """The displacement applied to the mesh, unscaled, or None."""
+    _, point_data, _ = self.read_frame(self._frame)
+    return resolve_vector(self._warp_field, point_data)
+
+  def glyph_arrows(self):
+    """`(points, vectors, factor)` for the arrow overlay, or None.
+
+    `points` are the warped positions, so arrows sit on the mesh as drawn
+    rather than on its reference configuration. `factor` already carries the
+    automatic scale and the user's multiplier, so the caller multiplies by
+    nothing.
+    """
+    if not self._glyph_field or not self.has_mesh:
+      return None
+    _, point_data, _ = self.read_frame(self._frame)
+    vectors = resolve_vector(self._glyph_field, point_data)
+    if vectors is None or len(vectors) != len(self.points):
+      return None
+    points = self.points
+    warp = self.warp_vectors()
+    if warp is not None and warp.shape == points.shape:
+      points = points + self._warp_scale * warp
+    points, vectors = glyph_sample(points, vectors, self._glyph_count)
+    extent = float(np.max(self.points.max(axis=0) - self.points.min(axis=0)))
+    return points, vectors, auto_glyph_factor(vectors, extent) * self._glyph_scale
 
   # -- internals ------------------------------------------------------------
 

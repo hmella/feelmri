@@ -65,6 +65,25 @@ class PlanningPanel:
       ttk.Entry(self.widget, textvariable=variable).pack(fill='x')
       self.vars[key] = variable
 
+    # The plan used to be a wireframe and nothing else, so where it cut the
+    # phantom was invisible. This fills it in. **It is only half of seeing the
+    # intersection**: a translucent slab inside an opaque surface is hidden by
+    # it, so the phantom's own opacity, above, is the other half.
+    row = ttk.Frame(self.widget)
+    row.pack(fill='x', pady=(10, 0))
+    ttk.Label(row, text='Slab opacity').pack(side='left')
+    self.opacity = tk.DoubleVar(value=session.plan_opacity)
+    self._opacity_note = ttk.Label(row, text=f'{session.plan_opacity:.2f}',
+                                   style='Muted.TLabel')
+    self._opacity_note.pack(side='right')
+    scale = ttk.Scale(self.widget, from_=0.0, to=1.0, variable=self.opacity)
+    scale.pack(fill='x')
+    scale.configure(command=lambda _v: self._opacity_note.config(
+      text=f'{self.opacity.get():.2f}'))
+    # On release, not on every motion: each write redraws the overlay.
+    scale.bind('<ButtonRelease-1>', lambda _e: setattr(
+      self.session, 'plan_opacity', float(self.opacity.get())))
+
     ttk.Button(self.widget, text='Apply plan',
                command=self.apply).pack(fill='x', pady=(10, 0))
     self._submesh = ttk.Label(self.widget, text='', wraplength=270)

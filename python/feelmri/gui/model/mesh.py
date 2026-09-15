@@ -120,7 +120,8 @@ def _n_corner(cell_type: str, n_nodes: int) -> int:
 
 
 def surface_triangles(points: np.ndarray,
-                      cells: Sequence[Tuple[str, np.ndarray]]) -> np.ndarray:
+                      cells: Sequence[Tuple[str, np.ndarray]],
+                      with_source: bool = False):
   """Boundary of the mesh as an `(n_tri, 3)` index array.
 
   A face interior to the mesh is shared by exactly two elements; a boundary
@@ -131,12 +132,25 @@ def surface_triangles(points: np.ndarray,
   This is the same reduction the VTK path performs, and it is what makes large
   meshes tractable: `abdomen_P1_tetra` goes from 4 364 561 cells to roughly a
   hundred thousand triangles.
+
+  `with_source=True` also returns, per triangle, the index of the ELEMENT it
+  came from. That index counts elements across cell blocks in the order they
+  are given -- the same numbering `element_centroids` concatenates in, and the
+  same one `meshio`'s per-block cell data concatenates to -- so a cell field
+  reaches the drawn surface as `values[source]` with no second convention.
+  Without it a cell field cannot be displayed at all, which is what kept
+  `water_fat_P1_prism`'s `cell_markers` off the screen.
   """
   polys: List[np.ndarray] = []
+  sources: List[np.ndarray] = []
+  base = 0
   for cell_type, conn in cells:
+    elements = np.arange(base, base + conn.shape[0], dtype=np.int64)
+    base += conn.shape[0]
     if cell_type in _SURFACE_TYPES:
       # Already a surface: every face is a boundary face.
-      polys.extend(_fan(conn[:, :_n_corner(cell_type, conn.shape[1])]))
+      _collect(_fan(conn[:, :_n_corner(cell_type, conn.shape[1])], elements),
+               polys, sources)
       continue
     faces = _FACES.get(cell_type)
     if faces is None:
@@ -148,29 +162,53 @@ def surface_triangles(points: np.ndarray,
       by_size.setdefault(len(f), []).append(conn[:, list(f)])
     for size, group in by_size.items():
       stacked = np.concatenate(group, axis=0)
-      polys.extend(_fan(_boundary_only(stacked)))
+      # `concatenate` lays the group out face-table-major, so the element each
+      # row belongs to repeats once per face of that size.
+      owners = np.tile(elements, len(group))
+      keep = _boundary_mask(stacked)
+      _collect(_fan(stacked[keep], owners[keep]), polys, sources)
+
   if not polys:
-    return np.empty((0, 3), dtype=np.int64)
-  return np.concatenate(polys, axis=0)
+    empty = (np.empty((0, 3), dtype=np.int64), np.empty(0, dtype=np.int64))
+    return empty if with_source else empty[0]
+  tris = np.concatenate(polys, axis=0)
+  return (tris, np.concatenate(sources)) if with_source else tris
 
 
-def _boundary_only(faces: np.ndarray) -> np.ndarray:
-  """Keep the faces that occur exactly once."""
+def _collect(chunks, polys: List[np.ndarray],
+             sources: List[np.ndarray]) -> None:
+  """Append `(triangles, owners)` pairs onto the two parallel lists."""
+  for tris, owners in chunks:
+    polys.append(tris)
+    sources.append(owners)
+
+
+def _boundary_mask(faces: np.ndarray) -> np.ndarray:
+  """Which faces occur exactly once, i.e. lie on the boundary.
+
+  A mask rather than the filtered faces, so the element each face belongs to
+  can be filtered the same way.
+  """
   keys = np.sort(faces, axis=1)
   _, inverse, counts = np.unique(keys, axis=0, return_inverse=True,
                                  return_counts=True)
-  return faces[counts[inverse] == 1]
+  return counts[inverse.ravel()] == 1
 
 
-def _fan(faces: np.ndarray) -> List[np.ndarray]:
-  """Triangulate a block of equal-sided faces by a fan from vertex 0."""
+def _fan(faces: np.ndarray, elements: np.ndarray
+         ) -> List[Tuple[np.ndarray, np.ndarray]]:
+  """Triangulate a block of equal-sided faces by a fan from vertex 0.
+
+  Every triangle of a face inherits that face's element, so the source array
+  stays parallel to the triangles through the split.
+  """
   if faces.size == 0:
     return []
   n = faces.shape[1]
   if n == 3:
-    return [faces.astype(np.int64)]
-  return [np.stack([faces[:, 0], faces[:, i], faces[:, i + 1]], axis=1)
-          .astype(np.int64) for i in range(1, n - 1)]
+    return [(faces.astype(np.int64), elements)]
+  return [(np.stack([faces[:, 0], faces[:, i], faces[:, i + 1]], axis=1)
+           .astype(np.int64), elements) for i in range(1, n - 1)]
 
 
 def slab_markers(centroids: np.ndarray,

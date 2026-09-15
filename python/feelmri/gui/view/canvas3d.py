@@ -100,6 +100,7 @@ class Canvas3D:
     self._drag = None
     self._camera: Optional[Camera] = None
     self._actor = None
+    self._glyph_actor = None
     self._overlay = []
 
     self._plotter = pv.Plotter(off_screen=True,
@@ -120,51 +121,64 @@ class Canvas3D:
     import pyvista as pv
 
     points = self.session.points
-    warp = self._warp_vectors()
-    if warp is not None:
+    warp = self.session.warp_vectors()
+    if warp is not None and warp.shape == points.shape:
       points = points + self.session.warp_scale * warp
 
     tris = self.session.surface
     faces = np.hstack([np.full((len(tris), 1), 3, dtype=np.int64), tris]).ravel()
     surface = pv.PolyData(np.ascontiguousarray(points, dtype=float), faces)
 
-    scalars = self._scalar_field()
-    if scalars is not None:
-      surface['field'] = scalars[:len(points)]
+    # The session resolves the chosen field, so this backend and the native
+    # one cannot disagree about what a label means. They each carried a copy
+    # before, which is the duplication that makes one of two checks unable to
+    # fail when the other is wrong.
+    resolved = self.session.surface_colour_values()
+    if resolved is not None:
+      values, association = resolved
+      if association == 'cell':
+        surface.cell_data['field'] = np.asarray(values)[:surface.n_cells]
+      else:
+        surface.point_data['field'] = np.asarray(values)[:len(points)]
 
     if self._actor is not None:
       self._plotter.remove_actor(self._actor, render=False)
     self._actor = self._plotter.add_mesh(
-      surface, scalars='field' if scalars is not None else None,
-      cmap='viridis', show_scalar_bar=scalars is not None,
-      color=None if scalars is not None else '#c8c8c8')
+      surface, scalars='field' if resolved is not None else None,
+      preference='cell' if resolved and resolved[1] == 'cell' else 'point',
+      cmap='viridis', show_scalar_bar=resolved is not None,
+      # The bar carries the CHOSEN label, so a component and a magnitude of
+      # the same field are told apart on the picture rather than only in the
+      # combobox the user has since looked away from.
+      scalar_bar_args={'title': str(self.session.field or '')},
+      opacity=float(self.session.opacity),
+      color=None if resolved is not None else '#c8c8c8')
 
+    self._rebuild_glyphs()
     if self._camera is None or not keep_camera:
       lo, hi = points.min(axis=0), points.max(axis=0)
       self._camera = Camera.frame(lo, hi)
     self.refresh_overlay()
 
-  def _scalar_field(self) -> Optional[np.ndarray]:
-    name = self.session.field
-    if not name:
-      return None
-    _, point_data, _ = self.session.read_frame(self.session.frame)
-    values = point_data.get(name)
-    if values is None:
-      return None
-    values = np.asarray(values)
-    return values if values.ndim == 1 else np.linalg.norm(values, axis=1)
+  def _rebuild_glyphs(self) -> None:
+    """Arrows for the chosen vector field, sampled and scaled by the session."""
+    import pyvista as pv
 
-  def _warp_vectors(self) -> Optional[np.ndarray]:
-    name = self.session.warp_field
-    if not name:
-      return None
-    _, point_data, _ = self.session.read_frame(self.session.frame)
-    values = point_data.get(name)
-    if values is None:
-      return None
-    values = np.asarray(values)
-    return values if values.ndim == 2 and values.shape[1] == 3 else None
+    if self._glyph_actor is not None:
+      self._plotter.remove_actor(self._glyph_actor, render=False)
+      self._glyph_actor = None
+    arrows = self.session.glyph_arrows()
+    if arrows is None:
+      return
+    points, vectors, factor = arrows
+    cloud = pv.PolyData(np.ascontiguousarray(points, dtype=float))
+    cloud['vectors'] = np.ascontiguousarray(vectors, dtype=float)
+    cloud['magnitude'] = np.linalg.norm(vectors, axis=1)
+    glyphs = cloud.glyph(orient='vectors', scale='magnitude', factor=factor,
+                         geom=pv.Arrow())
+    self._glyph_actor = self._plotter.add_mesh(
+      glyphs, scalars='magnitude', cmap='plasma', show_scalar_bar=False,
+      render=False)
 
   def refresh_overlay(self) -> None:
     """Redraw the FOV box and the M/P/S arrows, then repaint."""
@@ -184,6 +198,23 @@ class Canvas3D:
       wire = pv.PolyData(corners, lines=lines)
       self._overlay.append(self._plotter.add_mesh(
         wire, color='#ffd24a', line_width=2, render=False))
+
+      # A translucent solid inside the outline, so where the plan cuts the
+      # phantom is visible rather than merely outlined. Built axis-aligned and
+      # then transformed, since `pv.Box` takes axis-aligned bounds only and an
+      # oblique plan would otherwise be drawn square.
+      opacity = float(self.session.plan_opacity)
+      if opacity > 0 and np.all(box.fov > 0):
+        half = 0.5 * box.fov
+        solid = pv.Box(bounds=(-half[0], half[0], -half[1], half[1],
+                               -half[2], half[2]))
+        transform = np.eye(4)
+        transform[:3, :3] = box.mps
+        transform[:3, 3] = box.loc
+        solid.transform(transform, inplace=True)
+        self._overlay.append(self._plotter.add_mesh(
+          solid, color='#ffd24a', opacity=opacity, show_scalar_bar=False,
+          render=False))
 
       for (origin, direction, _name), colour in zip(
           box.axis_arrows(), ('#ff4d4d', '#4dff88', '#4d9cff')):
