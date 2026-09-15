@@ -16,6 +16,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from conftest import mpirun
 from _phantom_fixtures import make_1d_rod_mesh
 
 
@@ -63,7 +64,7 @@ def test_serial_matches_mpi_n2(tmp_path):
   assert out_serial.exists()
 
   proc_mpi = _run(
-    ['mpirun', '--allow-run-as-root', '--oversubscribe', '-n', '2',
+    [*mpirun(2),
      sys.executable, str(_RUNNER),
      '--mesh', str(mesh_path), '--output', str(out_mpi)],
     env=env,
@@ -121,7 +122,7 @@ def test_realism_features_match_between_serial_and_mpi(tmp_path):
     f'serial run failed:\n{proc_serial.stdout.decode(errors="replace")}')
 
   proc_mpi = _run(
-    ['mpirun', '--allow-run-as-root', '--oversubscribe', '-n', '2',
+    [*mpirun(2),
      sys.executable, str(_REALISM_RUNNER),
      '--mesh', str(mesh_path), '--output', str(out_mpi)], env=env)
   assert proc_mpi.returncode == 0, (
@@ -170,7 +171,7 @@ def test_a_bad_per_node_array_on_one_rank_raises_everywhere(tmp_path):
   env.setdefault('MPLBACKEND', 'Agg')
 
   proc = subprocess.run(
-    ['mpirun', '--allow-run-as-root', '--oversubscribe', '-n', '2',
+    [*mpirun(2),
      sys.executable, str(_REALISM_RUNNER), '--mesh', str(mesh_path),
      '--output', str(tmp_path / 'unused.npz'), '--poison-rank', '1'],
     env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
@@ -233,7 +234,7 @@ def test_simulate_pulseq_matches_serial_under_mpi(tmp_path):
                  '--seq', str(seq_path), '--output', str(out_serial)], env)
   assert serial.returncode == 0, serial.stdout.decode(errors='replace')[-4000:]
 
-  parallel = _run(['mpirun', '-n', '2', sys.executable, str(_PULSEQ_RUNNER),
+  parallel = _run([*mpirun(2), sys.executable, str(_PULSEQ_RUNNER),
                    '--mesh', str(mesh_path), '--seq', str(seq_path),
                    '--output', str(out_mpi)], env)
   assert parallel.returncode == 0, parallel.stdout.decode(errors='replace')[-4000:]
@@ -306,8 +307,8 @@ def test_a_receive_map_survives_mpi_and_dual_partitioning(tmp_path):
   runs = {}
   for label, argv in (
       ('serial', [sys.executable]),
-      ('mpi2', ['mpirun', '-n', '2', sys.executable]),
-      ('mpi2_dual', ['mpirun', '-n', '2', sys.executable])):
+      ('mpi2', [*mpirun(2), sys.executable]),
+      ('mpi2_dual', [*mpirun(2), sys.executable])):
     out = tmp_path / f'k_{label}.npz'
     cmd = argv + [str(_PULSEQ_RUNNER), '--mesh', str(mesh_path),
                   '--seq', str(seq_path), '--output', str(out), '--coils', '3']
@@ -388,8 +389,7 @@ def test_the_bin_readout_survives_mpi_and_dual_partitioning(tmp_path):
     if dual:
       cmd.append('--dual')
     if ranks > 1:
-      cmd = ['mpirun', '--allow-run-as-root', '--oversubscribe',
-             '-n', str(ranks)] + cmd
+      cmd = mpirun(ranks) + cmd
     proc = _run(cmd, env)
     assert proc.returncode == 0, proc.stdout.decode(errors='replace')[-4000:]
     return np.load(out)['kspace']
@@ -460,7 +460,7 @@ def test_a_rank_asymmetric_refusal_does_not_hang(tmp_path):
 
   # 6 ranks: the count at which some ranks' two layouts happen to agree.
   guard = subprocess.run(
-    ['mpirun', '--allow-run-as-root', '--oversubscribe', '-n', '6',
+    [*mpirun(6),
      sys.executable, str(_PULSEQ_RUNNER), '--mesh', str(cube),
      '--seq', str(seq_path), '--output', str(tmp_path / 'unused.npz'),
      '--dual', '--fields-under-signal'],
@@ -474,7 +474,7 @@ def test_a_rank_asymmetric_refusal_does_not_hang(tmp_path):
   rod = tmp_path / 'rod.vtu'
   make_1d_rod_mesh(rod, length=0.08, n_segments=48, transverse_width=2e-4)
   at_solve = subprocess.run(
-    ['mpirun', '--allow-run-as-root', '--oversubscribe', '-n', '2',
+    [*mpirun(2),
      sys.executable, str(_REALISM_RUNNER), '--mesh', str(rod),
      '--output', str(tmp_path / 'unused2.npz'), '--poison-at-solve', '1'],
     env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=180)
@@ -560,7 +560,7 @@ def test_every_per_node_refusal_reaches_every_rank(tmp_path, case):
   env.setdefault('MPLBACKEND', 'Agg')
 
   proc = subprocess.run(
-    ['mpirun', '--allow-run-as-root', '--oversubscribe', '-n', '2',
+    [*mpirun(2),
      sys.executable, str(_REALISM_RUNNER), '--mesh', str(mesh_path),
      '--output', str(tmp_path / 'unused.npz'), '--refusal-case', case],
     env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=150)
@@ -589,7 +589,6 @@ def test_every_per_node_refusal_reaches_every_rank(tmp_path, case):
   assert signature is None or signature in out, (
     f'{case} was refused, but not by the guard it exists for. No '
     f'"{signature}" in the output:\n{out[-3000:]}')
-
 
 
 @pytest.mark.slow
@@ -623,7 +622,7 @@ def test_the_holdout_span_ignores_a_rank_that_owns_no_elements(tmp_path):
   env.setdefault('MPLBACKEND', 'Agg')
   runner = Path(__file__).resolve().parent / 'helpers' / 'span_reduction_runner.py'
   proc = subprocess.run(
-    ['mpirun', '--allow-run-as-root', '--oversubscribe', '-n', '2',
+    [*mpirun(2),
      sys.executable, str(runner)],
     env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=90)
   out = proc.stdout.decode(errors='replace')
@@ -695,9 +694,9 @@ def test_a_per_node_b0_field_survives_mpi_and_dual_partitioning(tmp_path):
   runs = {}
   for label, argv in (
       ('serial', [sys.executable]),
-      ('mpi2', ['mpirun', '-n', '2', sys.executable]),
-      ('mpi3', ['mpirun', '-n', '3', sys.executable]),
-      ('mpi2_dual', ['mpirun', '-n', '2', sys.executable])):
+      ('mpi2', [*mpirun(2), sys.executable]),
+      ('mpi3', [*mpirun(3), sys.executable]),
+      ('mpi2_dual', [*mpirun(2), sys.executable])):
     out = tmp_path / f'b0_{label}.npz'
     cmd = argv + [str(_PULSEQ_RUNNER), '--mesh', str(mesh_path),
                   '--seq', str(seq_path), '--output', str(out),
@@ -794,7 +793,7 @@ def test_a_per_rank_trajectory_is_refused_under_dual_partitioning(tmp_path):
     env = os.environ.copy()
     env.setdefault('OPENBLAS_NUM_THREADS', '1')
     env.setdefault('MPLBACKEND', 'Agg')
-    proc = _run(['mpirun', '--allow-run-as-root', '--oversubscribe', '-n', '2',
+    proc = _run([*mpirun(2),
                  sys.executable, str(script), str(mesh_path)], env)
     out = proc.stdout.decode(errors='replace')
     assert proc.returncode != 0, f'a per-rank trajectory was accepted:\n{out[-2000:]}'

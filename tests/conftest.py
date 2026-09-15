@@ -32,6 +32,23 @@ def pytest_configure(config):
     )
 
 
+def mpirun(n):
+    """The launcher prefix for ``n`` ranks.
+
+    ``--oversubscribe`` is not a convenience: a GitHub-hosted runner has two
+    virtual CPUs, and Open MPI refuses any ``-n`` above the core count with
+    "not enough slots" rather than time-slicing. Tests here ask for 3 and 6
+    ranks to reach odd and many-rank partitions, which have their own code
+    paths, so the rank count is part of what is under test and must not be
+    clamped to the host. ``--allow-run-as-root`` covers container runners.
+
+    Build every launch through this. Eight of fourteen sites carried the flags
+    and six did not, and the six-rank site ran on the same two-CPU host that
+    refused a three-rank one purely because it had them.
+    """
+    return ['mpirun', '--allow-run-as-root', '--oversubscribe', '-n', str(n)]
+
+
 def skip_if_pypulseq_too_old(seq_path):
     """Skip when the installed pypulseq cannot read this .seq file's format.
 

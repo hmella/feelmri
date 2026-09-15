@@ -19,6 +19,8 @@ from pathlib import Path
 
 import pytest
 
+from conftest import mpirun
+
 EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "examples"
 
 # Each script runs a full Bloch + signal-assembly pipeline in a subprocess
@@ -71,7 +73,7 @@ def test_example_parallel(script):
 
     # Run the temporary script in the examples directory
     result = subprocess.run(
-        ["mpirun", "-n", "2", 
+        [*mpirun(2),
         sys.executable,
         "-m", "coverage",
         "run", "--parallel-mode",
