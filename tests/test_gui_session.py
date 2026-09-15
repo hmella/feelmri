@@ -13,6 +13,8 @@ from __future__ import annotations
 import subprocess
 import sys
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -306,7 +308,7 @@ def test_the_script_sets_the_static_fields_or_the_run_cannot_finish():
   from feelmri.gui.model.runner import RunConfig, render_script
 
   script = render_script(RunConfig(phantom='p.xdmf', output_dir='/tmp/o',
-                                   sequence='s.seq', t2_ms=42.0,
+                                   sequence='s.seq', readout_t2_ms=42.0,
                                    phi_dB0=0.25))
   assert 'phantom.set_static_fields(' in script
   assert '42.0' in script and '0.25' in script
@@ -348,8 +350,8 @@ def test_a_t2_that_would_poison_every_sample_is_refused(bad):
   negative one is worse: finite, no NaN to notice, the signal simply grows."""
   from feelmri.gui.model.runner import RunConfig
 
-  with pytest.raises(ValueError, match='t2_ms'):
-    RunConfig(phantom='p.xdmf', output_dir='/tmp/o', t2_ms=bad)
+  with pytest.raises(ValueError, match='readout_t2_ms'):
+    RunConfig(phantom='p.xdmf', output_dir='/tmp/o', readout_t2_ms=bad)
 
 
 def test_launch_does_not_read_the_pipe_itself():
@@ -377,3 +379,92 @@ def test_the_scale_factor_reaches_the_generated_script():
   script = render_script(RunConfig(phantom='p.xdmf', output_dir='/tmp/o',
                                    scale_factor=0.001))
   assert 'scale_factor=0.001' in script
+
+
+# -- solver settings reaching the script ------------------------------------
+
+def test_solver_relaxation_times_are_emitted_with_their_unit():
+  """`BlochSolver` takes T1 and T2 as pint Quantities.
+
+  A bare float is accepted and means something else, so emitting `T1=800.0`
+  would be a silently different experiment from `T1=Quantity(800, "ms")`.
+  """
+  from feelmri.gui.model.runner import RunConfig, render_script
+
+  script = render_script(RunConfig(
+    phantom='p.xdmf', output_dir='/tmp/o', sequence='s.seq',
+    solver={'T1': 800.0, 'T2': 50.0, 'method': 'magnus4'}))
+  assert 'T1=Quantity(800.0, "ms")' in script
+  assert 'T2=Quantity(50.0, "ms")' in script
+  assert "method='magnus4'" in script
+
+
+def test_a_non_time_solver_setting_is_emitted_as_itself():
+  from feelmri.gui.model.runner import RunConfig, render_script
+
+  script = render_script(RunConfig(
+    phantom='p.xdmf', output_dir='/tmp/o', sequence='s.seq',
+    solver={'concomitant_fields': True, 'dtype': 'float64'}))
+  assert 'concomitant_fields=True' in script
+  assert "dtype='float64'" in script
+
+
+# -- the result coming back -------------------------------------------------
+
+def test_a_finished_run_is_read_back_into_the_session(tmp_path):
+  """The run is a subprocess writing a file, so this is the only way a result
+  returns: nothing is shared with it in memory."""
+  from feelmri.gui.model.session import Session
+
+  kspace = np.arange(8, dtype=complex).reshape(4, 2)
+  np.savez(tmp_path / 'kspace.npz', kspace=kspace, times=np.arange(4.0))
+
+  session = Session()
+  seen = []
+  session.result_changed.connect(lambda s: seen.append(s.result))
+  result = session.load_result(tmp_path)          # a directory is accepted
+
+  assert len(seen) == 1
+  np.testing.assert_array_equal(result['kspace'], kspace)
+  assert session.result_path.endswith('kspace.npz')
+
+
+def test_a_file_that_is_not_a_run_result_is_refused_by_name(tmp_path):
+  """Loading whatever npz happens to be lying around would otherwise put an
+  unrelated array where a k-space is expected."""
+  from feelmri.gui.model.session import Session
+
+  np.savez(tmp_path / 'kspace.npz', something_else=np.zeros(3))
+  with pytest.raises(ValueError, match='not a feelmri run result'):
+    Session().load_result(tmp_path)
+
+
+def test_a_result_is_dropped_when_its_inputs_change(tmp_path):
+  """A result belongs to the phantom and sequence that produced it.
+
+  One left on screen beside a different phantom is a plausible wrong answer,
+  which is the same failure the label sidecar's checksum exists to prevent.
+  """
+  from feelmri.gui.model.session import Session
+
+  np.savez(tmp_path / 'kspace.npz', kspace=np.zeros(4, dtype=complex))
+  session = Session()
+  session.load_result(tmp_path)
+  assert session.result is not None
+
+  session.load_mesh(Path('examples/phantoms/water_fat_P1_prism.xdmf'))
+  assert session.result is None, 'a result survived a change of phantom'
+  assert session.result_path is None
+
+
+def test_attaching_a_sequence_records_its_path():
+  """`RunConfig` reads it, so losing it means the generated script silently
+  simulates nothing -- it emits the whole sequence block only when the path
+  is set, and a run then completes having done no readout at all.
+  """
+  from feelmri.Bloch import Sequence
+  from feelmri.gui.model.session import Session
+
+  session = Session()
+  session.set_sequence(Sequence(), path='some/where.seq')
+  assert session.sequence_path == 'some/where.seq'

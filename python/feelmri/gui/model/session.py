@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import copy
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -75,6 +76,7 @@ class Session:
   def __init__(self):
     self.mesh_changed = Signal('mesh_changed')
     self.plan_changed = Signal('plan_changed')
+    self.result_changed = Signal('result_changed')
     self.view_changed = Signal('view_changed')
     self.sequence_changed = Signal('sequence_changed')
     self.labels_changed = Signal('labels_changed')
@@ -89,6 +91,8 @@ class Session:
 
     self.sequence: Optional[SequenceModel] = None
     self.sequence_path: Optional[str] = None
+    self.result: Optional[dict] = None
+    self.result_path: Optional[str] = None
     self.labels: Optional[LabelStore] = None
 
     self._box: Optional[FOVBox] = None
@@ -130,6 +134,7 @@ class Session:
     self._surface = None
     self._centroids = None
     self._frame = 0
+    self._forget_result()
     self.mesh_changed.emit(self)
 
   @property
@@ -233,6 +238,7 @@ class Session:
     """Attach a sequence, and a label store to go with it."""
     self.sequence = SequenceModel(sequence)
     self.sequence_path = None if path is None else str(path)
+    self._forget_result()
     self.labels = labels if labels is not None else LabelStore(
       n_blocks=len(sequence.blocks))
     self.sequence_changed.emit(self)
@@ -254,6 +260,41 @@ class Session:
     self.set_sequence(imported.feelmri_seq, path=path,
                       labels=LabelStore.from_import(imported, path))
     return imported
+
+  def _forget_result(self) -> None:
+    """Drop a loaded result when its inputs change.
+
+    A result belongs to the phantom and sequence that produced it, and one
+    left on screen beside a different phantom is a plausible wrong answer --
+    the same failure the label sidecar's checksum exists to prevent. Nothing
+    is announced: there is no result to show, which panels read as empty.
+    """
+    self.result = None
+    self.result_path = None
+
+  def load_result(self, path) -> dict:
+    """Read a finished run's `kspace.npz` back in.
+
+    The run is a subprocess writing a file, so this is the only way a result
+    returns: nothing is shared with it in memory. Kept in the model rather
+    than in the run panel because a result outlives the run that made it --
+    an old one can be opened without launching anything.
+    """
+    import numpy as _np
+
+    path = Path(path)
+    if path.is_dir():
+      path = path / 'kspace.npz'
+    with _np.load(path) as handle:
+      result = {key: handle[key] for key in handle.files}
+    if 'kspace' not in result:
+      raise ValueError(
+        f'{path}: no "kspace" array -- this is not a feelmri run result '
+        f'(it holds {sorted(result) or "nothing"})')
+    self.result = result
+    self.result_path = str(path)
+    self.result_changed.emit(self)
+    return result
 
   def notify_labels(self) -> None:
     """Announce a label edit. The store is mutable, so this is explicit."""

@@ -51,7 +51,7 @@ class RunConfig:
   voxel_size: float = 1e-3
   scale_factor: float = 1.0
   submesh_axis: int = 2
-  t2_ms: float = 50.0
+  readout_t2_ms: float = 50.0
   phi_dB0: float = 0.0
   solver: Dict[str, object] = field(default_factory=dict)
   env: Dict[str, str] = field(default_factory=dict)
@@ -73,9 +73,10 @@ class RunConfig:
     # NEGATIVE T2 is worse, being finite: no NaN to notice, the signal simply
     # grows. The library refuses both; refusing here means the message names
     # the field a user typed into rather than arriving from inside a solve.
-    if not (self.t2_ms > 0) or self.t2_ms == float('inf'):
+    if not (self.readout_t2_ms > 0) or self.readout_t2_ms == float('inf'):
       raise ValueError(
-        f'RunConfig: t2_ms must be positive and finite, got {self.t2_ms}')
+        f'RunConfig: readout_t2_ms must be positive and finite, got '
+        f'{self.readout_t2_ms}')
 
 
 def render_script(config: RunConfig) -> str:
@@ -146,7 +147,7 @@ def render_script(config: RunConfig) -> str:
     '# them. Uniform maps: edit them into whatever this phantom should carry.',
     'progress("setting the static fields")',
     'n_local = phantom.local_nodes.shape[0]',
-    f'T2 = np.full(n_local, {float(config.t2_ms)!r}, dtype=np.float32)'
+    f'T2 = np.full(n_local, {float(config.readout_t2_ms)!r}, dtype=np.float32)'
     '        # ms',
     f'phi_dB0 = np.full(n_local, {float(config.phi_dB0)!r}, '
     f'dtype=np.float32)   # rad/ms',
@@ -155,7 +156,8 @@ def render_script(config: RunConfig) -> str:
   ]
 
   if config.sequence is not None:
-    solver = ', '.join(f'{k}={v!r}' for k, v in sorted(config.solver.items()))
+    solver = ', '.join(_solver_argument(k, v)
+                       for k, v in sorted(config.solver.items()))
     lines += [
       'from feelmri.PulseqAdapter import simulate_pulseq',
       '',
@@ -175,6 +177,19 @@ def render_script(config: RunConfig) -> str:
 
   lines.append('progress("done")')
   return '\n'.join(lines) + '\n'
+
+
+#: Solver arguments the library takes as a pint `Quantity` in milliseconds.
+#: Passing a bare float silently means something else, so they are emitted
+#: with their unit rather than as a number.
+SOLVER_MS_ARGS = ('T1', 'T2')
+
+
+def _solver_argument(name: str, value) -> str:
+  """One `key=value` for the generated `simulate_pulseq` call."""
+  if name in SOLVER_MS_ARGS and not isinstance(value, str):
+    return f'{name}=Quantity({float(value)!r}, "ms")'
+  return f'{name}={value!r}'
 
 
 def write_script(config: RunConfig, path=None) -> str:

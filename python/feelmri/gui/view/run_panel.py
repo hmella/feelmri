@@ -32,8 +32,23 @@ DRAIN_MS = 100
 FIELDS = (('MPI ranks', 'ranks', '1', int),
           ('OMP threads per rank', 'omp_threads', '1', int),
           ('Voxel size (m)', 'voxel_size', '0.005', float),
-          ('T2 (ms)', 't2_ms', '50', float),
+          ('Readout T2 (ms)', 'readout_t2_ms', '50', float),
           ('Off-resonance (rad/ms)', 'phi_dB0', '0', float))
+
+#: Solver settings, forwarded to `BlochSolver` through `simulate_pulseq`.
+#:
+#: **The solver's T2 is NOT the readout T2 above.** They are separate objects
+#: with no code path between them: this one governs the Bloch evolution
+#: between blocks, the other `exp(-t/T2)` during a readout, measured from the
+#: magnetization snapshot. Passing different values is supported and is the
+#: right thing whenever a refocusing pulse recovers the reversible part.
+SOLVER_FIELDS = (('Solver T1 (ms)', 'T1', '800', float),
+                 ('Solver T2 (ms)', 'T2', '50', float))
+
+#: Solver choices, as (label, key, values). `magnus2` is the library default
+#: and is exact on a piecewise-linear gradient; see `bloch-solver.md`.
+SOLVER_CHOICES = (('Method', 'method', ('magnus2', 'magnus4', 'cayley_klein')),
+                  ('Precision', 'dtype', ('float32', 'float64')))
 
 
 class RunPanel:
@@ -59,8 +74,28 @@ class RunPanel:
       ttk.Entry(self.widget, textvariable=variable).pack(fill='x')
       self.vars[key] = variable
 
+    ttk.Separator(self.widget).pack(fill='x', pady=(10, 4))
+    ttk.Label(self.widget, text='Solver',
+              font=('TkDefaultFont', 9, 'bold')).pack(anchor='w')
+    self.solver_vars = {}
+    for label, key, default, _kind in SOLVER_FIELDS:
+      ttk.Label(self.widget, text=label).pack(anchor='w', pady=(4, 0))
+      variable = tk.StringVar(value=default)
+      ttk.Entry(self.widget, textvariable=variable).pack(fill='x')
+      self.solver_vars[key] = variable
+    for label, key, values in SOLVER_CHOICES:
+      ttk.Label(self.widget, text=label).pack(anchor='w', pady=(4, 0))
+      variable = tk.StringVar(value=values[0])
+      ttk.Combobox(self.widget, textvariable=variable, values=list(values),
+                   state='readonly').pack(fill='x')
+      self.solver_vars[key] = variable
+    self.concomitant = tk.BooleanVar(value=False)
+    ttk.Checkbutton(self.widget, text='Concomitant (Maxwell) fields',
+                    variable=self.concomitant).pack(anchor='w', pady=(6, 0))
+
+    ttk.Separator(self.widget).pack(fill='x', pady=(10, 4))
     ttk.Label(self.widget, text='Output directory').pack(anchor='w',
-                                                         pady=(10, 0))
+                                                         pady=(4, 0))
     row = ttk.Frame(self.widget)
     row.pack(fill='x')
     self.output_dir = tk.StringVar(value=str(default_output_dir()))
@@ -108,7 +143,20 @@ class RunPanel:
         values[key] = kind(text)
       except ValueError:
         raise ValueError(f'{label}: {text!r} is not a number') from None
+    solver = {}
+    for label, key, _default, kind in SOLVER_FIELDS:
+      text = self.solver_vars[key].get().strip()
+      try:
+        solver[key] = kind(text)
+      except ValueError:
+        raise ValueError(f'{label}: {text!r} is not a number') from None
+    for _label, key, _values in SOLVER_CHOICES:
+      solver[key] = self.solver_vars[key].get()
+    if self.concomitant.get():
+      solver['concomitant_fields'] = True
+
     return RunConfig(
+      solver=solver,
       phantom=self.session.mesh_path,
       output_dir=self.output_dir.get().strip() or str(default_output_dir()),
       box=self.session.box,
@@ -209,6 +257,29 @@ class RunPanel:
     ok = finished == 0
     self._progress.config(text='finished' if ok else f'exit code {finished}')
     self.on_status('run finished' if ok else f'run failed ({finished})')
+    if ok:
+      self._load_result()
+
+  def _load_result(self) -> None:
+    """Read the finished run's k-space back into the session.
+
+    The run is a subprocess writing a file, so this is the only way a result
+    returns -- nothing is shared with it in memory. A run without a sequence
+    writes nothing, which is not a failure, so a missing file is quiet.
+    """
+    from pathlib import Path
+
+    target = Path(self.output_dir.get().strip() or '.') / 'kspace.npz'
+    if not target.exists():
+      return
+    try:
+      result = self.session.load_result(target)
+    except Exception as exc:
+      self._append(f'-- could not read {target.name}: {exc} --')
+      return
+    self._append(f'-- loaded {target.name}, '
+                 f'{result["kspace"].shape} k-space samples --')
+    self.on_status(f'loaded {target.name}')
 
   def cancel(self) -> None:
     """Stop the run and everything it launched."""
