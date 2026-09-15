@@ -142,12 +142,29 @@ class Window3D:
   def _went_away(self) -> None:
     """Tear the window down, once, and record that it is gone.
 
-    **Marking it closed is not enough: the window has to be destroyed.**
-    `ExitEvent` only signals intent, and with `interactive_update=True` there
-    is no interactor loop for it to terminate, so a title-bar click left a
-    window that was still mapped while the pump had stopped servicing it. That
-    is a frozen window, which is worse than either a live one or none at all.
-    `close()` is what actually removes it.
+    **Marking it closed is not enough, and neither is `close()`.** `ExitEvent`
+    only signals intent, and with `interactive_update=True` there is no
+    interactor loop for it to terminate, so a title-bar click left a window
+    still mapped while the pump had stopped servicing it.
+
+    `close()` alone does not remove it either. VTK destroys the window by
+    queueing an `XDestroyWindow` on its OWN Xlib connection, and that request
+    only reaches the server when something services that connection -- which
+    is exactly what the pump has just stopped doing. Measured on a bare
+    `pyvista.Plotter` with no tkinter involved: after `close()` the window
+    reports `Map State: IsViewable` indefinitely, and `Finalize`,
+    `terminate_app`, `SetShowWindow(False)`, offscreen rendering and dropping
+    the last Python reference all leave it there. One `ProcessEvents()` on the
+    interactor removes it.
+
+    So the interactor is captured BEFORE `close()`, because `close()` sets
+    `plotter.iren` to None and the flush would otherwise raise `AttributeError`
+    on a `NoneType` -- which is what made this look like a VTK bug rather than
+    an unflushed queue.
+
+    Every step is guarded: VTK having got there first is the normal case, and
+    this runs from a Tk timer callback, where an exception kills the pump it
+    exists to protect.
     """
     if not self.alive:
       return
@@ -155,11 +172,21 @@ class Window3D:
     self._box_widget = None
     self._actor = None
     self._overlay = []
+    interactor = None
+    try:
+      interactor = self._plotter.iren.interactor
+    except Exception:
+      pass                        # already torn down, which is the normal case
     try:
       if self._plotter is not None:
         self._plotter.close()
     except Exception:
-      pass                        # already gone, which is the normal case
+      pass
+    try:
+      if interactor is not None:
+        interactor.ProcessEvents()   # flush the queued XDestroyWindow
+    except Exception:
+      pass
     self._note.config(text='The 3D window was closed. Reopen it below.')
     self.on_status('3D window closed')
 

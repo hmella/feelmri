@@ -193,15 +193,39 @@ class _Note:
     self.text = text
 
 
+class _Interactor:
+  """The raw VTK interactor, which is what flushes the destroy request."""
+
+  def __init__(self):
+    self.processed = 0
+
+  def ProcessEvents(self):
+    self.processed += 1
+
+
+class _Iren:
+  def __init__(self):
+    self.interactor = _Interactor()
+
+
 class _ClosablePlotter:
-  """Records whether the window was actually torn down."""
+  """Records the teardown, and drops `iren` on close exactly as PyVista does.
+
+  That last detail is the whole point: `Plotter.close()` sets `self.iren` to
+  None, so anything reaching for the interactor afterwards gets
+  `AttributeError` on a NoneType.
+  """
 
   def __init__(self, raises=False):
     self.closed = 0
     self._raises = raises
+    self.iren = _Iren()
+    self.order = []
 
   def close(self):
     self.closed += 1
+    self.order.append('close')
+    self.iren = None            # PyVista does this, and it is the trap
     if self._raises:
       raise RuntimeError('already gone')
 
@@ -279,4 +303,70 @@ def test_a_viewport_with_no_plotter_closes_cleanly():
   """`reopen` can fail before a plotter exists, and the poll still runs."""
   stub = _viewport(None)
   stub._went_away()
+  assert stub.alive is False
+
+
+def test_the_destroy_request_is_flushed_or_the_window_stays_on_screen():
+  """`close()` does not remove the window. The flush after it does.
+
+  VTK destroys a window by queueing an `XDestroyWindow` on its own Xlib
+  connection, and that request only reaches the server when something services
+  that connection -- which is precisely what the pump has just stopped doing.
+
+  Measured on a bare `pyvista.Plotter`, no tkinter involved: after `close()`
+  the window reports `Map State: IsViewable` indefinitely. `Finalize()`,
+  `terminate_app()`, `SetShowWindow(False)`, switching to offscreen rendering
+  and dropping the last Python reference all leave it on screen. One
+  `ProcessEvents()` removes it. Confirmed end to end by sending a real
+  `WM_DELETE_WINDOW` -- what the title-bar button sends -- to the running
+  shell: window still mapped before, gone after.
+  """
+  plotter = _ClosablePlotter()
+  interactor = plotter.iren.interactor
+  stub = _viewport(plotter)
+  stub._went_away()
+
+  assert plotter.closed == 1
+  assert interactor.processed == 1, 'the queued destroy was never flushed'
+
+
+def test_the_interactor_is_captured_before_close_drops_it():
+  """Order is load-bearing, and getting it wrong looks like a VTK bug.
+
+  `Plotter.close()` sets `plotter.iren` to None, so reading the interactor
+  after closing raises `AttributeError: 'NoneType' object has no attribute
+  ...` and the flush silently never happens -- which is how this was first
+  misread as VTK being unable to destroy its own window.
+  """
+  plotter = _ClosablePlotter()
+  stub = _viewport(plotter)
+  stub._went_away()
+
+  assert plotter.iren is None, 'the fake must drop iren the way PyVista does'
+  # It still got flushed, so it cannot have been read after the close.
+  assert stub._plotter.closed == 1
+
+
+def test_a_plotter_that_refuses_to_close_is_still_flushed():
+  """`close()` raising must not skip the flush.
+
+  VTK having got there first is the normal case, and the window can still be
+  mapped when it does.
+  """
+  plotter = _ClosablePlotter(raises=True)
+  interactor = plotter.iren.interactor
+  stub = _viewport(plotter)
+  stub._went_away()
+
+  assert interactor.processed == 1
+  assert stub.alive is False
+
+
+def test_a_flush_that_raises_does_not_kill_the_pump():
+  """This runs from a Tk timer callback, where an exception stops the pump."""
+  plotter = _ClosablePlotter()
+  plotter.iren.interactor.ProcessEvents = lambda: (_ for _ in ()).throw(
+    RuntimeError('interactor gone'))
+  stub = _viewport(plotter)
+  stub._went_away()                     # must not raise
   assert stub.alive is False
