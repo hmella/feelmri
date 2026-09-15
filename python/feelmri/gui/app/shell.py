@@ -68,6 +68,10 @@ class Shell:
     if self.run_panel is not None:
       self._tabs.add(self.run_panel.widget, text='Run')
 
+    self.results_panel = self._make_results_panel(self._tabs)
+    if self.results_panel is not None:
+      self._tabs.add(self.results_panel.widget, text='Results')
+
     # After the viewport: the View menu binds straight to its methods.
     self._build_menu()
     self._build_controls()
@@ -122,6 +126,15 @@ class Shell:
       return RunPanel(parent, self.session, on_status=self.status)
     except Exception as exc:
       self.status(f'run panel unavailable: {exc}')
+      return None
+
+  def _make_results_panel(self, parent):
+    """The results tab, or nothing if it cannot be built."""
+    try:
+      from ..view.image_panel import ResultsPanel
+      return ResultsPanel(parent, self.session, on_status=self.status)
+    except Exception as exc:
+      self.status(f'results panel unavailable: {exc}')
       return None
 
   def _on_pick(self, block, obj=None) -> None:
