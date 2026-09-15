@@ -54,14 +54,49 @@ class Shell:
   # -- construction ---------------------------------------------------------
 
   def _make_viewport(self, parent):
-    from ..view.canvas3d import Canvas3D
+    """Pick a 3D backend: native window, blit, or the no-VTK panel.
+
+    The native window is the default because the 3D widgets, and therefore the
+    draggable field of view, need a real `vtkRenderWindowInteractor`. Set
+    `FEELMRI_GUI_VIEWPORT=blit` to get the offscreen canvas embedded in this
+    window instead; it is about four times slower and has no box widget, but
+    it keeps everything in one window.
+    """
+    import os
+
     from ..view.fallback3d import Fallback3D
+
+    choice = os.environ.get('FEELMRI_GUI_VIEWPORT', 'window').lower()
+    if choice not in ('window', 'blit'):
+      raise ValueError(
+        f'FEELMRI_GUI_VIEWPORT must be "window" or "blit", got {choice!r}')
     try:
-      return Canvas3D(parent, self.session, on_status=self.status)
+      if choice == 'blit':
+        from ..view.canvas3d import Canvas3D
+        return Canvas3D(parent, self.session, on_status=self.status)
+      from ..view.window3d import Window3D
+      viewport = Window3D(parent, self.session, on_status=self.status)
+      self._start_pump(viewport)
+      return viewport
     except Exception as exc:
       self.status('3D view unavailable, see the panel')
       return Fallback3D(parent, self.session, reason=str(exc),
                         on_status=self.status)
+
+  def _start_pump(self, viewport) -> None:
+    """Service VTK from the Tk timer, so the two event loops coexist.
+
+    Tk owns `mainloop`; the plotter was shown with `interactive_update=True`
+    and needs `update()` called for it to respond. The timer keeps running
+    after the window is closed so that reopening it starts working again.
+    """
+    from ..view.window3d import PUMP_MS
+
+    def tick():
+      viewport.pump()
+      self._pump_id = self.root.after(PUMP_MS, tick)
+
+    self._pump_id = self.root.after(PUMP_MS, tick)
 
   def _build_menu(self) -> None:
     import tkinter as tk
@@ -266,6 +301,12 @@ class Shell:
     self.status(f'wrote {path}')
 
   def close(self) -> None:
+    pump = getattr(self, '_pump_id', None)
+    if pump is not None:
+      try:
+        self.root.after_cancel(pump)
+      except Exception:
+        pass
     try:
       self.viewport.close()
     finally:
