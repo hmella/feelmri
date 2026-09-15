@@ -55,6 +55,7 @@ class Window3D:
     self._overlay = []
     self._box_widget = None
     self._box_reference = None      # (centre, extent) the widget was placed at
+    self._user_closed = False       # set by the ExitEvent observer
     self._suppress = False          # guard against a feedback loop
 
     # The shell still needs something to pack, so the panel is a placeholder
@@ -87,12 +88,22 @@ class Window3D:
     # Returns immediately. Without interactive_update this blocks and the Tk
     # shell stops responding.
     self._plotter.show(interactive_update=True, auto_close=False)
+
+    # The title-bar button routes through the interactor's ExitEvent. Polling
+    # the native handle catches the rest, so both are wired.
+    self._user_closed = False
+    try:
+      self._plotter.iren.interactor.AddObserver(
+        'ExitEvent', lambda *_: setattr(self, '_user_closed', True))
+    except Exception:
+      pass                      # polling alone still covers it
     self.alive = True
 
   def reopen(self) -> None:
     if self.alive and self._is_open():
       return
     self.alive = False
+    self._user_closed = False
     self._actor = None
     self._overlay = []
     self._box_widget = None
@@ -103,17 +114,30 @@ class Window3D:
   def _is_open(self) -> bool:
     """Whether the render window still exists.
 
-    **`update()` does not raise once the window is gone**, so catching around
-    it detects nothing: `alive` stayed True after a close and the next plan
-    change died with `AttributeError: 'NoneType' object has no attribute
-    'interactor'` from inside PyVista. The render window itself becomes None,
-    which is the signal to use.
+    **Three signals, because the two ways of closing look different.**
+
+    `plotter.close()` nulls `render_window` and sets `_closed`. Closing the
+    window from its title bar does NEITHER: measured after the window manager
+    destroyed it, `_closed` was still False, `render_window` and `iren` were
+    both live, and `update()` and `render()` both returned normally. A check
+    built on those alone is blind to the case a user actually hits.
+
+    What does change is the native handle: `GetGenericWindowId()` goes from a
+    pointer to None and `IsCurrent()` from True to False. That is polled here,
+    alongside an `ExitEvent` observer, which is the event the interactor fires
+    when the title-bar button is used.
     """
-    if self._plotter is None:
+    if self._plotter is None or self._user_closed:
       return False
     if getattr(self._plotter, '_closed', False):
       return False
-    return getattr(self._plotter, 'render_window', None) is not None
+    window = getattr(self._plotter, 'render_window', None)
+    if window is None:
+      return False
+    try:
+      return window.GetGenericWindowId() is not None
+    except Exception:
+      return False
 
   def _went_away(self) -> None:
     """Record that the user closed the window, once."""
