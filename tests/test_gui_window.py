@@ -121,44 +121,69 @@ def test_any_orientation_round_trips_through_the_widget_transform(tx, ty, tz):
   np.testing.assert_allclose(box.mps, rot, atol=1e-9)
 
 
+class _FakeWindow:
+  def __init__(self, handle):
+    self._handle = handle
+
+  def GetGenericWindowId(self):
+    return self._handle
+
+
 class _FakePlotter:
-  """Just enough of a plotter for the liveness check, with no window."""
+  """Just enough of a plotter for the liveness check, with no real window."""
 
-  def __init__(self, closed=False, has_window=True):
+  def __init__(self, closed=False, has_window=True, has_handle=True):
     self._closed = closed
-    self.render_window = object() if has_window else None
+    self.render_window = (_FakeWindow(object() if has_handle else None)
+                          if has_window else None)
 
 
-def _is_open(plotter):
+def _is_open(plotter, user_closed=False):
   """The check `Window3D._is_open` performs, isolated from the class.
 
   Stated here rather than imported because `Window3D` needs PyVista to import
   and this needs nothing.
   """
-  if plotter is None:
+  if plotter is None or user_closed:
     return False
   if getattr(plotter, '_closed', False):
     return False
-  return getattr(plotter, 'render_window', None) is not None
+  window = getattr(plotter, 'render_window', None)
+  if window is None:
+    return False
+  try:
+    return window.GetGenericWindowId() is not None
+  except Exception:
+    return False
 
 
-@pytest.mark.parametrize('plotter, expected', [
-  (None, False),
-  (_FakePlotter(), True),
-  (_FakePlotter(closed=True), False),
-  (_FakePlotter(has_window=False), False),
-  (_FakePlotter(closed=True, has_window=False), False),
+@pytest.mark.parametrize('plotter, user_closed, expected, why', [
+  (None, False, False, 'no plotter at all'),
+  (_FakePlotter(), False, True, 'healthy window'),
+  (_FakePlotter(closed=True), False, False, 'plotter.close() sets _closed'),
+  (_FakePlotter(has_window=False), False, False, 'plotter.close() nulls it'),
+  (_FakePlotter(has_handle=False), False, False, 'WINDOW MANAGER destroyed it'),
+  (_FakePlotter(), True, False, 'the interactor fired ExitEvent'),
 ])
-def test_a_closed_render_window_is_detected(plotter, expected):
-  """Closing the 3D window must be noticed, and `update()` will not tell you.
+def test_every_way_the_3d_window_can_close_is_detected(plotter, user_closed,
+                                                       expected, why):
+  """The ways of closing look completely different, and one was missed twice.
 
-  The first version of this backend caught exceptions around
-  `plotter.update()` and assumed a closed window would raise. **It does not.**
-  Measured: after `plotter.close()`, three successive `update()` calls returned
-  normally and the viewport still believed it was alive, so the next plan
-  change reached PyVista with no render window and died with
-  `AttributeError: 'NoneType' object has no attribute 'interactor'`.
+  A first attempt caught exceptions around `plotter.update()`, assuming a dead
+  window would raise. It does not: after `close()`, three successive `update()`
+  calls returned normally.
 
-  The render window itself going to None is the signal that works.
+  A second attempt checked `_closed` and `render_window is None`. Both are set
+  by `plotter.close()`, which is what the test drove, and **neither is set when
+  the window manager destroys the window**, which is what a user does.
+  Measured after the window manager took it: `_closed` still False,
+  `render_window` and `iren` both live, `update()` and `render()` both
+  returning normally. The application still broke on the next plan change.
+
+  What does change is the native handle: `GetGenericWindowId()` goes from a
+  pointer to None. That is polled, with an `ExitEvent` observer for the
+  title-bar button. Each row below names which of the three paths it stands
+  for, so the one that was missed cannot be dropped as a duplicate of one that
+  was not.
   """
-  assert _is_open(plotter) is expected
+  assert _is_open(plotter, user_closed) is expected, why
