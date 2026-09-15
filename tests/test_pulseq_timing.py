@@ -10,7 +10,7 @@ from conftest import SEQ_FILES, pypulseq_block_durations_ms, seq_ids
 #
 # Four, not nine. Block count, absolute start times and total duration are the
 # length, the cumulative sum and the sum of the per-block duration array, so
-# they cannot fail while it passes -- they are folded into one test rather than
+# they cannot fail while it passes. They are folded into one test rather than
 # run as three more sweeps over fifteen files.
 #
 # What this gate CANNOT catch is an error the two readers share; that is what
@@ -119,7 +119,7 @@ def _adc_times_match(seq_path, pulseq_import, pypulseq_ref):
     Two different claims, and only the first tests our own parser.
     ReadoutWindow.times is sliced out of calculate_kspace, so comparing it
     against adc_times() compares pypulseq with itself. It still says something
-    the block-level check does not -- that the windows between them cover every
+    the block-level check does not. That the windows between them cover every
     ADC sample exactly once, with none dropped or double-counted by the
     grouping in _identify_readout_groups.
     """
@@ -149,7 +149,7 @@ def _rf_waveforms_match(seq_path, pulseq_import, pypulseq_ref):
     # delay by dt_rf/2 for a uniform raster, and this is what pins it.
     #
     # Pinning the samples pointwise at 1e-9 of peak also pins every functional
-    # of them -- the flip angle gamma*INT(B1 dt) included, which is why there is
+    # of them, the flip angle gamma*INT(B1 dt) included, which is why there is
     # no separate flip-angle round trip here. The delivered flip through the
     # SOLVER is a different question, and lives in test_pulseq_analytical.py.
     from feelmri.MRObjects import Scanner
@@ -186,8 +186,8 @@ def _rf_waveforms_match(seq_path, pulseq_import, pypulseq_ref):
 def test_the_in_house_parser_agrees_with_pypulseq_on_every_fixture(seq_path, pulseq_import, pypulseq_ref):
   """Every quantity the in-house parser and pypulseq must agree on.
 
-  Four legs of ONE comparison -- timing grid, gradients, ADC sample times, RF
-  waveforms -- over the same fixture, the same import and the same reference.
+  Four legs of ONE comparison (timing grid, gradients, ADC sample times, RF
+  waveforms) over the same fixture, the same import and the same reference.
   Sweeping fifteen files four times re-read nothing; each helper keeps its own
   tolerances and messages, so a failure still names which leg broke.
   """
@@ -204,7 +204,7 @@ def test_the_in_house_parser_agrees_with_pypulseq_on_every_fixture(seq_path, pul
     except pytest.skip.Exception as exc:
       # Per CHECK, not per test. A skip inside one helper would otherwise
       # abort the others, so a fixture with no ADC would silently stop being
-      # checked for everything else -- a coverage loss disguised as a skip.
+      # checked for everything else, a coverage loss disguised as a skip.
       skipped.append(f'{fn.__name__}: {exc}')
   if len(skipped) == len(checks):
     pytest.skip('; '.join(skipped))

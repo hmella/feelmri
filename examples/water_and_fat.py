@@ -134,7 +134,7 @@ if __name__ == '__main__':
   # to the bore and not to the tissue: a spin that moves samples it wherever it
   # has moved to, which is what B0Field gives both the solver and the readout.
   # The chemical shift below stays on delta_B, frozen onto the node as a tissue
-  # property is. One field for every species -- normalised over the whole imaged
+  # property is. One field for every species, normalised over the whole imaged
   # slab, not per submesh, or each species would see a different bore.
   lab_nodes = (phantoms[-1].global_nodes @ planning.MPS.T
                + planning.LOC.m_as('m'))
@@ -145,8 +145,8 @@ if __name__ == '__main__':
   # Asserted, not just printed: an example that only reports its own error
   # exits 0 however wrong the physics has become. The bore field is the one
   # ingredient here with a closed form. `spatial` is a polynomial, so `fit`
-  # must represent it essentially exactly and `residual_rms_mT` -- what the
-  # fit itself says it could not carry -- must sit at round-off. A residual
+  # must represent it essentially exactly and `residual_rms_mT`. What the
+  # fit itself says it could not carry: must sit at round-off. A residual
   # above that means the expansion silently truncated the field, which shows
   # up as a wrong geometric distortion and nothing else.
   peak_mT = 1.5e-6 * 1e3
@@ -211,7 +211,7 @@ if __name__ == '__main__':
   # channels is a field that can be half-applied: the uniform part rides
   # `phi_dB0`, the linear part is a shift of the sample's k, and the quadratic
   # part rides the six `maxwell` coefficients the assembler already takes. The
-  # nominal trajectory is left alone -- the difference between it and the
+  # nominal trajectory is left alone, the difference between it and the
   # shifted one is the geometric distortion.
   b0_points, b0_phi, b0_maxwell = traj.b0_terms(b0_field, scanner)
   if b0_maxwell is not None:

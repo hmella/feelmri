@@ -84,7 +84,7 @@ def main() -> int:
   # phi_dB0 VARIES IN SPACE, and that is the point: with a constant map (and a
   # magnetization that comes out spatially uniform on these fixtures) a
   # redistribution that moved the wrong rows changed the k-space by exactly
-  # 0.000e+00 -- reversing the destination order of every redistributed array
+  # unchanged, because reversing the destination order of every redistributed array
   # was undetectable. Tied to the node position so it follows the node, not its
   # index in some rank-local array.
   if args.fields_under_signal:
@@ -127,7 +127,7 @@ def main() -> int:
     if args.b0_no_readout_gradient:
       # The control arm for "does the READOUT gradient matter", and it has to
       # differ in that channel and NOTHING else. Withholding `b0_field`
-      # instead -- which is what this used to do -- also removes the field
+      # instead, which is what this used to do, also removes the field
       # from the Bloch solve, worth of order a radian here on its own, so the
       # comparison was satisfied without the readout channel ever being
       # exercised. Disabling the one call that installs it is the mutation
@@ -140,7 +140,7 @@ def main() -> int:
     # GLOBAL snapshots plus the node map, which is what every shipped example
     # does and what the contract requires: built from per-rank data instead,
     # each rank runs its own SVD and its modes carry its own normalisation, so
-    # dual partitioning -- which redistributes modes BETWEEN ranks -- pairs a
+    # dual partitioning, which redistributes modes BETWEEN ranks, pairs a
     # node's mode with another rank's weights. Measured 1.76e-02 of peak that
     # way against 8.8e-07 this way. `FEMPhantom._signal_modes` refuses it now,
     # but the fixture should be right regardless.

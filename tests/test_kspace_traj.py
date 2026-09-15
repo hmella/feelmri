@@ -44,7 +44,7 @@ def test_cartesian_stack_shapes(fov, scanner):
 
   # Both readout axes advance monotonically within a line: kx because the
   # readout gradient has one sign, t because it is a clock. Asserted on BOTH
-  # configurations -- the oversampled one above and the plain one below. The
+  # configurations, the oversampled one above and the plain one below. The
   # two used to be separate tests, and they were not built alike: they ran at
   # res=16, oversampling=1, which this test does not otherwise cover.
   plain = CartesianStack(FOV=fov, res=np.array([16, 16, 1]),
@@ -101,7 +101,7 @@ def test_a_lab_frame_field_displaces_the_readout_by_the_off_resonance_rule(
   Off-resonance `df` moves a readout by `df / (gammabar * G_ro)` metres,
   because the readout gradient is what converts frequency into position. A
   lab-frame field `g` seen by a spin at `x` is `df = gammabar * (g.x)`, so the
-  displacement is `(g.x) / G_ro` -- no gammabar left in it.
+  displacement is `(g.x) / G_ro`. No gammabar left in it.
 
   Asserted as an INTEGER number of pixels: the field is sized so the rule
   predicts exactly three, and the reconstructed peak has to land three bins

@@ -106,7 +106,7 @@ if __name__ == '__main__':
   lab_nodes = phantom.global_nodes @ planning.MPS.T + planning.LOC.m_as('m')
   peak = np.abs(spatial(lab_nodes).flatten()).max()
   # Off-resonance is DISABLED here (the trailing 0.0), not set to a small
-  # value -- the tagging image is read against a pure gradient encoding.
+  # value, the tagging image is read against a pure gradient encoding.
   b0_field = B0Field.on_phantom(
       lambda x: spatial(x) / peak * scanner.field_strength * 1e-6 * 0.0, phantom)
 
@@ -202,7 +202,7 @@ if __name__ == '__main__':
   for fr in range(Nb_frames):
     # Snapshot at the end of the SET=2 group. The writer ends that group on
     # the slice rephaser, where the gradient moment measured from the
-    # excitation is zero on all three axes -- the only instant at which the
+    # excitation is zero on all three axes, the only instant at which the
     # magnetization can be captured for the k-space integral, since
     # calculate_kspace resets k=0 at the RF and the assembler then applies the
     # whole trajectory itself. The in-plane prephasers are SET=4 and follow
@@ -306,7 +306,7 @@ if __name__ == '__main__':
   phantom.set_assembler(voxel_size=vxsz[0], lorder=1, nodal_approximation=True, lumped=True)
 
   # Set static fields. Only the uniform part of the scanner field rides on the
-  # off-resonance channel -- it is spatially constant, so no k-space offset can
+  # off-resonance channel. It is spatially constant, so no k-space offset can
   # carry it; the rest of it is the shift applied to the samples above.
   phantom.set_static_fields(
       T2=T2.m_as('ms'),

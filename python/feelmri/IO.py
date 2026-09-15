@@ -150,7 +150,7 @@ class XDMFFile:
     nodes : np.ndarray, optional
         Node coordinate array of shape ``(N, 3)``.
     elements : dict or list of tuple, optional
-        Element connectivity in meshio format — either a dict
+        Element connectivity in meshio format: either a dict
         ``{cell_type: connectivity}`` or a list of ``(cell_type, connectivity)``
         tuples.
     """

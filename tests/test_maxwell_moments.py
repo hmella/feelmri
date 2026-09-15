@@ -6,7 +6,7 @@ monomials. Those four scalars are to the concomitant term what the three
 components of `k` are to the linear one: a second trajectory.
 
 Everything here is checked against a reference that is refined until it
-converges ONTO the helper, rather than against a fixed tolerance -- the point
+converges ONTO the helper, rather than against a fixed tolerance, the point
 is that the segment rule is exact, not merely close.
 """
 from __future__ import annotations
@@ -58,7 +58,7 @@ def _phase_from_helpers(seq, t0, sample_times, nodes=NODES):
   coef = maxwell_phase_coefficients(maxwell_moments(seq, t0, sample_times),
                                     SCANNER)
   x, y, z = nodes[:, 0], nodes[:, 1], nodes[:, 2]
-  # Six coefficients over x^2, y^2, z^2, xy, xz, yz -- the general symmetric
+  # Six coefficients over x^2, y^2, z^2, xy, xz, yz, the general symmetric
   # form, which collapses to the B0-aligned four when no rotation is given.
   return (coef[:, 0:1] * x ** 2 + coef[:, 1:2] * y ** 2 + coef[:, 2:3] * z ** 2
           + coef[:, 3:4] * x * y + coef[:, 4:5] * x * z + coef[:, 5:6] * y * z)
@@ -108,7 +108,7 @@ def test_a_ramp_is_charged_one_third_and_not_one_half():
   Over a ramp `0 -> A` of length h the exact second moment is `A^2 h/3`; a
   trapezoid rule over the stored corners charges `A^2 h/2`, a one-signed 50%
   over-count of every ramp. That is the same error the solver had to
-  sub-sample around (Bloch.CONCOMITANT_DT_GR_MS) -- here it is simply absent.
+  sub-sample around (Bloch.CONCOMITANT_DT_GR_MS). Here it is simply absent.
   """
   A, rise = 20.0, 0.30
   seq = _sequence([_gradient([0.0, rise], [0.0, A], 2)], rise)
@@ -162,7 +162,7 @@ def test_two_gradients_on_one_axis_are_summed_before_squaring():
   a_merged = maxwell_moments(merged, 0.0, np.array([0.0, 1.0]))[1, 0]
   assert abs(a_split / a_merged - 1.0) < 1e-12, (
     f'two gradients on one axis gave {a_split:.4f} against {a_merged:.4f} for '
-    f'the same total field -- they are being squared before they are summed')
+    f'the same total field. They are being squared before they are summed')
   # ... and the wrong answer is far away, so this can see the mistake.
   per_object = 10.0 ** 2 + 6.0 ** 2
   assert abs(per_object / a_merged - 1.0) > 0.2, 'the case is degenerate'
@@ -195,7 +195,7 @@ def test_the_moments_start_at_zero_and_refuse_a_sample_before_the_origin():
 
 def test_the_phase_can_only_ever_retard():
   """`Bc` is `(Bx^2 + By^2)/(2 B0)`, a sum of squares, so the phase it adds is
-  never positive -- for any gradient and any position. This pins the sign the
+  never positive, for any gradient and any position. This pins the sign the
   coefficients carry, which is the one thing in this chain that no amount of
   internal consistency would catch.
   """
@@ -282,7 +282,7 @@ def test_a_native_readout_reproduces_the_concomitant_field(oblique):
 
   The oblique case is the one that matters. `Bc` is `(Bx^2 + By^2)/(2 B0)`, so
   it singles out z and there is no rotation under which an oblique acquisition
-  reduces to an axial one -- the two parametrisations below genuinely differ
+  reduces to an axial one, the two parametrisations below genuinely differ
   (asserted), and both have to be right separately.
   """
   R = _oblique() if oblique else np.eye(3)
@@ -337,7 +337,7 @@ def test_the_retained_waveforms_carry_the_prephaser():
   traj = _cartesian()
   # ONE readout line. Flattening the whole stack interleaves lines whose
   # clocks restart, and `np.gradient` over that produces division by zero
-  # rather than a gradient -- against which any assertion passes.
+  # rather than a gradient: against which any assertion passes.
   times = np.asarray(traj.times.m_as('ms'), dtype=float)[:, 0, 0]
   assert np.all(np.diff(times) > 0.0), 'the line is not monotonic in time'
 
@@ -378,7 +378,7 @@ def test_a_trajectory_without_retained_gradients_refuses():
 def test_gradient_activity_before_the_origin_is_warned_about():
   """The prephasers run over `[t_start - dur, t_start]`, so a trajectory built
   without `t_start` puts them at NEGATIVE times, outside any forward
-  integration from 0 -- and the result is then quietly missing the larger part
+  integration from 0, and the result is then quietly missing the larger part
   of the moment. The trajectory does not know where the excitation was, so it
   warns rather than guessing an origin."""
   traj = _cartesian(t_start_ms=0.0)
@@ -391,7 +391,7 @@ def test_gradient_activity_before_the_origin_is_warned_about():
 
 def test_two_overlapping_gradient_SETS_cannot_be_added_after_squaring():
   """`Bc` is quadratic in G, so `Bc(G_a + G_b) != Bc(G_a) + Bc(G_b)` wherever
-  the two overlap -- the cross term belongs to neither set.
+  the two overlap, the cross term belongs to neither set.
 
   This is the control for the `carried` argument below: it shows the split is
   wrong only in the overlap, and exactly right outside it. Disjoint sets add to
@@ -424,7 +424,7 @@ def test_carried_gradients_are_integrated_as_one_field_with_the_readout():
   what the solver already applied is subtracted back off.
 
   Checked against the definition rather than against the implementation --
-  `moments(union) - moments(carried up to the snapshot)` -- and shown to differ
+  `moments(union) - moments(carried up to the snapshot)`, and shown to differ
   from the naive sum, or the argument would be doing nothing.
   """
   traj = _cartesian(t_start_ms=2.0)
@@ -492,7 +492,7 @@ def test_the_readout_puts_bc_on_isocentre_and_not_on_the_slice(oblique):
   carries the rest of the expansion about the slice offset.
 
   `FEMPhantom.orient` measures the assembler's nodes from the slice centre --
-  which is what makes the linear encoding right -- while `Bc` is a quadratic
+  which is what makes the linear encoding right, while `Bc` is a quadratic
   form about ISOCENTRE. Without the two extra terms an off-isocentre slab is
   imaged as though it sat in the middle of the bore, and `LOC = 0` in every
   other fixture here is exactly why that was never caught.
@@ -518,7 +518,7 @@ def test_the_readout_puts_bc_on_isocentre_and_not_on_the_slice(oblique):
   quad = (coef[:, 0:1] * x ** 2 + coef[:, 1:2] * y ** 2 + coef[:, 2:3] * z ** 2
           + coef[:, 3:4] * x * y + coef[:, 4:5] * x * z + coef[:, 5:6] * y * z)
   # The assembler carries -2 pi k . x, and `phase` is handed to
-  # apply_demodulation, which applies exp(-i phi) -- so both come back with the
+  # apply_demodulation, which applies exp(-i phi), so both come back with the
   # sign they contribute to the phase.
   got = quad - 2.0 * np.pi * (dk @ nodes.T) - phase[:, None]
 
@@ -536,7 +536,7 @@ def test_the_readout_puts_bc_on_isocentre_and_not_on_the_slice(oblique):
 
   # The correction DOMINATES the quadratic form at a realistic slice offset:
   # the cross term goes as 2 L . x against x . x, and here |L| is comparable to
-  # the node coordinates. Measured 271x (axial) and 8.4x (oblique) -- the axial
+  # the node coordinates. Measured 271x (axial) and 8.4x (oblique), the axial
   # case is the larger only because it leaves `quad` almost nothing.
   ratio = float(np.abs(quad[-1] - got[-1]).max() / np.abs(quad[-1]).max())
   assert ratio > 2.0, (

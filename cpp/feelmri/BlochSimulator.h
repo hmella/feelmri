@@ -22,7 +22,7 @@
  *              constant than order = 2, because the leading commutator
  *              correction is no longer dropped. The commutator
  *              vanishes for piecewise-constant fields and for on-resonance
- *              real RF with no gradient — in those regimes the three orders
+ *              real RF with no gradient: in those regimes the three orders
  *              agree to FP rounding. A genuine O(dt^4) Magnus scheme would
  *              need Gauss-Legendre interior quadrature on Omega_1, which is
  *              not implemented here.
@@ -51,8 +51,8 @@
  * skipped. The dropped terms are exact zeros, so results are bit-identical
  * to the full path. The branch is per time step, not per node.
  *
- * Relaxation exponentials. When T1 and T2 are constant across nodes — the
- * case whenever a phantom is built from scalar relaxation times —
+ * Relaxation exponentials. When T1 and T2 are constant across nodes: the
+ * case whenever a phantom is built from scalar relaxation times.
  * `exp(-dt/T1)` and `exp(-dt/T2)` are scalars and a change of time step
  * costs two `std::exp` calls rather than `2 * n_pos`. This matters because
  * RF rasters are generally not uniform in dt (an apodized-sinc excitation

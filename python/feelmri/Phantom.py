@@ -37,8 +37,8 @@ pymetis_ncommon = {
 def _weight_probe_times(pod, n=8):
     """A few times at which to compare a trajectory's weights across ranks.
 
-    Its own sample times where it has them -- that is where the weights carry
-    the most structure -- and a bare interval otherwise.
+    Its own sample times where it has them. That is where the weights carry
+    the most structure, and a bare interval otherwise.
     """
     ts = np.asarray(getattr(pod, 'times', None)
                     if getattr(pod, 'times', None) is not None
@@ -55,8 +55,8 @@ def _per_rank_decompositions(pod):
     `local_to_global_nodes` it runs its SVD on this rank's slice, so its modes carry
     a normalisation its weights undo and neither survives being moved to
     another rank. A trajectory that carries no decomposition is safe by
-    construction -- `RespiratoryMotion` broadcasts ONE direction vector to
-    every node, so any permutation of it is itself -- and a `PODSum` is exactly
+    construction. `RespiratoryMotion` broadcasts ONE direction vector to
+    every node, so any permutation of it is itself, and a `PODSum` is exactly
     as safe as its children, which is why this recurses rather than asking for
     an attribute the sum does not have.
     """
@@ -234,7 +234,7 @@ class FEMPhantom:
     def _maxwell_inputs(who, maxwell, kspace_times):
         """Split concomitant phase coefficients into the assembler's container.
 
-        ``maxwell`` is ``(N, 6)`` in rad/m^2 -- the output of
+        ``maxwell`` is ``(N, 6)`` in rad/m^2, the output of
         :func:`feelmri.maxwell_phase_coefficients`, which owns the sign
         convention. It is handed over as four arrays shaped like the k-space
         trajectory, the same container ``kspace_points`` uses, so the assembler
@@ -389,7 +389,7 @@ class FEMPhantom:
         Notes
         -----
         The Bloch solve costs O(nodes) per rank, and a rank owns every node
-        touched by any of its elements -- so nodes on a partition boundary
+        touched by any of its elements, so nodes on a partition boundary
         are carried by every rank that touches them, and a partition with a
         large surface-to-volume ratio ends up with more nodes per element.
         Balancing the DUAL graph equalises *elements* and lets that spread
@@ -490,19 +490,19 @@ class FEMPhantom:
         # The ownership mask and the redistribution schedule are both derived
         # from the layout that just changed. Leaving them cached let
         # set_assembler pass a stale, wrong-length mask to set_node_ownership
-        # after a create_submesh -- silently wrong signal at MPI_size > 1.
+        # after a create_submesh, silently wrong signal at MPI_size > 1.
         self.__dict__.pop('_own_mask_cache', None)
         self.__dict__.pop('_redist_cache', None)
         # Both mode caches are keyed on the LOCAL node count, so a stale entry
         # survives a repartition on the ranks whose count happens not to have
         # changed. Those ranks then hit the cache and skip `_signal_modes`
-        # entirely while the others miss and enter it -- and `_signal_modes`
+        # entirely while the others miss and enter it, and `_signal_modes`
         # is collective, so a strict subset of ranks reaches an Alltoallv.
         self.__dict__.pop('_mode_array_cache', None)
         self.__dict__.pop('_signal_modes_cache', None)
         # Per local node, like the receive map, and read back by
         # `simulate_pulseq` to restore a caller's own gradient. Kept, it is
-        # reinstalled against nodes that no longer exist -- silently when the
+        # reinstalled against nodes that no longer exist, silently when the
         # row count happens to match, and otherwise as a raise from inside a
         # `finally`, which destroys a successful run's return value.
         if getattr(self, '_b0_gradient', None) is not None:
@@ -564,8 +564,8 @@ class FEMPhantom:
     def local_to_global_nodes(self):
         """Global index of each local node.
 
-        Reading this binds the caller to the current partition -- it is what a POD
-        trajectory captures via ``local_to_global_nodes`` -- so a later repartition would
+        Reading this binds the caller to the current partition. It is what a POD
+        trajectory captures via ``local_to_global_nodes``, so a later repartition would
         silently invalidate whatever was built from it. Accessing it therefore marks
         the partition as in use, and :meth:`enable_dual_partition` then refuses.
         """
@@ -584,8 +584,8 @@ class FEMPhantom:
         """Global node -> the single rank responsible for it: the lowest-numbered
         rank whose elements touch it.
 
-        Node ownership is non-exclusive -- a rank owns every node its elements
-        touch -- so interface nodes live on several ranks. Picking one canonical
+        Node ownership is non-exclusive, a rank owns every node its elements
+        touch, so interface nodes live on several ranks. Picking one canonical
         owner is exact wherever the duplicated values are identical, which they are:
         the Bloch kernel is a pure per-node function of per-node inputs.
         """
@@ -601,7 +601,7 @@ class FEMPhantom:
     def _node_ownership_mask(self):
         """1.0 for nodes this rank owns, 0.0 for those it merely touches.
 
-        Cached per partition -- it depends only on the partition, not on the data.
+        Cached per partition. It depends only on the partition, not on the data.
         """
         cache = self.__dict__.setdefault('_own_mask_cache', {})
         key = getattr(self, '_active_partition', None)
@@ -617,7 +617,7 @@ class FEMPhantom:
         Built once per pair and cached. Needs **no communication**: ``partitioning``
         is broadcast to every rank, so each rank can derive the whole plan locally.
 
-        Node ownership is non-exclusive -- a rank owns every node its elements touch --
+        Node ownership is non-exclusive, a rank owns every node its elements touch --
         so ``sum_r N_r > N_global`` and this is not a permutation. Each global node is
         assigned a single canonical sender (the lowest-ranked owner in ``src``), which
         is exact because the Bloch kernel is a pure per-node function, so every rank
@@ -659,7 +659,7 @@ class FEMPhantom:
         dst_rows = self._partitions[dst]['_g2l_nodes'][recv_g].astype(np.int64)
 
         # A destination node no canonical sender covers would be a silent wrong
-        # answer, not a crash -- so check rather than trust.
+        # answer, not a crash, so check rather than trust.
         if dst_rows.size != l2g_dst.size or np.unique(dst_rows).size != l2g_dst.size:
             raise RuntimeError(
                 f"redistribution {src!r} -> {dst!r} does not cover rank {MPI_rank}: "
@@ -743,8 +743,8 @@ class FEMPhantom:
                               node_weight=1.0):
         """Partition minimising ``max_r (n_nodes_r + sum(elem_weights)_r)``.
 
-        Balancing nodes and element cost as two separate constraints -- whether by
-        two partitions or by METIS multi-constraint -- minimises a *sum of maxima*.
+        Balancing nodes and element cost as two separate constraints, whether by
+        two partitions or by METIS multi-constraint, minimises a *sum of maxima*.
         The quantity that actually sets the wall time is the *maximum of sums*, which
         is never larger and is strictly smaller when the two costs anti-correlate
         across the mesh. So the mesh is overdecomposed and the chunks are packed
@@ -755,7 +755,7 @@ class FEMPhantom:
         than two distant ones. That is what keeps the packing spatially coherent.
 
         ``node_weight`` scales the node term. It is 1.0 for a joint partition, and
-        **0.0 when the phase being balanced does no per-node work** -- the dual
+        **0.0 when the phase being balanced does no per-node work**, the dual
         scheme's signal layout with ``nodal_approximation=False``, where the cost is
         purely ``O(quadrature points)``. Leaving it at 1.0 there lets the node term
         dominate and the quadrature balance barely improves.
@@ -805,7 +805,7 @@ class FEMPhantom:
 
         ``'bloch'`` balances nodes (the Bloch solve and the nodal signal paths cost
         O(nodes)); ``'signal'`` balances quadrature cost. The assembler groups are
-        built on ``'signal'`` only -- ``'bloch'`` never needs them -- and ``'bloch'``
+        built on ``'signal'`` only, ``'bloch'`` never needs them, and ``'bloch'``
         is left active, so the solver and the POD bind to it as usual.
 
         Nodal data is moved between the two by :meth:`redistribute_nodal`, which the
@@ -880,7 +880,7 @@ class FEMPhantom:
         # and its weights undo exactly that normalisation. Redistributing the
         # modes below moves a node's mode vector onto a rank whose weights were
         # scaled for a different decomposition, and the displacement comes out
-        # wrong -- silently, and invisibly to a rigid-translation fixture,
+        # wrong, silently, and invisibly to a rigid-translation fixture,
         # which is the usual way this is checked, because a rigid translation
         # is the same vector on every node and any permutation of it is
         # itself. The measured cost is in `mpi-and-phantom.md`.
@@ -896,7 +896,7 @@ class FEMPhantom:
             "" if not offenders else
             f"FEMPhantom: {' and '.join(sorted(set(offenders)))} in this "
             "trajectory was built without `local_to_global_nodes`, so its "
-            "decomposition is per rank -- each rank's modes carry its own "
+            "decomposition is per rank. Each rank's modes carry its own "
             "normalisation. Dual partitioning redistributes them between "
             "ranks, which pairs a node's mode with another rank's weights. "
             "Build it from the GLOBAL snapshots with "
@@ -906,12 +906,12 @@ class FEMPhantom:
         # directly rather than by asking which attributes the object carries.
         #
         # `x(t) = x0 + Phi w(t)`. This function moves `Phi` between ranks and
-        # nothing ever moves `w` -- it is temporal, evaluated locally from the
+        # nothing ever moves `w`. It is temporal, evaluated locally from the
         # trajectory's own spline coefficients. So `w` has to be IDENTICAL on
         # every rank, and a global decomposition is merely the usual way of
         # arranging that. `calculate_pod` eigendecomposes `X^T X`, a
         # contraction over NODES, so restricting `X` to one rank's rows gives
-        # a different temporal basis -- not a rescaled one, except in the
+        # a different temporal basis, not a rescaled one, except in the
         # single degenerate case below.
         #
         # The attribute test above only refuses the ways of getting this wrong
@@ -969,7 +969,7 @@ class FEMPhantom:
         nodal_approximation : bool, optional
             Must match what will be passed to :meth:`set_assembler`. When True the
             small-element group is integrated through ``signal_nodal``, whose cost
-            is O(nodes) and is therefore already counted by the node term -- so
+            is O(nodes) and is therefore already counted by the node term, so
             those elements carry **zero** quadrature weight. Charging them
             ``nq(lorder)`` as well double-counts them and measurably degrades the
             partition.
@@ -991,7 +991,7 @@ class FEMPhantom:
         Returns the sorted field names, or ``None`` when every rank passed
         ``None``. The comparison is made on a value every rank already holds
         after one allgather, so the refusal is symmetric and a bare raise is
-        correct here -- the same shape ``_check_bin_preconditions`` uses.
+        correct here, the same shape ``_check_bin_preconditions`` uses.
         """
         names = None if local_data is None else tuple(sorted(local_data))
         if MPI_size == 1:
@@ -1269,11 +1269,11 @@ class FEMPhantom:
         Notes
         -----
         This does **not** repartition. It builds the assembler groups on whatever
-        partition is live -- the NODAL one from ``distribute_mesh``, or the signal
+        partition is live, the NODAL one from ``distribute_mesh``, or the signal
         layout when called from :meth:`enable_dual_partition`.
         """
         # Under dual partitioning the assembler groups belong to the SIGNAL layout,
-        # but 'bloch' is the resting one -- so a second set_assembler call (which any
+        # but 'bloch' is the resting one, so a second set_assembler call (which any
         # script comparing assembler configurations makes) would otherwise build them
         # on the wrong partition. The signal layout itself is not rebuilt, so the
         # partition-keyed caches stay valid.
@@ -1289,7 +1289,7 @@ class FEMPhantom:
             MPI_rank, len(small), len(self.local_elem_size), voxel_size))
         self.assembler = []
         # The new assemblers carry no B0 gradient, so the remembered copy would
-        # claim a channel that is not installed -- and `simulate_pulseq` reads
+        # claim a channel that is not installed, and `simulate_pulseq` reads
         # it back to restore a caller's own. Dropped with the assemblers.
         if getattr(self, '_b0_gradient', None) is not None:
             self._b0_gradient = None
@@ -1338,7 +1338,7 @@ class FEMPhantom:
 
         Under dual partitioning ``Mxy`` arrives in the Bloch layout (it is what
         ``BlochSolver.solve()`` returns) and is redistributed into the signal layout
-        here -- the only per-handoff communication in the scheme.
+        here, the only per-handoff communication in the scheme.
         """
         n_rows = np.shape(Mxy)[0]
         n_local = self.local_nodes.shape[0]
@@ -1349,7 +1349,7 @@ class FEMPhantom:
             '' if n_rows == n_local else
             f"update_magnetization: expected one row per local node "
             f"({n_local}), got {n_rows}. A sub-voxel ensemble must be "
-            f"collapsed before the assembler handoff -- redistribute_nodal "
+            f"collapsed before the assembler handoff. Use redistribute_nodal "
             f"and the assembler both index by node and would silently use "
             f"the wrong rows.")
         if getattr(self, '_dual', False) and self._active_partition != 'signal':
@@ -1375,8 +1375,8 @@ class FEMPhantom:
     def set_static_fields(self, T2, phi_dB0):
         """Push per-node relaxation and off-resonance into the assembler groups.
 
-        Under dual partitioning these arrive in the Bloch layout -- scripts build
-        them from ``phantom.local_nodes`` -- and are redistributed once into the
+        Under dual partitioning these arrive in the Bloch layout, since scripts build
+        them from ``phantom.local_nodes``, and are redistributed once into the
         signal layout, where the assemblers live. Same contract as
         :meth:`update_magnetization`, so call sites need no dual-specific variant.
 
@@ -1388,8 +1388,8 @@ class FEMPhantom:
 
         **When to split them, and when not to.** With ``BlochSolver(t2_prime=...)``
         the answer is always T2 here, for the reason given below. Without it,
-        for a sequence with no refocusing pulse -- every gradient-echo example
-        shipped here -- the
+        for a sequence with no refocusing pulse. Every gradient-echo example
+        shipped here, the
         reversible dephasing is never recovered, so the spins really do lose
         coherence at T2* throughout and passing T2* to BOTH is correct. Split
         them (T2 to the solver, T2* here) only when a refocusing pulse recovers
@@ -1408,15 +1408,15 @@ class FEMPhantom:
         """
         # Checked BEFORE the redistribution below, so a bad value is refused
         # without first paying an Alltoallv, and with a message naming the
-        # entry. The assembler checks again on its own side -- same pairing as
+        # entry. The assembler checks again on its own side, the same pairing as
         # the row-count guard. A T2 of zero inverts to Inf and exp(-t*Inf) is
         # NaN even at t = 0, so one bad node turns EVERY k-space sample into
         # NaN rather than spoiling its own contribution; a negative T2 is
         # finite and merely produces a plausible growing signal. An infinite
         # T2 is legitimate and means no relaxation.
         # COLLECTED, not raised on the spot. Everything below inspects
-        # LOCAL-node data -- a T2 map with one air node at zero has that node
-        # on one rank only -- and the redistribution beneath is an Alltoallv.
+        # LOCAL-node data, a T2 map with one air node at zero has that node
+        # on one rank only, and the redistribution beneath is an Alltoallv.
         # A bare raise leaves the offending rank outside it while every other
         # rank blocks there for ever: reproduced under `mpirun -n 2`.
         T2_arr = np.asarray(T2)
@@ -1424,8 +1424,8 @@ class FEMPhantom:
         n_local = self.local_nodes.shape[0]
         problem = ''
         # Compare the ENTRY COUNT, not the shape: callers mix (n,) and (n, 1)
-        # freely -- examples/water_and_fat.py passes one of each in the same
-        # call -- and pybind flattens both into Eigen's Array<T, Dynamic, 1>.
+        # freely: examples/water_and_fat.py passes one of each in the same
+        # call, and pybind flattens both into Eigen's Array<T, Dynamic, 1>.
         if T2_arr.size != phi_arr.size:
             problem = (f"set_static_fields: T2 has {T2_arr.size} entries and "
                        f"phi_dB0 {phi_arr.size}; they describe the same nodes.")
@@ -1452,7 +1452,7 @@ class FEMPhantom:
         collective_raise(problem)
 
         # Remembered so a caller can temporarily perturb them and put them
-        # back -- the bin-by-bin readout in simulate_pulseq offsets phi_dB0 by
+        # back, the bin-by-bin readout in simulate_pulseq offsets phi_dB0 by
         # each sub-spin's own frequency and restores this afterwards. Stored
         # BEFORE any redistribution, i.e. in the layout the caller passed.
         self._static_fields = (np.array(T2, copy=True),
@@ -1472,8 +1472,8 @@ class FEMPhantom:
         """Per-node gradient of a SCANNER-FIXED B0 field, ``(n_local, 3)`` in rad/ms/m.
 
         The Eulerian half of off-resonance. ``phi_dB0`` is frozen onto the node
-        and travels with the tissue -- right for chemical shift and local
-        susceptibility -- while a main-field imperfection belongs to the bore,
+        and travels with the tissue, right for chemical shift and local
+        susceptibility, while a main-field imperfection belongs to the bore,
         so a spin that moves must sample it where it has moved to. This gradient
         is what lets the readout do that: the phase becomes
         ``-(phi_dB0 + g . (x(t) - x0)) * t``, i.e. the expansion is written
@@ -1485,11 +1485,11 @@ class FEMPhantom:
         Spelling the readout the same way costs a real error: the shape
         functions then interpolate a PRODUCT of two nodal fields and leave
         ``(sum N_a g_a).x_q - sum N_a (g_a . x_a)``, which has nothing to do
-        with the motion -- 6.7e-02 of the signal against 2.5e-03 this way.
+        with the motion, and it is far less accurate than the displacement form.
 
         ``B0Field.solver_terms`` / ``readout_terms`` build both halves together;
         do not assemble one of them by hand. ``None`` clears it, and clearing
-        matters -- a stale gradient left behind is a wrong image with no
+        matters, a stale gradient left behind is a wrong image with no
         symptom.
 
         Same layout contract as :meth:`set_static_fields`: the array is built
@@ -1526,8 +1526,8 @@ class FEMPhantom:
 
         self._b0_gradient = np.array(g, copy=True)
         # TAGGED with the layout it was captured in. The row count alone does
-        # not identify a layout -- the bloch and signal partitions can hold the
-        # same number of nodes on a rank and a different set of them -- so an
+        # not identify a layout, the bloch and signal partitions can hold the
+        # same number of nodes on a rank and a different set of them, so an
         # untagged array is silently reinstallable against the wrong nodes.
         self._b0_gradient_partition = getattr(self, '_active_partition', None)
         if getattr(self, '_dual', False) and self._active_partition != 'signal':
@@ -1543,8 +1543,8 @@ class FEMPhantom:
         """Per-node complex RECEIVE sensitivity, one column per coil.
 
         ``C`` is ``(n_local,)`` or ``(n_local, n_coils)`` in the layout the
-        caller is currently under -- built from ``phantom.local_nodes``, the
-        same contract as :meth:`set_static_fields` -- and is redistributed once
+        caller is currently under, built from ``phantom.local_nodes``, the
+        same contract as :meth:`set_static_fields`, and is redistributed once
         into the signal layout, where the assemblers live. ``None`` clears it.
 
         **This is RECEIVE only, and it is not the transmit map.**
@@ -1572,7 +1572,7 @@ class FEMPhantom:
 
         No row check is needed at fold time, and that is by construction rather
         than by omission: the length is validated here against the CALLER's
-        layout -- which is the thing that can be got wrong -- and the map is
+        layout, which is the thing that can be got wrong, and the map is
         then redistributed into the signal layout, so it necessarily has the
         same number of rows as any magnetization arriving there. Checking it
         again per handoff would put a collective inside a loop that runs once
@@ -1587,7 +1587,7 @@ class FEMPhantom:
         # COLLECTED, not raised on the spot. Every condition below inspects
         # LOCAL-node data, so a map that is wrong for one rank's slice fires
         # there and nowhere else, and the redistribution beneath is an
-        # Alltoallv -- the shape that has hung this code four times.
+        # Alltoallv, the shape that has hung this code four times.
         problem = ''
         if arr.ndim not in (1, 2):
             problem = (f"set_receive_sensitivity: expected (n_local,) or "
@@ -1605,7 +1605,7 @@ class FEMPhantom:
                        f"coils has nothing to receive with.")
         elif not np.all(np.isfinite(arr)):
             # np.isfinite on a complex array is False when EITHER part is, so
-            # unlike the C++ guards this needs no bit-pattern reading -- the
+            # unlike the C++ guards this needs no bit-pattern reading, the
             # `-ffinite-math-only` folding that makes `std::isnan` dead code
             # applies to the kernel, not to numpy.
             first = int(np.flatnonzero(~np.isfinite(arr).reshape(-1))[0])
@@ -1645,15 +1645,15 @@ class FEMPhantom:
         The kernel takes its loop bounds from ``kspace_points[0]`` alone and
         then indexes ``[1]`` and ``[2]`` at those bounds, so a short sibling is
         an out-of-bounds READ under ``-DEIGEN_NO_DEBUG`` rather than an
-        assertion -- the same failure class the static fields already guard
+        assertion, the same failure class the static fields already guard
         against. Measured before this check, on a (4, 2, 1) trajectory: two
         component arrays SEGFAULTED, four were silently truncated to three, and
         a short ``ky`` or a short ``kspace_times`` each returned a full-size,
         entirely plausible, wrong answer.
 
         A bare raise is correct here, unlike the guards on per-node data: the
-        trajectory is replicated on every rank -- each rank loops all k-points
-        over its own nodes -- so every rank reaches the same verdict and none
+        trajectory is replicated on every rank. Each rank loops all k-points
+        over its own nodes, so every rank reaches the same verdict and none
         is left waiting in a collective.
         """
         try:
@@ -1689,8 +1689,8 @@ class FEMPhantom:
         all, which surfaced as a bare ``AttributeError`` naming a private name.
         With it, a rank holding no local ELEMENTS gets an empty group list, and
         the four entry points then disagreed: ``mri_signal`` and ``signal``
-        returned the Python ``int`` 0 from ``sum([])`` -- the wrong type, no
-        shape, no complaint -- while ``signal_nodal`` and ``signal_sum`` raised
+        returned the Python ``int`` 0 from ``sum([])``, the wrong type, no
+        shape, no complaint, while ``signal_nodal`` and ``signal_sum`` raised
         ``IndexError`` rank-locally, inside a loop whose next step is a
         collective.
 
@@ -1700,13 +1700,13 @@ class FEMPhantom:
         # BOTH conditions read per-rank state, so both go through the
         # collective. Whether `assembler` exists at all is rank-local too --
         # a `set_assembler` reached under `if MPI_rank == 0:` gives one rank
-        # the attribute and not the others -- and a bare raise there left
+        # the attribute and not the others, and a bare raise there left
         # every other rank inside the allgather of the check below it.
         groups = getattr(self, 'assembler', None)
         collective_raise(
             '' if groups is not None else
             f"{who}: rank {MPI_rank} has no assembler. Call `set_assembler` "
-            f"on EVERY rank -- the voxel size and the quadrature orders are "
+            f"on EVERY rank, the voxel size and the quadrature orders are "
             f"modelling decisions, and guessing them would be worse than "
             f"saying so.", RuntimeError)
         # Reaching here means every rank has the attribute, so `len` is safe.
@@ -1736,7 +1736,7 @@ class FEMPhantom:
 
     def mri_signal(self, kspace_points, kspace_times, pod=None,
                    maxwell=None):
-        """The k-space signal over EVERY assembler group -- the default entry point.
+        """The k-space signal over EVERY assembler group, the default entry point.
 
         This is the dispatcher, and on a mesh whose elements straddle
         ``voxel_size`` it is the only one of the four that integrates the whole
@@ -1753,19 +1753,19 @@ class FEMPhantom:
             samples and must share one shape.
         kspace_times : np.ndarray
             One acquisition time per sample, in **ms**, measured **from the
-            magnetization snapshot** -- not from the start of the sequence.
+            magnetization snapshot**, not from the start of the sequence.
             `exp(-t/T2)` and `exp(-i phi t)` both continue from the instant
             `update_magnetization` captured, and on a native trajectory that
             instant is ``traj.t_start``, so the argument is
             ``traj.times.m_as('ms') - traj.t_start.m_as('ms')``. Absolute times
             apply a spurious `exp(-t_start/T2)` and, worse, a spatially varying
-            `phi*t_start` -- measured at 1.688 rad peak-to-peak across the
+            `phi*t_start`. Measured at 1.688 rad peak-to-peak across the
             object on `examples/phase_contrast.py`.
         pod : POD, PODSum or None
             Motion trajectory. The weights are evaluated at
             ``t + pod.timeshift``, and ``kspace_times`` is elapsed-since-
             snapshot, so the caller folds the sample's ABSOLUTE sequence time
-            into the trajectory's own shift before calling -- that is what the
+            into the trajectory's own shift before calling. That is what the
             ``pod.update_timeshift(...)`` in every readout loop is for. A
             ``list`` is refused; combine trajectories with :class:`PODSum`.
         maxwell : np.ndarray or None
@@ -1780,15 +1780,15 @@ class FEMPhantom:
         -------
         np.ndarray
             Complex k-space signal, shaped ``kspace_times.shape + (nv,)``. The
-            trailing axis is the assembler's free channel axis -- velocity
-            encodings times receive coils -- and is present even at ``nv == 1``,
+            trailing axis is the assembler's free channel axis, carrying velocity
+            encodings times receive coils, and is present even at ``nv == 1``,
             which is what the ``swapaxes(0, 1)[:, :, 0]`` in the shot-major
             examples is unpicking.
 
         See Also
         --------
         signal_quadrature : full quadrature on every group.
-        signal_nodal_group0, signal_sum_group0 : group 0 ONLY -- see their own
+        signal_nodal_group0, signal_sum_group0 : group 0 ONLY. See their own
             warnings.
         """
         with self._signal_call('mri_signal', kspace_points, kspace_times, pod, maxwell) as args:
@@ -1817,19 +1817,19 @@ class FEMPhantom:
             samples and must share one shape.
         kspace_times : np.ndarray
             One acquisition time per sample, in **ms**, measured **from the
-            magnetization snapshot** -- not from the start of the sequence.
+            magnetization snapshot**, not from the start of the sequence.
             `exp(-t/T2)` and `exp(-i phi t)` both continue from the instant
             `update_magnetization` captured, and on a native trajectory that
             instant is ``traj.t_start``, so the argument is
             ``traj.times.m_as('ms') - traj.t_start.m_as('ms')``. Absolute times
             apply a spurious `exp(-t_start/T2)` and, worse, a spatially varying
-            `phi*t_start` -- measured at 1.688 rad peak-to-peak across the
+            `phi*t_start`. Measured at 1.688 rad peak-to-peak across the
             object on `examples/phase_contrast.py`.
         pod : POD, PODSum or None
             Motion trajectory. The weights are evaluated at
             ``t + pod.timeshift``, and ``kspace_times`` is elapsed-since-
             snapshot, so the caller folds the sample's ABSOLUTE sequence time
-            into the trajectory's own shift before calling -- that is what the
+            into the trajectory's own shift before calling. That is what the
             ``pod.update_timeshift(...)`` in every readout loop is for. A
             ``list`` is refused; combine trajectories with :class:`PODSum`.
         maxwell : np.ndarray or None
@@ -1844,8 +1844,8 @@ class FEMPhantom:
         -------
         np.ndarray
             Complex k-space signal, shaped ``kspace_times.shape + (nv,)``. The
-            trailing axis is the assembler's free channel axis -- velocity
-            encodings times receive coils -- and is present even at ``nv == 1``,
+            trailing axis is the assembler's free channel axis, carrying velocity
+            encodings times receive coils, and is present even at ``nv == 1``,
             which is what the ``swapaxes(0, 1)[:, :, 0]`` in the shot-major
             examples is unpicking.
         """
@@ -1859,7 +1859,7 @@ class FEMPhantom:
         .. warning::
            Evaluated on ``assembler[0]`` alone. Every group is built with the
            rank's ENTIRE node set and only the element subset differs, so this
-           is a per-node quantity that must not be summed over groups -- doing
+           is a per-node quantity that must not be summed over groups, and doing
            so counted every node once per group, measured as 346 950 for
            173 475 nodes, exactly 2x. The mass matrix ``M_`` is also assembled
            from the SMALL-element group alone, so on a mesh that splits this
@@ -1874,19 +1874,19 @@ class FEMPhantom:
             samples and must share one shape.
         kspace_times : np.ndarray
             One acquisition time per sample, in **ms**, measured **from the
-            magnetization snapshot** -- not from the start of the sequence.
+            magnetization snapshot**, not from the start of the sequence.
             `exp(-t/T2)` and `exp(-i phi t)` both continue from the instant
             `update_magnetization` captured, and on a native trajectory that
             instant is ``traj.t_start``, so the argument is
             ``traj.times.m_as('ms') - traj.t_start.m_as('ms')``. Absolute times
             apply a spurious `exp(-t_start/T2)` and, worse, a spatially varying
-            `phi*t_start` -- measured at 1.688 rad peak-to-peak across the
+            `phi*t_start`. Measured at 1.688 rad peak-to-peak across the
             object on `examples/phase_contrast.py`.
         pod : POD, PODSum or None
             Motion trajectory. The weights are evaluated at
             ``t + pod.timeshift``, and ``kspace_times`` is elapsed-since-
             snapshot, so the caller folds the sample's ABSOLUTE sequence time
-            into the trajectory's own shift before calling -- that is what the
+            into the trajectory's own shift before calling. That is what the
             ``pod.update_timeshift(...)`` in every readout loop is for. A
             ``list`` is refused; combine trajectories with :class:`PODSum`.
         maxwell : np.ndarray or None
@@ -1901,15 +1901,15 @@ class FEMPhantom:
         -------
         np.ndarray
             Complex k-space signal, shaped ``kspace_times.shape + (nv,)``. The
-            trailing axis is the assembler's free channel axis -- velocity
-            encodings times receive coils -- and is present even at ``nv == 1``,
+            trailing axis is the assembler's free channel axis, carrying velocity
+            encodings times receive coils, and is present even at ``nv == 1``,
             which is what the ``swapaxes(0, 1)[:, :, 0]`` in the shot-major
             examples is unpicking.
         """
         # Evaluated on ONE group only, for the same reason as ``signal_sum``: every
         # group carries the full node set. Note the mass matrix ``M_`` is assembled
         # from the *small*-element group alone, so on a mesh that splits, this
-        # integrates only that group -- use ``mri_signal``, which routes the
+        # integrates only that group. Use ``mri_signal``, which routes the
         # large-element group through the quadrature path, for the whole mesh.
         with self._signal_call('signal_nodal_group0', kspace_points, kspace_times, pod, maxwell) as args:
             return self.assembler[0].signal_nodal(kspace_points, *args)
@@ -1921,7 +1921,7 @@ class FEMPhantom:
         .. warning::
            Evaluated on ``assembler[0]`` alone, for the reason
            :meth:`signal_nodal_group0` spells out. It also carries no element volume,
-           so its absolute scale is arbitrary -- compare it only after removing
+           so its absolute scale is arbitrary, so compare it only after removing
            a complex scale factor. Interface nodes are handled by the ownership
            mask ``set_node_ownership`` installs, so the result is rank-count
            independent; without it, it was wrong by 6.6e-02 to 1.5e-01.
@@ -1934,19 +1934,19 @@ class FEMPhantom:
             samples and must share one shape.
         kspace_times : np.ndarray
             One acquisition time per sample, in **ms**, measured **from the
-            magnetization snapshot** -- not from the start of the sequence.
+            magnetization snapshot**, not from the start of the sequence.
             `exp(-t/T2)` and `exp(-i phi t)` both continue from the instant
             `update_magnetization` captured, and on a native trajectory that
             instant is ``traj.t_start``, so the argument is
             ``traj.times.m_as('ms') - traj.t_start.m_as('ms')``. Absolute times
             apply a spurious `exp(-t_start/T2)` and, worse, a spatially varying
-            `phi*t_start` -- measured at 1.688 rad peak-to-peak across the
+            `phi*t_start`. Measured at 1.688 rad peak-to-peak across the
             object on `examples/phase_contrast.py`.
         pod : POD, PODSum or None
             Motion trajectory. The weights are evaluated at
             ``t + pod.timeshift``, and ``kspace_times`` is elapsed-since-
             snapshot, so the caller folds the sample's ABSOLUTE sequence time
-            into the trajectory's own shift before calling -- that is what the
+            into the trajectory's own shift before calling. That is what the
             ``pod.update_timeshift(...)`` in every readout loop is for. A
             ``list`` is refused; combine trajectories with :class:`PODSum`.
         maxwell : np.ndarray or None
@@ -1961,8 +1961,8 @@ class FEMPhantom:
         -------
         np.ndarray
             Complex k-space signal, shaped ``kspace_times.shape + (nv,)``. The
-            trailing axis is the assembler's free channel axis -- velocity
-            encodings times receive coils -- and is present even at ``nv == 1``,
+            trailing axis is the assembler's free channel axis, carrying velocity
+            encodings times receive coils, and is present even at ``nv == 1``,
             which is what the ``swapaxes(0, 1)[:, :, 0]`` in the shot-major
             examples is unpicking.
         """
@@ -1978,7 +1978,7 @@ class FEMPhantom:
     # ------------------------------------------------------------------
     # The old names said which integration rule each used and not the thing a
     # caller has to know: that two of them see assembler GROUP 0 only. Missing
-    # that counted every node once per group -- 346 950 for 173 475 nodes --
+    # that counted every node once per group: 346 950 for 173 475 nodes --
     # and separately mis-tuned a whole benchmark sweep through `node_weight`.
     def signal(self, *args, **kwargs):
         """Deprecated alias for :meth:`signal_quadrature`."""

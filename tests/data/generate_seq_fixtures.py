@@ -102,7 +102,7 @@ n_samples = 200
 # Samples sit at raster CENTRES, which is the whole point of this fixture, so
 # the phase must be offset by half a step. Sampling at the raster EDGES instead
 # stopped one sample short of the period and left the waveform ending at 1.57%
-# of peak -- a gradient that never returns to zero and that nothing continues.
+# of peak, a gradient that never returns to zero and that nothing continues.
 # The file was then ill-posed: pypulseq's calculate_kspace bridges the gap
 # linearly to the next x event while the solver reads zero there, which put
 # 1.686 cycles of phase across the FOV into the readout. import_pulseq now
@@ -178,7 +178,7 @@ def hard_pulse(flip_deg, use, dur=2e-4):
 # separates times measured from the snapshot from times measured from the start
 # of the file: the snapshot lands at 50.2 ms, so the two readings of the same
 # readout differ by exp(-50.2/T2). A delay placed after the excitation would
-# not do this -- it falls inside the interval either way.
+# not do this. It falls inside the interval either way.
 seq = pp.Sequence(system=an)
 seq.add_block(pp.make_delay(50e-3))
 seq.add_block(hard_pulse(90, 'excitation'))
@@ -203,7 +203,7 @@ seq.write(str(script_path / 't1_v15.seq'))
 # the full object integral.
 seq = pp.Sequence(system=an)
 # 51 samples of 40 us: an odd count on the ADC raster, so one sample sits
-# exactly at the plateau centre -- which for a symmetric trapezoid rewound by
+# exactly at the plateau centre, which for a symmetric trapezoid rewound by
 # half its area is exactly k = 0.
 gx_an = pp.make_trapezoid('x', flat_area=204.0, flat_time=2.04e-3, system=an)
 adc_an = pp.make_adc(51, duration=gx_an.flat_time, delay=gx_an.rise_time, system=an)
@@ -234,7 +234,7 @@ seq.write(str(script_path / 'se_an_v15.seq'))
 
 # 7a. CPMG: one excitation, several refocusing pulses. Pins exp(-n*TE/T2)
 # across an echo train, and is the only fixture with more than one 180 per
-# excitation -- the case where a forward gradient-moment integral from the
+# excitation, the case where a forward gradient-moment integral from the
 # excitation is invalid, since calculate_kspace negates k at every refocusing.
 N_ECHO = 4
 seq = pp.Sequence(system=an)
@@ -269,8 +269,8 @@ seq.write(str(script_path / 'flash_tr_v15.seq'))
 # other fixture is symmetric, so the A*(rise - fall)/2 error of an
 # end-of-interval quadrature cancels and stays invisible.
 #
-# Note a .seq file CANNOT carry the harder case -- ramps that are not integer
-# multiples of the gradient raster -- because Pulseq requires every time on that
+# Note a .seq file CANNOT carry the harder case, ramps that are not integer
+# multiples of the gradient raster, because Pulseq requires every time on that
 # raster. That case is reachable only for a natively built Gradient, and is
 # covered by tests/test_sequence_concat.py.
 seq = pp.Sequence(system=an)
@@ -293,7 +293,7 @@ seq.write(str(script_path / 'asym_ramp_v15.seq'))
 # 7d. A slice-offset excitation: the same sinc played twice, once on resonance
 # and once with a frequency offset that moves the slice by a known distance.
 #
-# NO other fixture has a non-zero RF `freq` column, which is exactly why the
+# NO other fixture has a non-zero RF `freq` column, which is why the
 # custom-waveform path could drop the offset entirely and stay green. The
 # offset a scanner uses for slice `i` is gz.amplitude * slice_thickness * i,
 # so the excited slice must land at df / (gammabar * Gz).

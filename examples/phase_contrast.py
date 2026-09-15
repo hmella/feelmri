@@ -160,7 +160,7 @@ if __name__ == '__main__':
     # The concomitant phase THIS direction's imaging block accumulates between
     # the excitation and the snapshot, as a quadratic form in imaging-frame
     # position. Same helpers the readout uses, integrated over the block's own
-    # gradients from the RF centre -- which is where the transverse
+    # gradients from the RF centre, which is where the transverse
     # magnetization is created and so where the clock starts.
     imaging_blocks.append(imaging)
     conc_coefficients.append(maxwell_phase_coefficients(
@@ -219,7 +219,7 @@ if __name__ == '__main__':
   phantom.set_assembler(voxel_size=vxsz[0], lorder=1, horder=6, nodal_approximation=True, lumped=False)
 
   # Set static fields. Only the uniform part of the scanner field rides on the
-  # off-resonance channel -- it is spatially constant, so no k-space offset can
+  # off-resonance channel. It is spatially constant, so no k-space offset can
   # carry it; the rest of it becomes the shift below.
   phantom.set_static_fields(
       T2=T2star.m_as('ms'),
@@ -232,8 +232,8 @@ if __name__ == '__main__':
   b0_points = traj.b0_shifted_points(b0_field, scanner)
 
   # Concomitant fields during the readout. The solver carries the term up to
-  # the magnetization snapshot -- the slice select and, crucially here, the
-  # VENC bipolar, which is exactly the construction Maxwell fields spoil. The
+  # the magnetization snapshot, the slice select and, crucially here, the
+  # VENC bipolar, which is the construction Maxwell fields spoil. The
   # readout's own gradients are not in the solver's sequence at all, they live
   # in the trajectory, so their contribution has to be added on the signal
   # side. The two sets are disjoint, so nothing is counted twice.
@@ -255,7 +255,7 @@ if __name__ == '__main__':
   #
   # `Bc` is a quadratic form about ISOCENTRE while the assembler's nodes are
   # measured from the slice centre, so `maxwell_recentre` carries the rest of
-  # the expansion -- a k-space shift and a uniform phase. This slab is
+  # the expansion, a k-space shift and a uniform phase. This slab is
   # off-isocentre, so the correction is not small.
   maxwell, maxwell_points, maxwell_phase = [], [], []
   for d in range(enc.nb_directions):
@@ -291,7 +291,7 @@ if __name__ == '__main__':
       # Elapsed time since the MAGNETIZATION SNAPSHOT, not since the
       # trajectory's own origin. `mri_signal` applies exp(-t/T2*) and
       # exp(-i*phi*t) continuing from the instant the magnetization was
-      # captured, and on a CartesianStack that instant is `t_start` -- the
+      # captured, and on a CartesianStack that instant is `t_start`, the
       # timeline runs from the RF centre and the readout begins where the
       # imaging block ends. Feeding absolute times applies a spurious
       # exp(-t_start/T2*) and, worse, a SPATIALLY VARYING phi*t_start:
@@ -322,12 +322,12 @@ if __name__ == '__main__':
   # Concomitant field: the part that SURVIVES the velocity subtraction.
   #
   # phi_v is direction 0 minus the reference, so any phase the two share
-  # cancels -- and the READOUT term does share: `maxwell` above is one array
+  # cancels, and the READOUT term does share: `maxwell` above is one array
   # handed to every direction, because the readout gradients do not change
   # with the encoding. What does not cancel is the phase the SOLVER
   # accumulates from the VENC bipolar, which direction 0 plays and the
   # reference does not. That difference is a systematic velocity error, fixed
-  # in space and quadratic in position -- it does not average out over frames
+  # in space and quadratic in position. It does not average out over frames
   # and it is indistinguishable from flow.
   # Voxel centres, sized from the RECONSTRUCTED shape rather than from
   # `Imaging.RES`: `CartesianRecon` undoes the readout oversampling, and if the

@@ -56,14 +56,14 @@ def collective_raise(message, exc_type=ValueError):
 
   Per-node validation inspects local data, so a bad entry can exist on one rank
   only. A bare ``raise`` there aborts that rank while the others walk on into
-  the next collective and block forever -- an un-debuggable hang in place of a
+  the next collective and block forever, an un-debuggable hang in place of a
   one-line traceback, for what is usually a one-line input mistake.
 
   **Call it unconditionally.** Putting it inside the branch that found the
   problem reproduces the very bug it exists to prevent, which has happened
   here more than once: compute a message (empty when clean) and pass that.
 
-  ``exc_type`` keeps a guard's own exception class -- the sub-ensemble
+  ``exc_type`` keeps a guard's own exception class, the sub-ensemble
   preconditions promise ``NotImplementedError``, not ``ValueError``.
   """
   if MPI_comm.Get_size() == 1:

@@ -5,7 +5,7 @@ The file format is a flat list of sections: a version, a table of definitions,
 a block table indexing into per-event libraries, and a shape library holding
 run-length-compressed waveforms. Reading it is therefore a two-stage job --
 parse each section into its library, then resolve every block's event ids
-against those libraries -- and this module keeps that separation.
+against those libraries, and this module keeps that separation.
 
 Format versions 1.2 through 1.5 are supported. The RF, ADC and
 arbitrary-gradient rows gained columns at 1.5, so those three reads dispatch on
@@ -112,8 +112,8 @@ def _ppm_to_hz(scanner: Scanner) -> float:
   (``freq_ppm``); the effective offset is the sum, with the ppm term scaled
   by the Larmor frequency. This mirrors pypulseq's
   ``Sequence.waveforms_and_times`` (``freq_ppm * 1e-6 * gamma * B0``). B0 is
-  NOT stored in the ``.seq`` file -- both libraries take it from the scanner
-  definition -- so pass the right :class:`~feelmri.MRObjects.Scanner` to
+  NOT stored in the ``.seq`` file. Both libraries take it from the scanner
+  definition, so pass the right :class:`~feelmri.MRObjects.Scanner` to
   :func:`import_pulseq` when reading a sequence written for a field other
   than the 1.5 T default, or every ppm offset is scaled wrongly.
   """
@@ -269,8 +269,8 @@ def pypulseq_can_read(file_version: Version) -> bool:
 def _read_with_pypulseq(filename, scanner: Optional[Scanner] = None):  # pragma: no cover (optional dep)
   """Read ``filename`` into a ``pp.Sequence``.
 
-  One read serves three purposes -- the k-space trajectory, ``check_timing``
-  and the excitation / refocusing anchor times -- and costs milliseconds even
+  One read serves three purposes, the k-space trajectory, ``check_timing``
+  and the excitation / refocusing anchor times, and costs milliseconds even
   on a 231-block file, so it is not worth doing more than once.
 
   ``scanner`` supplies the transmit/receive dead times, which the file does not
@@ -329,7 +329,7 @@ def kspace_trajectory(pulseq_seq: "PulseqSequence") -> Dict[str, np.ndarray]:
   re-opens the underlying .seq file via pypulseq using the path stored
   on ``pulseq_seq.DEF['__pulseq_path__']`` (set by :func:`read_seq`).
 
-  Sequences with zero ADC blocks short-circuit to empty arrays —
+  Sequences with zero ADC blocks short-circuit to empty arrays. 
   pypulseq can fail on synthetic extensions in test fixtures, and there
   is no trajectory to compute anyway.
   """
@@ -423,7 +423,7 @@ def kspace_to_signal_inputs(  # pragma: no cover (optional dep)
   ``pp_seq.calculate_kspace()`` internally, takes the ADC samples
   (``k_traj_adc`` shape ``(3, N)`` in 1/m, ``t_adc`` shape ``(N,)`` in
   seconds), and returns them reshaped, cast to float32, made
-  C-contiguous, with times converted to ms — the unit FEelMRI's
+  C-contiguous, with times converted to ms: the unit FEelMRI's
   ``mri_signal`` expects (see ``examples/phase_contrast.py:212`` and
   related call sites, all of which pass ``traj.times.m_as('ms')``).
 
@@ -503,9 +503,9 @@ class ReadoutWindow:
       assembler would otherwise wind it a second time.
   maxwell : np.ndarray or None
       Shape ``(N, 4)`` float64 of time-integrated gradient products in
-      ``(mT/m)^2 ms``, integrated FORWARD from ``t_anchor`` -- the concomitant
+      ``(mT/m)^2 ms``, integrated FORWARD from ``t_anchor``, the concomitant
       counterpart of ``kspace``. Unlike ``kspace`` there is no anchor value to
-      subtract -- the origin is ours to choose, and the only correct one is the
+      subtract, the origin is ours to choose, and the only correct one is the
       snapshot, since everything before it is already carried on the
       magnetization by the solver.
 
@@ -546,7 +546,7 @@ class ReadoutWindow:
 
     An EPI train collapses many ADC events into one window and the window
     carries the offsets of its HEAD event only, so this is exact just when
-    every event shares them -- the usual case, since they come from one
+    every event shares them, the usual case, since they come from one
     `make_adc` call. The origin is this window's first sample, while Pulseq
     references each ADC event's own start; for a train with a non-zero
     frequency offset that difference grows along the echo train.
@@ -558,8 +558,8 @@ class ReadoutWindow:
   def demodulate(self, signal: np.ndarray) -> np.ndarray:
     """Apply :meth:`demodulation_phase` to a signal sampled on this window.
 
-    The solver never samples the ADC -- the readout is synthesized from the
-    trajectory -- so the receiver's offsets are applied here or not at all.
+    The solver never samples the ADC, the readout is synthesized from the
+    trajectory, so the receiver's offsets are applied here or not at all.
     `simulate_pulseq` calls this for you; a caller driving
     `update_magnetization` + `mri_signal` by hand must call it explicitly, or
     use :meth:`feelmri.Bloch.ADC.demodulate` on the block's own ADC.
@@ -598,8 +598,8 @@ class PulseqImport:
   simulates.
 
   ``hardware_problems`` holds whatever :meth:`Sequence.check_hardware`
-  reported against the scanner -- gradient amplitude, slew rate and peak
-  B1 -- and is empty when the sequence is within spec. Like
+  reported against the scanner: gradient amplitude, slew rate and peak
+  B1, and is empty when the sequence is within spec. Like
   ``timing_errors`` it is surfaced rather than raised: an over-spec file
   still simulates, and the numbers are what the file asks for, not what
   the simulation gets wrong. It stays a warning for a concrete reason --
@@ -683,8 +683,8 @@ class PulseqImport:
     """Total duration of the given blocks, in ms.
 
     Use it to size a placeholder delay that stands in for blocks whose
-    physics is not being evolved -- a readout train during steady-state
-    convergence, say -- so the timeline still adds up.
+    physics is not being evolved, a readout train during steady-state
+    convergence, say, so the timeline still adds up.
     """
     seq = self.feelmri_sim_seq if sim else self.feelmri_seq
     total = Quantity(0.0, 'ms')
@@ -833,7 +833,7 @@ def maxwell_moments(source, t0_ms: float, sample_times_ms,
 
   a quadratic form in position whose coefficients depend only on time. Its time
   integral therefore FACTORISES exactly into four scalars times four fixed
-  spatial monomials -- checked against :func:`feelmri.Bloch._concomitant_mT` on
+  spatial monomials, checked against :func:`feelmri.Bloch._concomitant_mT` on
   an oblique, time-varying waveform to 1.0e-14 relative:
 
       column 0: integral (Gx^2 + Gy^2) dt   multiplies z^2
@@ -854,14 +854,14 @@ def maxwell_moments(source, t0_ms: float, sample_times_ms,
   the matching rotation of the positions.
 
   ``source`` is a :class:`feelmri.Bloch.Sequence` or any iterable of
-  :class:`feelmri.MRObjects.Gradient` -- the latter is what the native
+  :class:`feelmri.MRObjects.Gradient`, the latter is what the native
   trajectory classes hand over, since they carry gradients without a sequence.
 
   Returns ``(N, 4)`` float64 in ``(mT/m)^2 ms``, integrated FORWARD from
   ``t0_ms``, so ``out[0]`` is zero whenever the first sample sits at ``t0_ms``.
   There is no anchor correction to make: unlike ``k``, which pypulseq measures
   from the excitation, this origin is ours to choose, and the only correct one
-  is the magnetization snapshot -- everything before it is already carried on
+  is the magnetization snapshot. Everything before it is already carried on
   the magnetization by the solver.
 
   Three traps, each of which silently returns a plausible wrong answer:
@@ -873,7 +873,7 @@ def maxwell_moments(source, t0_ms: float, sample_times_ms,
     unioned across axes rather than built per gradient.
   * **Do not reach for pypulseq's ``waveforms_and_times``.** It concatenates
     each block's shape pieces with no padding, so interpolating across it
-    bridges the gaps where nothing is playing -- measured at 1.14 1/m on the
+    bridges the gaps where nothing is playing. Measured at 1.14 1/m on the
     linear moment of ``arb_v15``, and one-signed here.
   * **The sample times must be ON the grid.** Between corners the cumulative
     moment is quadratic, so interpolating it afterwards is wrong at second
@@ -943,7 +943,7 @@ def _maxwell_form(m: np.ndarray, scanner, who: str):
   ``who`` names the caller so each guard still reports itself: a refusal that
   cannot say which check fired is not coverage.
 
-  Call this only where the caller has decided the term is live -- the B0
+  Call this only where the caller has decided the term is live, the B0
   refusal fires here, so hoisting it past an early return would refuse a
   configuration that previously did no work at all.
   """
@@ -989,7 +989,7 @@ def maxwell_phase_coefficients(moments, scanner, rotation=None) -> np.ndarray:
 
   ``rotation`` is the 3x3 matrix relating the coordinates the assembler will
   use to the physical ones, in the sense ``x_physical = rotation @ x_assembler``
-  -- which is what :meth:`FEMPhantom.orient` leaves behind, since it applies
+ , which is what :meth:`FEMPhantom.orient` leaves behind, since it applies
   ``nodes @ MPS_ori``. Pass it whenever the phantom has been oriented, or the
   Maxwell expression is evaluated in the imaging frame and treats the slice
   normal as B0. With no rotation the form is B0-aligned: ``p0 == p1``, ``p3``
@@ -1020,7 +1020,7 @@ def maxwell_recentre(moments, scanner, rotation=None, location=None):
   """The terms that move ``Bc`` from the slice centre back onto isocentre.
 
   :func:`maxwell_phase_coefficients` gives the QUADRATIC form only, and the
-  assembler evaluates it at ``local_nodes`` -- which ``FEMPhantom.orient``
+  assembler evaluates it at ``local_nodes``, which ``FEMPhantom.orient``
   measures from the slice centre. ``Bc`` is a quadratic form about ISOCENTRE, so
   an off-isocentre slab is otherwise imaged as though it sat in the middle of
   the bore. With ``x_physical = R u + L``,
@@ -1028,14 +1028,14 @@ def maxwell_recentre(moments, scanner, rotation=None, location=None):
       x^T F x = u^T (R^T F R) u  +  2 (R^T F L) . u  +  L^T F L
 
   the first term is what the six coefficients already carry, the second is
-  linear in position -- so it is a k-space shift, exactly like a lab-frame field
-  -- and the third a uniform phase.
+  linear in position, so it is a k-space shift, exactly like a lab-frame field
+ , and the third a uniform phase.
 
   Returns ``(dk, phase)`` with the same convention as :func:`b0_kspace_shift`:
   ``dk`` is ``(N, 3)`` in 1/m and is ADDED to the samples, ``phase`` is ``(N,)``
   in rad and goes through :func:`feelmri.Bloch.apply_demodulation`.
 
-  ``location`` is the slice offset in metres, in PHYSICAL coordinates -- the
+  ``location`` is the slice offset in metres, in PHYSICAL coordinates, the
   same vector :meth:`FEMPhantom.orient` was given. ``None`` or zero returns
   zeros, so an acquisition at isocentre pays nothing and stays bit-identical.
   """
@@ -1070,8 +1070,8 @@ def b0_kspace_shift(field, times_ms, scanner, rotation=None, location=None):
   """The k-space shift a lab-frame B0 field puts on a readout.
 
   A field ``dB0 = b + g . x`` advances a spin at ``x`` by ``-gamma (b + g.x) t``.
-  The position-dependent half is ``-2 pi (gammabar t g) . x``, which is exactly
-  what moving the sample's k by ``gammabar t g`` does -- so it needs no
+  The position-dependent half is ``-2 pi (gammabar t g) . x``, which is
+  what moving the sample's k by ``gammabar t g`` does, so it needs no
   assembler support, and the geometric distortion comes out of the
   reconstruction by itself. The uniform half is a per-sample phase and is
   returned alongside.
@@ -1082,8 +1082,8 @@ def b0_kspace_shift(field, times_ms, scanner, rotation=None, location=None):
   ``exp(-i phase)``.
 
   ``rotation`` and ``location`` describe the phantom the assembler holds. Its
-  nodes are always in the imaging frame -- unlike the solver's, which are
-  rotated into the physical frame when the concomitant term is on -- so the
+  nodes are always in the imaging frame, unlike the solver's, which are
+  rotated into the physical frame when the concomitant term is on, so the
   gradient is always taken as ``R^T g`` and the slice offset always lands in
   the constant.
   """
@@ -1091,7 +1091,7 @@ def b0_kspace_shift(field, times_ms, scanner, rotation=None, location=None):
     raise TypeError(
         "b0_kspace_shift: this field is a per-node expansion, and a k-space "
         "shift can only carry a field that is linear in position. The per-node "
-        "part rides `phi_dB0` instead -- see `B0Field.readout_terms`.")
+        "part rides `phi_dB0` instead. See `B0Field.readout_terms`.")
   b, g = field.in_frame(rotation=rotation, location=location, physical=False)
   t = np.asarray(times_ms, dtype=np.float64)
   gammabar = scanner.gammabar.m_as('1/ms/mT')
@@ -1106,12 +1106,12 @@ def b0_readout_terms(field, times_ms, scanner, rotation=None, location=None):
   Returns ``(dk, phase, maxwell)``: the k-space offset to ADD to the samples,
   a per-sample phase in rad for :func:`feelmri.Bloch.apply_demodulation`, and
   ``(N, 6)`` quadratic coefficients to ADD to whatever the concomitant term
-  already contributes -- ``None`` below degree 2.
+  already contributes, and ``None`` below degree 2.
 
   One call rather than :func:`b0_kspace_shift` plus something else, for the
   reason `Trajectory.b0_terms` exists: a field split across three channels is
   a field that can be half-applied, and `b0_kspace_shift` alone cannot carry a
-  quadratic part at all -- it refuses one, which left `simulate_pulseq` unable
+  quadratic part at all. It refuses one, which left `simulate_pulseq` unable
   to simulate a degree-2 field that `B0Field.on_phantom` builds happily.
 
   A per-node field rides the phantom instead and is refused here by name.
@@ -1122,8 +1122,8 @@ def b0_readout_terms(field, times_ms, scanner, rotation=None, location=None):
         f"b0_readout_terms: expected a B0Field, got {type(field).__name__}.")
   # One implementation, on the field. This used to spell the expansion out a
   # second time, beside the copy in `Trajectory.b0_terms`, and the two had
-  # already drifted in what the second return value MEANS -- a rate there, a
-  # phase here -- with nothing comparing them.
+  # already drifted in what the second return value MEANS, a rate there, a
+  # phase here, with nothing comparing them.
   t = np.asarray(times_ms, dtype=np.float64)
   dk, phi_rate, maxwell = field.polynomial_readout_terms(
       t, scanner, rotation=rotation, location=location)
@@ -1140,8 +1140,8 @@ def maxwell_moments_from_kspace(kx, ky, kz, times_ms, scanner) -> np.ndarray:
 
   Two limitations, both structural:
 
-  * It is **exact only where k is linear in t between samples** -- a Cartesian
-    readout -- and approximate on a curved trajectory, where the recovered G is
+  * It is **exact only where k is linear in t between samples**, a Cartesian
+    readout, and approximate on a curved trajectory, where the recovered G is
     a finite-difference estimate. Refine by sampling k more densely.
   * The trajectory **begins at the first ADC sample**, so anything played
     before it (a prephaser, a slice rephaser) contributes no moment here. A
@@ -1187,7 +1187,7 @@ def _identify_readout_groups(pulseq_seq: PulseqSequence
   on tests/data/se_an_v15.seq, the off-resonance phase at the echo came
   out fully unrefocused (2.77 rad, i.e. ω·TE).
 
-  An EPI echo train is unaffected — it carries no RF — so blip-separated
+  An EPI echo train is unaffected ,  it carries no RF ,  so blip-separated
   ADCs sharing one excitation still collapse into a single window.
 
   When no RF precedes an ADC at all, that ADC becomes its own group
@@ -1217,7 +1217,7 @@ def _identify_readout_groups(pulseq_seq: PulseqSequence
       continue
 
     if anchor < 0:
-      # No use-labeled anchor yet -- fall back to legacy per-ADC rule.
+      # No use-labeled anchor yet, so fall back to the legacy per-ADC rule.
       key = ('fallback', i)
       groups[key] = [i]
       anchor_order.append(key)
@@ -1307,7 +1307,7 @@ def import_pulseq(
 
   # One pypulseq read serves the trajectory below and the timing check here.
   # It is best-effort: a file using an extension pypulseq does not implement
-  # (ROTATIONS) still imports, it just goes unvalidated -- and if it also has
+  # (ROTATIONS) still imports, it just goes unvalidated, and if it also has
   # an ADC the trajectory step below raises, since that one is not optional.
   pp_seq = None
   timing_errors: Tuple[str, ...] = ()
@@ -1329,7 +1329,7 @@ def import_pulseq(
   gammabar = scanner.gammabar.m_as('Hz/T')
 
   # ppm offsets are a fraction of the Larmor frequency, and the .seq file does
-  # not record B0 -- so they are scaled by the SCANNER's. Imported with the
+  # not record B0, so they are scaled by the SCANNER's. Imported with the
   # default scanner, a sequence written for 3 T silently gets half the offset
   # it was designed with, and a fat-sat pulse lands on the wrong resonance.
   if not scanner_was_given:
@@ -1346,13 +1346,13 @@ def import_pulseq(
       logger.warning(
           "%s: %d event(s) carry a ppm frequency/phase offset, which is scaled "
           "by gammabar*B0*1e-6 = %.4g Hz/ppm from the DEFAULT scanner (B0 = %s). "
-          "The .seq file does not record B0 -- pass import_pulseq(..., "
+          "The .seq file does not record B0. Pass import_pulseq(..., "
           "scanner=Scanner(field_strength=...)) if it was not written for "
           "this field.",
           filename, n_ppm, ppm_to_hz, scanner.field_strength)
   feelmri_seq = feelmriSequence()
   # A .seq file spells out its spoiler gradients and RF phase cycling, so the
-  # solver must not zero Mxy between blocks on top of them -- that would
+  # solver must not zero Mxy between blocks on top of them. That would
   # destroy the coherence pathways an EPI train, a FLASH or a bSSFP depends
   # on. BlochSolver reads this flag when perfect_spoiling is left at None.
   feelmri_seq.explicit_spoiling = True
@@ -1495,7 +1495,7 @@ def import_pulseq(
     # whole window: _identify_readout_groups anchors on ANY active RF, so no
     # pulse falls between the snapshot and the samples and no refocusing
     # reflection can occur inside the interval. That is also why this needs no
-    # counterpart to k_at_anchor -- everything before the snapshot is already
+    # counterpart to k_at_anchor: everything before the snapshot is already
     # carried on the magnetization by the solver.
     maxwell = (maxwell_moments(feelmri_seq, t_anchor_ms, times_arr)
                if times_arr.size else np.zeros((0, 4), dtype=float))
@@ -1584,7 +1584,7 @@ def import_pulseq(
   # Same contract as check_timing above: report, do not raise. check_timing
   # covers raster alignment and dead times; it says nothing about amplitude,
   # slew or peak B1, which is what check_hardware measures. Both together are
-  # still only what the FILE asks of a scanner -- neither says the simulation
+  # still only what the FILE asks of a scanner. Neither says the simulation
   # is wrong, which is why an over-spec sequence imports and runs.
   hardware_problems: Tuple[str, ...] = ()
   if validate:
@@ -1721,7 +1721,7 @@ def readout_phase_terms(t_ms, *, scanner, b0_field=None, maxwell_moments=None,
     conc_dk, conc_phase = maxwell_recentre(
         maxwell_moments, scanner, rotation=rotation, location=location)
     # `maxwell_recentre` works on a flat sample list while `b0_readout_terms`
-    # follows the shape of `t_ms` -- a native trajectory hands in a
+    # follows the shape of `t_ms`, a native trajectory hands in a
     # (ro, ph, slice) grid. Put both in the caller's own shape before adding,
     # or they broadcast against each other instead of summing.
     grid = np.shape(t_ms)
@@ -1750,8 +1750,8 @@ def simulate_pulseq(seq_path,
   This is the dual-path workflow in one call: :func:`import_pulseq`, one
   :class:`~feelmri.Bloch.BlochSolver` pass over the whole sequence, then per
   readout window ``phantom.update_magnetization`` followed by
-  ``phantom.mri_signal``. The readout is not evolved by the solver -- it is
-  synthesized from the k-space trajectory -- which is why one solve serves
+  ``phantom.mri_signal``. The readout is not evolved by the solver. It is
+  synthesized from the k-space trajectory, which is why one solve serves
   every window.
 
   ``phantom`` must already have ``set_assembler`` and ``set_static_fields``
@@ -1780,7 +1780,7 @@ def simulate_pulseq(seq_path,
       with ``gather=True`` the complete signal exists on rank 0 alone and every
       other rank receives ZEROS. Guard reconstruction, plotting and file output
       with ``if MPI_rank == 0``, and do not test a non-root rank's ``kspace``
-      for correctness -- it is expected to be empty, not wrong.
+      for correctness. It is expected to be empty, not wrong.
   coil_sensitivities : array, optional
       Per-node complex RECEIVE sensitivity, ``(n_local,)`` or
       ``(n_local, n_coils)``, handed to
@@ -1798,7 +1798,7 @@ def simulate_pulseq(seq_path,
       Forwarded to :func:`import_pulseq` (``readout_set_values``,
       ``placeholder_dt``, ``validate``).
   **solver_kwargs
-      Forwarded to :class:`~feelmri.Bloch.BlochSolver` -- ``M0``, ``T1``,
+      Forwarded to :class:`~feelmri.Bloch.BlochSolver`: ``M0``, ``T1``,
       ``T2``, ``delta_B``, ``pod_trajectory``, ``method``, ``dtype`` and the
       isochromat controls. ``perfect_spoiling`` is left at its default,
       which resolves to False for an imported sequence.
@@ -1815,7 +1815,7 @@ def simulate_pulseq(seq_path,
   imp = import_pulseq(seq_path, scanner=scanner, **(import_kwargs or {}))
 
   # Set while the CALLER's partition is still live, which is the layout
-  # set_receive_sensitivity validates and redistributes from -- the same
+  # set_receive_sensitivity validates and redistributes from, the same
   # contract set_static_fields follows. Restored at the end so the phantom
   # comes back as it was handed over.
   previous_sensitivity = getattr(phantom, '_receive_sensitivity', None)
@@ -1824,7 +1824,7 @@ def simulate_pulseq(seq_path,
     phantom.set_receive_sensitivity(coil_sensitivities)
 
   # Bound before the try so the finally can read them however early a readout
-  # fails -- an unbound name there would mask the real exception.
+  # fails, an unbound name there would mask the real exception.
   b0_phi_nodal = None
   b0_static_set = False
   remembered = None
@@ -1844,7 +1844,7 @@ def simulate_pulseq(seq_path,
     # The scanner field belongs to the bore, so a spin sees it wherever it has
     # moved to rather than where it started. A field a polynomial can carry
     # reaches the readout as a shift of the sample's k, below; one that needs a
-    # per-node expansion rides the PHANTOM instead -- the field itself on
+    # per-node expansion rides the PHANTOM instead, the field itself on
     # `phi_dB0` and the gradient on its own channel, which the assembler
     # applies against the DISPLACEMENT `x(t) - x0`. (The solver spells the same
     # expansion against the absolute position and puts the bracket
@@ -1940,7 +1940,7 @@ def simulate_pulseq(seq_path,
       _collective_raise(
           '' if remembered is not None else
           "simulate_pulseq: this b0_field needs a per-node expansion, which "
-          "rides `phi_dB0`, but set_static_fields was never called -- there is "
+          "rides `phi_dB0`, but set_static_fields was never called. There is "
           "nothing to add it to and the field would be silently dropped.")
       if bins is None:
         T2_prev, phi_prev = remembered
@@ -1972,7 +1972,7 @@ def simulate_pulseq(seq_path,
       if bins is None:
         # On the bins path the loop below sets this once per sub-spin and the
         # finally puts the collapsed value back, so doing it here as well is a
-        # wasted nodal store -- and, under dual partitioning, a wasted Alltoallv
+        # wasted nodal store, and, under dual partitioning, a wasted Alltoallv
         # per readout window (4 of 23 on cpmg_v15 at K = 16).
         phantom.update_magnetization(Mxy[:, rw.m_storage_idx])
       # Elapsed time since the snapshot, not absolute time from the start of the
@@ -2017,8 +2017,8 @@ def simulate_pulseq(seq_path,
           # reproduce a readout: the snapshot sits at the coherence anchor, where the
           # ensemble is maximally dephased, and nothing downstream can bring it back.
           #
-          # Each sub-spin is given its own off-resonance instead -- the bin offsets
-          # are in the same rad/ms frame as phi_dB0, so they simply add -- and the
+          # Each sub-spin is given its own off-resonance instead, the bin offsets
+          # are in the same rad/ms frame as phi_dB0, so they simply add, and the
           # signals are weight-summed. Costs n_bins passes over the signal path.
           bin_Mxy, offsets, weights, T2_read, phi_read = readout_bins
           ensemble = bin_Mxy[:, :, rw.m_storage_idx]

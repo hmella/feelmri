@@ -4,8 +4,8 @@ What the reader makes of a file is compared against pypulseq in
 ``test_pulseq_timing.py``, and the structural invariants of an import live in
 ``test_pulseq_invariants.py``. This file covers what neither does:
 
-  * the dual-path partition API -- prep vs ADC indices, readout window
-    contiguity, ``m_storage_idx`` ordering -- over every bundled fixture;
+  * the dual-path partition API (prep vs ADC indices, readout window
+    contiguity, ``m_storage_idx`` ordering) over every bundled fixture;
   * the placeholder-substitution sequence (``feelmri_sim_seq``);
   * parser paths no bundled file exercises: the ROTATIONS extension, the v1.5
     column layout, a cyclic or dangling extension chain, an unhandled section;
@@ -101,7 +101,7 @@ def test_kspace_trajectory_matches_the_windows(pulseq_import):
   This is the one caller of that wrapper. test_readout_anchor_invariant
   compares ``rw.kspace_file`` against ``calculate_kspace`` directly and never
   goes through it, so deleting the old shape-only test left the function
-  uncovered -- caught by the coverage gate, not by a failure.
+  uncovered, caught by the coverage gate, not by a failure.
   """
   from feelmri.PulseqAdapter import kspace_trajectory
 
@@ -162,8 +162,8 @@ def test_rotation_preserves_moments_across_unequal_timings(adapter):
   The case that matters is unequal timings, which no bundled fixture has:
   `rotation_minimal.seq` drives a single axis, so it cannot see this. The
   rotated amplitudes used to inherit one donor axis's geometry, and on an
-  ordinary block -- in-plane prephasers 0.5 ms flat against a 2.0 ms
-  slice-select -- an IDENTITY matrix inflated the x and y moments by 250%.
+  ordinary block, in-plane prephasers 0.5 ms flat against a 2.0 ms
+  slice-select, an IDENTITY matrix inflated the x and y moments by 250%.
   """
   import numpy as np
   from feelmri.PulseqAdapter import _grad_corners_seconds
@@ -197,7 +197,7 @@ def test_rotation_preserves_moments_across_unequal_timings(adapter):
       assert np.allclose(after, expected, rtol=1e-9, atol=1e-12), (
         f'{name}: moments {after} != R @ {before} = {expected}')
 
-  # Axes that already share timing keep the exact scalar path -- no
+  # Axes that already share timing keep the exact scalar path. No
   # resampling, no shaped output.
   same = (trap(5.0, 0.5), trap(3.0, 0.5), trap(2.0, 0.5))
   out = adapter._apply_rotation_to_grads(rot, *same)
@@ -460,7 +460,7 @@ def test_dual_path_multi_window(adapter, tmp_path):
   """End-to-end dual-path smoke test over SEVERAL readout windows.
 
   Was written against `gre_radial_pypulseq.seq`, which is not in the repo, so
-  it skipped on every run since it was added -- dead coverage. Repointed at
+  it skipped on every run since it was added, which is dead coverage. Repointed at
   `cpmg_v15.seq`, whose four echoes give four windows and therefore exercise
   the same thing the radial file was chosen for: the per-window
   update_magnetization + mri_signal loop, with one m_storage_idx per window.
@@ -503,7 +503,7 @@ def test_dual_path_multi_window(adapter, tmp_path):
   imp = adapter.import_pulseq(seq_path)
   assert len(imp.readouts) > 1, 'expected several readout windows'
   # The CPMG fixture plays no gradients at all, so k is constant within each
-  # window and the windows differ only in time -- which is what makes the
+  # window and the windows differ only in time, which is what makes the
   # per-window m_storage_idx bookkeeping the thing under test here.
   for rw in imp.readouts:
     span = float(rw.kspace.max() - rw.kspace.min())
@@ -597,7 +597,7 @@ def test_import_reads_with_the_scanner_gamma(adapter):
   from feelmri.MRObjects import Scanner
   # Named, not SEQ_FILES[0]. The list moved from examples/pulseq to
   # tests/data, which silently changed [0] from epi_pypulseq (115 blocks with
-  # a scalar gx) to arb_v15 (0 of 8 -- every gx is an array or zero), and the
+  # a scalar gx) to arb_v15 (0 of 8. Every gx is an array or zero), and the
   # loop below then skipped every block without asserting anything.
   seq_path = DATA_DIR / 'gre_v15.seq'
   skip_if_pypulseq_too_old(seq_path)
@@ -693,7 +693,7 @@ def test_dangling_extension_reference_is_reported(adapter):
 
 def test_check_timing_is_reported(adapter, tmp_path):
   """import_pulseq runs check_timing and surfaces what it finds. A file that
-  fails it still imports -- the violations are what a scanner would reject,
+  fails it still imports, the violations are what a scanner would reject,
   not what the simulator cannot handle."""
   src = DATA_DIR / 'gre_v15.seq'
   if not src.exists():
@@ -791,7 +791,7 @@ def test_read_seq_feelmri_round_trip_and_pass_through(adapter):
 
   It is in __all__ and had no coverage at all; it also could not reach either
   keyword, so a caller stuck on it had no way to say what field the file was
-  written for -- and the gamma the file is read with must be the gamma the
+  written for, and the gamma the file is read with must be the gamma the
   solver integrates.
   """
   from feelmri.MRObjects import Scanner
@@ -807,7 +807,7 @@ def test_read_seq_feelmri_round_trip_and_pass_through(adapter):
 
   # scanner= reaches the reader. ppm offsets are a fraction of the Larmor
   # frequency and the file records no B0, so they scale with field_strength --
-  # which is exactly why the argument has to be reachable from here.
+  # which is why the argument has to be reachable from here.
   ppm_path = DATA_DIR / 'ppm_v15.seq'
   skip_if_pypulseq_too_old(ppm_path)
 
@@ -832,8 +832,8 @@ def test_read_seq_feelmri_round_trip_and_pass_through(adapter):
 def test_adc_demodulation_is_applied_by_simulate_pulseq(adapter, tmp_path):
   """The receiver's frequency/phase offsets must reach the signal.
 
-  The solver never samples the ADC -- the readout is synthesized from the
-  trajectory -- so if `simulate_pulseq` does not apply them, nothing does. They
+  The solver never samples the ADC, the readout is synthesized from the
+  trajectory, so if `simulate_pulseq` does not apply them, nothing does. They
   were parsed onto `ReadoutWindow` and read by no one until 2026-09-10; on
   `ppm_v15` that left 228 deg of phase unapplied, a worst-case per-sample error
   of |1 - e^(i phi)| = 1.99 against a maximum of 2.0.
@@ -892,7 +892,7 @@ def test_a_lab_frame_b0_field_shifts_the_readout_but_not_the_trajectory(
   """`simulate_pulseq` must apply the shift and leave `rw.kspace` alone.
 
   The scanner field displaces where the signal comes from, and the
-  reconstruction still grids on the nominal trajectory -- the difference
+  reconstruction still grids on the nominal trajectory, the difference
   between the two IS the geometric distortion, so writing the shift back into
   `rw.kspace` would cancel exactly the effect being modelled.
 
@@ -973,8 +973,8 @@ def test_a_per_node_b0_field_reaches_the_readout_and_leaves_the_phantom_clean(
   gradient left behind is a wrong image with no symptom, and the caller's own
   off-resonance map has to come back untouched.
 
-  The static arm is EXACT -- with nothing moving, the nodal value IS the
-  Eulerian answer -- so it is checked against the same field handed to the
+  The static arm is EXACT, with nothing moving, the nodal value IS the
+  Eulerian answer, so it is checked against the same field handed to the
   solver as `delta_B` and to the readout as `phi_dB0`, which is the Lagrangian
   spelling that agrees with it only because the phantom is still.
 
@@ -1090,7 +1090,7 @@ def test_a_degree_two_b0_field_reaches_the_readout_through_simulate_pulseq(
   """`simulate_pulseq` could not carry a degree-2 field at all.
 
   The polynomial arm went to `b0_kspace_shift`, which reaches `in_frame` and
-  refuses any non-zero quadratic by name -- so a field `B0Field.on_phantom`
+  refuses any non-zero quadratic by name, so a field `B0Field.on_phantom`
   builds happily raised `NotImplementedError` out of the one-call API, with no
   message saying the API was the problem rather than the field. The quadratic
   part rides the six `maxwell` coefficients the same loop already assembles for
@@ -1189,7 +1189,7 @@ def test_a_degree_two_b0_field_reaches_the_readout_through_simulate_pulseq(
       'this field barely changes the readout, so the test cannot see it')
 
   # ORIENTED, because everything above runs at `R = I, LOC = 0`, where every
-  # line of the frame algebra in `in_frame_full` collapses -- `b + g.L +
+  # line of the frame algebra in `in_frame_full` collapses, so `b + g.L +
   # L^T Q L`, `R^T (g + 2QL)` and `R^T Q R` all reduce to the identity. A
   # mutation deleting the rotation and location handling from
   # `b0_readout_terms` outright passed every assertion above it.
@@ -1218,7 +1218,7 @@ def test_a_degree_two_b0_field_reaches_the_readout_through_simulate_pulseq(
   # nothing combined `concomitant_fields=True` with a degree-2 `b0_field`.
   #
   # Checked on the COEFFICIENTS the readout is handed, not on k-space. A
-  # k-space comparison cannot isolate this -- `b0_field` reaches the solver as
+  # k-space comparison cannot isolate this, because `b0_field` reaches the solver as
   # well, so the two runs differ whether or not the readout adds anything, and
   # a mutation replacing the sum with either operand alone passes it.
   seen = []
@@ -1272,7 +1272,7 @@ def test_the_import_partitions_and_mirrors_every_fixture(seq_path, pulseq_import
     except pytest.skip.Exception as exc:
       # Per CHECK, not per test. A skip inside one helper would otherwise
       # abort the others, so a fixture with no ADC would silently stop being
-      # checked for everything else -- a coverage loss disguised as a skip.
+      # checked for everything else, a coverage loss disguised as a skip.
       skipped.append(f'{fn.__name__}: {exc}')
   if len(skipped) == len(checks):
     pytest.skip('; '.join(skipped))
@@ -1301,7 +1301,7 @@ def test_shape_compression_round_trips(name, waveform):
   """`compress_shape` and `decompress_shape` are inverses.
 
   Reachable only for a Pulseq v1.2/v1.3 file carrying an uncompressed shape,
-  which no bundled fixture is -- so nothing exercised this pair, and the
+  which no bundled fixture is, so nothing exercised this pair, and the
   encoder emitted every value and then every run length instead of
   interleaving them per run. `decompress_shape` raised `Unsuccessful
   unpacking of samples` on a ramp and on a trapezoid; a constant waveform

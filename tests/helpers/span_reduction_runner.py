@@ -3,8 +3,8 @@
 `_holdout_residual` reduces the field's range with MIN/MAX across ranks. A rank
 with no elements has no opinion about that range, so it has to contribute the
 reduction IDENTITIES; contributing 0.0 makes the span straddle zero, and on a
-field that does not -- a shim written as a large uniform offset plus a small
-spatial term, which is how `B0Field` documents them -- the span then picks up
+field that does not, a shim written as a large uniform offset plus a small
+spatial term, which is how `B0Field` documents them, the span then picks up
 the whole offset and the interpolation threshold can no longer fire.
 
 Rank 0 owns every element and rank 1 owns none, which is the shape a graded
@@ -12,7 +12,7 @@ mesh produces on its own at enough ranks.
 
 The second is `is_zero_everywhere`. A per-node field reads its LOCAL slice, so
 a field that is identically zero over one rank's nodes and non-zero elsewhere
-answers differently on different ranks -- and that answer decides which kernel
+answers differently on different ranks, and that answer decides which kernel
 channels the rank passes. Reduced with LAND it must come back live on every
 rank; rank-local it comes back dead on one and the ranks then run different
 physics.

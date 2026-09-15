@@ -1,9 +1,9 @@
-"""Unit tests for :mod:`feelmri.Math` — Fourier helpers and rotations.
+"""Unit tests for :mod:`feelmri.Math`: Fourier helpers and rotations.
 
 Pure-Python; no C++ extensions, no MPI.
 
 Orthogonality and ``det = 1`` used to be swept over 3 axes x 5 angles. That is
-one identity run fifteen times -- and one that cannot discriminate the error
+one identity run fifteen times, and one that cannot discriminate the error
 worth catching, since a transposed or sign-flipped rotation matrix is still
 orthogonal with unit determinant. Only the handedness check can, and it used to
 pin ``Rz`` alone, so ``Rx`` and ``Ry`` were untested. They are pinned below.

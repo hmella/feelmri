@@ -16,13 +16,13 @@ from feelmri.Recon import reconstruct_nufft
 
 # Receive coil sensitivity. `BlochSolver(b1_map=...)` is TRANSMIT: it scales
 # the RF a spin sees and so changes the magnetization itself. This is the other
-# half -- what a coil HEARS from a magnetization that is already fixed. The two
+# half. What a coil HEARS from a magnetization that is already fixed. The two
 # are unrelated: a body coil transmitting while an array receives is the
 # ordinary arrangement.
 #
 # It rides the assembler's `nv` axis, which is free on the signal side, so a
 # magnetization of `n_enc` columns and a map of `n_coils` produce
-# `nv = n_enc * n_coils` with COILS VARYING FASTEST -- one C-order reshape to
+# `nv = n_enc * n_coils` with COILS VARYING FASTEST, one C-order reshape to
 # `(n_enc, n_coils)` recovers both.
 #
 # The point of the example is the COMBINE. Root-sum-of-squares needs no map,
@@ -31,7 +31,7 @@ from feelmri.Recon import reconstruct_nufft
 #     I = sum_c conj(S_c) I_c / sum_c |S_c|^2
 #
 # needs the map and keeps the phase, which is what anything read out of the
-# argument -- velocity, off-resonance, fat/water -- depends on. In a simulation
+# argument: velocity, off-resonance, fat/water, depends on. In a simulation
 # the map is known by construction rather than estimated, so the filter is
 # exact: the same field handed to `set_receive_sensitivity`, sampled on the
 # image grid instead of on the mesh.
@@ -43,7 +43,7 @@ resolution = 48 if FAST_MODE else 96
 
 # Four coils on a ring around the object, each a smooth complex field: a
 # Gaussian falling away from its own centre, times a constant phase that
-# differs from coil to coil. Nothing here is fitted or estimated -- it is
+# differs from coil to coil. Nothing here is fitted or estimated. It is
 # written down, which is what lets the matched filter be exact.
 coil_radius = 0.10
 # The reconstruction is band-limited while the map divided out is not, so
@@ -52,7 +52,7 @@ coil_radius = 0.10
 # real but SMALL: residual shading 1.04x at a 0.13 m coil width and 1.09x at
 # 0.09 m, while the single-coil shading it removes goes from 8.1x to 155x.
 # Real arrays are smooth on the voxel scale, which is what makes the filter --
-# and every scheme that ESTIMATES a map -- work at all.
+# and every scheme that ESTIMATES a map: work at all.
 coil_width = 0.08
 
 
@@ -75,8 +75,8 @@ if __name__ == '__main__':
 
   # 1. A wide flat slab, imaged as a projection through its thickness.
   #
-  # QUADRATURE, not nodal summation. This mesh is GRADED -- 2.5 mm in-plane
-  # inside the vials and up to 10.0 mm in the matrix -- so against a 5 mm voxel
+  # QUADRATURE, not nodal summation. This mesh is GRADED, 2.5 mm in-plane
+  # inside the vials and up to 10.0 mm in the matrix, so against a 5 mm voxel
   # the coarse elements sit at h/dx ~ 2, far outside where a point-mass nodal
   # sum is usable. Measured against a converged degree-10 reference, the nodal
   # setting is 82.7% wrong and covers the disc in speckle that reads as holes
@@ -86,7 +86,7 @@ if __name__ == '__main__':
   # classifies elements by cbrt(VOLUME), which is 1.5-4.5 mm here because the
   # slab is thin, while what matters for imaging is the IN-PLANE diameter of
   # 2.5-10 mm. At 5 mm every element counts as small and nothing is promoted to
-  # `horder` -- that spelling still reads 8.8% against the reference.
+  # `horder`. That spelling still reads 8.8% against the reference.
   #
   # horder=4 is converged: 3 / 4 / 6 give a 0.0105 / 0.0096 / 0.0098 rad phase
   # error in 18 / 27 / 43 s, so 6 costs 63% more for nothing.
@@ -106,7 +106,7 @@ if __name__ == '__main__':
   # A linear ramp of about a radian across the object is what separates the two
   # combines below.
   # 0.6*pi across the half-width, so the ramp spans 1.2*pi end to end and
-  # never wraps -- a ramp that wraps is still recovered correctly but the
+  # never wraps, a ramp that wraps is still recovered correctly but the
   # comparison below would have to unwrap it to say so.
   M0 = 1.0e+7
   reach, phase_gain = 0.10, 0.6*np.pi
@@ -115,13 +115,13 @@ if __name__ == '__main__':
   # SCALED BY M0 HERE, and that is the only thing that sets the image level.
   # `BlochSolver(M0=...)` is the equilibrium LONGITUDINAL magnetization and
   # reaches the Bloch update only through the T1 recovery term
-  # `Mz <- Mz*E1 + (1-E1)*M0` -- there is no M0 in the transverse update at
+  # `Mz <- Mz*E1 + (1-E1)*M0`. There is no M0 in the transverse update at
   # all. This block is `empty=True`, so there is no RF to tip Mz into the
   # transverse plane, `initial_Mz` is 0, and the readout takes Mxy. Measured:
   # raising `BlochSolver(M0=...)` from 1 to 1e10 moves Mz from 5e-10 to 5 and
   # leaves |Mxy| at exactly 1. So M0 is still declared below because it is the
   # honest equilibrium value, but it cannot reach this image except through
-  # here -- which is why changing the constant above only rescales the figure
+  # here, which is why changing the constant above only rescales the figure
   # and moves none of the three checks, all of which are ratios or phases.
   initial_Mxy = (M0 * np.exp(1j * true_phase)).astype(np.complex64)
 
@@ -165,7 +165,7 @@ if __name__ == '__main__':
   # The same acquisition with the map CLEARED: one uniform channel, which is
   # the image the matched filter is supposed to give back. Comparing against it
   # is what turns "the shading looks flatter" into a number, and it costs no
-  # second solve -- the magnetization is unchanged.
+  # second solve, the magnetization is unchanged.
   phantom.set_receive_sensitivity(None)
   phantom.update_magnetization(Mxy[:, 0])
   K_ref = gather_data(phantom.mri_signal(
@@ -215,7 +215,7 @@ if __name__ == '__main__':
               'Roemer {:.4f} rad, RSS {:.4f} rad'.format(err_roemer, err_rss))
     # The MEDIAN, not the worst voxel: the disc has a sharp edge in a FOV only
     # 1.2x its width, so the reconstruction rings there whatever the combine
-    # does -- a uniform disc computed ANALYTICALLY rings identically (ripple
+    # does, a uniform disc computed ANALYTICALLY rings identically (ripple
     # std/mean 0.108 against this simulation's 0.111, agreeing to 1.2% of peak).
     # RSS returns a real magnitude, so its phase is identically zero and it
     # cannot reproduce a ramp at all.
@@ -242,7 +242,7 @@ if __name__ == '__main__':
     # together with it.
     fig, axes = plt.subplots(2, 4, figsize=(16, 8))
     # A COMMON grey scale across the four coils. Autoscaling each panel would
-    # normalise away exactly what they are here to show -- every coil would
+    # normalise away exactly what they are here to show. Every coil would
     # look equally bright and the shading would be invisible.
     vmax = float(np.abs(channels).max())
     for c in range(4):

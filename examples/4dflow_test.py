@@ -236,7 +236,7 @@ if __name__ == '__main__':
   traj_points = traj.points
   traj_times  = traj.times.m_as('ms') - traj.t_start.m_as('ms')
   # Only the uniform part of the scanner field rides on the off-resonance
-  # channel -- it is spatially constant, so no k-space offset can carry it. The
+  # channel. It is spatially constant, so no k-space offset can carry it. The
   # rest of it becomes the shift below, kept apart from `traj_points` because
   # the reconstruction grids on the nominal trajectory and the difference
   # between the two is the geometric distortion.
@@ -268,7 +268,7 @@ if __name__ == '__main__':
       # Elapsed time since the MAGNETIZATION SNAPSHOT, not since the
       # trajectory's own origin. `mri_signal` applies exp(-t/T2*) and
       # exp(-i*phi*t) continuing from the instant the magnetization was
-      # captured, and on a CartesianStack that instant is `t_start` -- the
+      # captured, and on a CartesianStack that instant is `t_start`, the
       # timeline runs from the RF centre and the readout begins where the
       # imaging block ends. Feeding absolute times applies a spurious
       # exp(-t_start/T2*) and, worse, a SPATIALLY VARYING phi*t_start:
@@ -320,11 +320,15 @@ if __name__ == '__main__':
           'heart_rate': 60.0,
           'type': 'DCM'}
 
-  # Export mats
+  # Export mats. Under the test flag these go to examples/output/ so a test
+  # run does not write into the working tree, the same redirection
+  # pulseq_write_epi_tagging.py uses for its .seq.
+  out_dir = script_path/'output' if FAST_MODE else script_path
   if MPI_rank == 0:
-    savemat("4dflow_toolbox_test.mat", {'data': ndata})
+    out_dir.mkdir(parents=True, exist_ok=True)
+    savemat(str(out_dir/'4dflow_toolbox_test.mat'), {'data': ndata})
 
   # Export generated data
-  if MPI_rank==0:
-    with open('4dflow_test.pkl', 'wb') as f:
+  if MPI_rank == 0:
+    with open(out_dir/'4dflow_test.pkl', 'wb') as f:
       pickle.dump({'kspace': K, 'MPS_ori': planning.MPS, 'LOC': planning.LOC, 'traj': traj}, f)

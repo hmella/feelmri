@@ -176,8 +176,8 @@ class MRIPlotter:
 
         Keyboard bindings (configurable via constructor arguments):
 
-        * ``w`` / ``s`` — next / previous slice
-        * ``d`` / ``a`` — next / previous frame
+        * ``w`` / ``s``: next / previous slice
+        * ``d`` / ``a``: next / previous frame
 
         Blocks rank 0 until the window is closed, then synchronizes all
         MPI ranks before returning.

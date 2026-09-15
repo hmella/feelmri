@@ -8,8 +8,8 @@ from conftest import skip_if_pypulseq_too_old
 # Closed-form checks that join the two halves of the dual-path workflow: a
 # solver-produced magnetization, an ADC-derived trajectory, and an answer known
 # on paper. Nothing else in the suite does this. Every other Pulseq test is
-# relative -- FEelMRI against pypulseq's reading of the same file, or native
-# against imported -- so both arms can be wrong identically and stay green.
+# relative: FEelMRI against pypulseq's reading of the same file, or native
+# against imported, so both arms can be wrong identically and stay green.
 #
 # The fixtures are built by tests/data/generate_seq_fixtures.py with zero dead
 # time and hard (non-selective) pulses, so the transverse magnetization a pulse
@@ -38,7 +38,7 @@ def cube(tmp_path_factory):
 
     Same assembler settings as
     test_fe_element_ordering.py::test_cube_signal_at_k0_equals_volume, which
-    pins Re S(0) == volume to 1e-4 -- but bypasses the sequence entirely.
+    pins Re S(0) == volume to 1e-4, but bypasses the sequence entirely.
     """
     pytest.importorskip('mpi4py')
     pytest.importorskip('pymetis')
@@ -72,7 +72,7 @@ def test_t1_recovery_through_the_import(cube):
     M0(1 - e^-1).
 
     Relaxation under a constant field composes exactly step by step, so this is
-    insensitive to how coarse the raster is -- what it does catch is raster
+    insensitive to how coarse the raster is. What it does catch is raster
     that is MISSING. A half-open arange used to drop each block's final
     interval, leaving a quarter to a third of the sequence unintegrated, which
     lands straight on this number.
@@ -166,7 +166,7 @@ def test_spin_echo_refocuses_off_resonance(cube):
     """90 - tau - 180 - tau: at the echo the off-resonance phase is refocused
     whatever its value.
 
-    A uniform off-resonance costs no magnitude -- every spin turns together --
+    A uniform off-resonance costs no magnitude. Every spin turns together --
     so the statement lives in the phase: arg S at the echo is independent of
     dB0, while away from the echo it is not. The second half is the negative
     control, without which the test would pass on a solver that simply ignored
@@ -179,7 +179,7 @@ def test_spin_echo_refocuses_off_resonance(cube):
     # The off-resonance has to reach the SOLVER, as delta_B in mT: only a field
     # the pulses actually precess in can be refocused by one. The phantom's
     # phi_dB0 is an assembler-side demodulation term applied after the fact, so
-    # a 180 cannot touch it -- driving this test through phi_dB0 measures
+    # a 180 cannot touch it: driving this test through phi_dB0 measures
     # nothing but exp(i phi t).
     dB_mT = 1e-3
     # The same field must be described to BOTH halves: delta_B in mT for the
@@ -223,7 +223,7 @@ def test_spin_echo_refocuses_off_resonance(cube):
         f'off-resonance phase is not refocused at the echo: {at_echo:.4f} rad')
     assert away > 5 * max(at_echo, 1e-3), (
         f'phase away from the echo ({away:.4f} rad) is not distinguishable '
-        f'from the echo ({at_echo:.4f} rad) -- the field may be ignored')
+        f'from the echo ({at_echo:.4f} rad), the field may be ignored')
 
 
 @pytest.mark.parametrize('name,nominal_deg', [
@@ -235,7 +235,7 @@ def test_imported_rf_delivers_its_nominal_flip(cube, name, nominal_deg):
 
     The gradients are dropped first: with the slice-select lobe on, a phantom of
     finite thickness samples the slice PROFILE, and the mean Mz then reads far
-    below the nominal flip -- 8.57 of 10 deg on gre_v15, 73.7 of 90 on se_v15.
+    below the nominal flip on both fixtures.
     That is correct physics and not what this test is about; measuring it
     without dropping the gradients reads those numbers as a 14-18% error.
 
@@ -244,7 +244,7 @@ def test_imported_rf_delivers_its_nominal_flip(cube, name, nominal_deg):
     on its own timings rather than on the raster the solver steps over:
 
     * The dt_rf grid was laid on [0, dur] while an imported pulse lives on
-      [delay, delay + dur] -- 0.52% of flip.
+      [delay, delay + dur], which costs a fraction of a percent of flip.
     * The kernel charges each interval the field at its END, so the interval
       arriving at a pulse edge was billed full RF amplitude however long it
       was; on ppm_v15 the raster jumped 0 -> 0.1 ms onto the pulse start,
@@ -275,7 +275,7 @@ def _column_along_z(path, half=8e-3, n=240, width=2e-4):
     """A thin column of spins along z, centred on z = 0.
 
     The slice axis has to be resolved to see a slice profile, and the shared
-    `cube` fixture is 4 mm across a 5 mm nominal slice -- too coarse, which is
+    `cube` fixture is 4 mm across a 5 mm nominal slice, too coarse, which is
     why `test_imported_rf_delivers_its_nominal_flip` strips the gradients
     instead of resolving the profile.
     """
@@ -300,7 +300,7 @@ def test_slice_profile_matches_the_small_tip_transform(tmp_path):
     In the small-tip regime `Mxy(z) ~ FT{B1}(gammabar * Gz * z)`. This is the
     single most load-bearing untested behaviour of an imported `.seq`: it is
     what makes a slice a slice, and getting it wrong is invisible to every
-    other test in the suite -- `test_imported_rf_delivers_its_nominal_flip`
+    other test in the suite. `test_imported_rf_delivers_its_nominal_flip`
     deletes the gradients precisely so the profile cannot contaminate its mean,
     and `test_bloch_magnus.py` compares two numerical methods to a fine-dt
     self-reference rather than to an analytic profile.
@@ -352,7 +352,7 @@ def test_slice_profile_matches_the_small_tip_transform(tmp_path):
         f'the excited profile departs from the small-tip transform by '
         f'{worst:.3e} of peak')
 
-    # The peak of a small-tip profile is sin(alpha) -- gre_v15 is a 10 deg pulse.
+    # The peak of a small-tip profile is sin(alpha), and gre_v15 is a 10 deg pulse.
     assert abs(profile.max() - np.sin(np.radians(10.0))) < 5e-3, (
         f'peak |Mxy| is {profile.max():.5f}, expected sin(10 deg) = '
         f'{np.sin(np.radians(10.0)):.5f}')
@@ -369,7 +369,7 @@ def test_spoiled_steady_state_matches_the_closed_form(cube):
     `Mz = M0 (1 - E1) / (1 - E1 cos a)`.
 
     Exercises flip angle, T1 and TR together over 80 repetitions, which no
-    other test does -- the next longest fixture is 4 TR, nowhere near steady
+    other test does, the next longest fixture is 4 TR, nowhere near steady
     state at TR/T1 = 20/500.
     """
     from feelmri.Bloch import BlochSolver
@@ -397,7 +397,7 @@ def test_cpmg_echo_train_decays_as_exp_minus_t_over_t2(cube):
     """Successive spin echoes fall as `exp(-n*TE/T2)`.
 
     A CPMG train refocuses static off-resonance at every echo, so what is left
-    is pure T2 -- and it is the only fixture with more than one refocusing
+    is pure T2, and it is the only fixture with more than one refocusing
     pulse per excitation, the case where a forward gradient-moment reference
     from the excitation is invalid because `calculate_kspace` negates k at each
     180.
@@ -431,7 +431,7 @@ def test_pod_translation_obeys_the_shift_theorem(cube):
     """A rigid translation must appear in k-space as exactly a linear phase.
 
     `S_moved(k) = S_static(k) * exp(-i 2 pi k . dx)` with |S| unchanged. This is
-    the only coverage of motion through the Pulseq path -- `simulate_pulseq`
+    the only coverage of motion through the Pulseq path, since `simulate_pulseq`
     and `BlochSolver` both take a trajectory and no test passes one.
     """
     from feelmri.Motion import POD
@@ -578,8 +578,8 @@ def test_t2_prime_readout_is_reproduced_per_sub_spin(cube):
 
   `cpmg_v15` refocuses static dephasing at every echo, so T2' can change the
   signal BETWEEN echoes but must not change the echoes themselves. It used to:
-  the snapshot is taken at the coherence anchor -- just after the 180, where
-  the ensemble is maximally dephased -- and the assembler could only replay
+  the snapshot is taken at the coherence anchor, just after the 180, where
+  the ensemble is maximally dephased, and the assembler could only replay
   exp(-t/T2) from there, so every echo came out scaled by
   exp(-0.5*(tau/T2')^2) = 0.82 at T2' = 8 ms. `simulate_pulseq` now evaluates
   the readout per sub-spin and weight-sums.
@@ -614,7 +614,7 @@ def test_t2_prime_readout_is_reproduced_per_sub_spin(cube):
     f'{np.exp(-0.5 * (5.0 / 8.0) ** 2):.4f}, which is what this guards against')
 
   # The assertion above is satisfied by a solver that IGNORES t2_prime
-  # entirely -- with_bins would then be reference and the ratio exactly 1.0.
+  # entirely: with_bins would then be reference and the ratio exactly 1.0.
   # So also show the ensemble is there and that using it is what recovers the
   # echo: replaying a single exp(-t/T2) from the collapsed snapshot, which is
   # what the old code did, must land on the closed-form attenuation.
@@ -641,7 +641,7 @@ def test_the_bin_readout_leaves_the_phantom_on_the_collapsed_state(cube):
   """The per-sub-spin readout drives `update_magnetization` once per bin, so it
   has to put the collapsed state back when it is done.
 
-  It did not, and the phantom came back holding the LAST bin -- a tail of the
+  It did not, and the phantom came back holding the LAST bin, a tail of the
   quadrature carrying weight ~1e-16. Anything the caller evaluated afterwards
   read that: on cpmg_v15 at T2' = 8 ms, K = 32, S(0) was 1.133x too large and
   had a real part where the correct value is purely imaginary.
@@ -673,7 +673,7 @@ def test_the_readout_time_origin_is_the_anchor_block_end(cube):
   anchor block, while the sub-ensemble's dephasing clock effectively starts at
   the CENTRE of the excitation pulse. This pins the size of that gap.
 
-  On `fid_v15` -- a 0.2 ms hard pulse, anchor at 50.2 ms -- the readout
+  On `fid_v15`, a 0.2 ms hard pulse, anchor at 50.2 ms, the readout
   lineshape departs from its closed form by 5.7e-3 as shipped, and a +0.127 ms
   origin shift collapses it to 1.3e-5. Half the pulse is 0.100 ms; the rest is
   the raster's end-of-interval bias.
@@ -721,7 +721,7 @@ def test_the_readout_time_origin_is_the_anchor_block_end(cube):
 def test_the_readout_window_carries_its_own_concomitant_trajectory(cube):
   """`ReadoutWindow.maxwell` is the concomitant counterpart of `kspace`, and
   it obeys the same anchor rule: measured from the snapshot, so whatever plays
-  between the anchor and the first ADC sample -- a prephaser -- is counted.
+  between the anchor and the first ADC sample, a prephaser, is counted.
 
   Checked against an independent integral rather than against itself, and the
   squared columns are integrals of squares so they cannot decrease.
@@ -778,7 +778,7 @@ def test_simulate_pulseq_carries_a_receive_map_onto_the_coil_axis(cube, bins):
   are the single-coil signal scaled by that coil, and the phantom comes back
   holding whatever map it had before.
 
-  A UNIFORM per-coil scale is what makes the prediction exact -- the whole
+  A UNIFORM per-coil scale is what makes the prediction exact, the whole
   window is then one complex multiple of the single-coil run, at every sample,
   which a fold that mixed nodes or reordered columns cannot reproduce. That the
   map is applied PER NODE is pinned by the analytical tests; what is new here
@@ -788,7 +788,7 @@ def test_simulate_pulseq_carries_a_receive_map_onto_the_coil_axis(cube, bins):
   the readout is replayed once per sub-spin and weight-summed, so the map is
   folded inside a loop rather than once. It needs no special handling because
   the fold happens in `update_magnetization` and the weighted sum is linear in
-  the map -- which is a claim, and this measures it.
+  the map, which is a claim, and this measures it.
   """
   from feelmri.PulseqAdapter import simulate_pulseq
 
@@ -807,7 +807,7 @@ def test_simulate_pulseq_carries_a_receive_map_onto_the_coil_axis(cube, bins):
   assert scale > 0
 
   # One coil at unity is the exactness check: the fold must be a no-op, and it
-  # is -- 0.000e+00, not a tolerance. That separates the fold from the
+  # is: 0.000e+00, not a tolerance. That separates the fold from the
   # assembler's own arithmetic, which is what the three-coil case then carries.
   _static(phantom, 60.0 if bins else 1e9)
   unity = np.asarray(simulate_pulseq(
@@ -830,7 +830,7 @@ def test_simulate_pulseq_carries_a_receive_map_onto_the_coil_axis(cube, bins):
   # three columns at once, so `-ffast-math` groups the FMAs differently than at
   # nv = 1. Measured 2.6e-06 / 6.4e-07 / 1.8e-06 on the three coils here and
   # 2.9e-06 / 7.3e-07 / 2.2e-06 on the sub-ensemble path, against 0.000e+00 for
-  # the nv = 1 case above -- float32 reassociation, the same class the repo
+  # the nv = 1 case above, float32 reassociation, the same class the repo
   # already carries for k.x alone, and not the fold.
   for c, s in enumerate(scales):
     worst = float(np.abs(multi[..., c] - s * single[..., 0]).max() / scale)

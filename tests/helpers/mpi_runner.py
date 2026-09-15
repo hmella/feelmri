@@ -65,7 +65,7 @@ def main(argv=None):
 
   if not os.path.exists(args.mesh):
     raise FileNotFoundError(
-      f'mesh fixture missing: {args.mesh} — create it from the test '
+      f'mesh fixture missing: {args.mesh}. Create it from the test '
       f'before invoking this runner.'
     )
 

@@ -21,7 +21,7 @@ from feelmri.Phantom import FEMPhantom
 #
 # The consequence is NOT simply "more b1, more signal". After a single
 # excitation the transverse magnetization is sin(alpha), which peaks at 90 deg
-# and falls again beyond it -- so with a map that overshoots at the centre, the
+# and falls again beyond it, so with a map that overshoots at the centre, the
 # brightest signal sits on a RING where |b1| = 1, not where the transmit field
 # is strongest. This example shows that ring, and the matching failure of a
 # nominal 180 deg inversion everywhere off that ring.
@@ -38,7 +38,7 @@ phase_rim = 0.80
 
 # A hard pulse, so the delivered flip is gamma * B1 * dur with nothing else in
 # it, and NO gradient. Measuring a flip with a slice-select lobe on samples the
-# slice profile instead and reads far below nominal -- that is physics, not a
+# slice profile instead and reads far below nominal. That is physics, not a
 # defect, but it is not what this example is about.
 pulse_duration = 0.5
 
@@ -53,7 +53,7 @@ if __name__ == '__main__':
   phantom.set_assembler(voxel_size=1e3, lorder=1, horder=1,
                         nodal_approximation=True, lumped=True)
 
-  # 2. Build the map on the LOCAL nodes -- b1_map is indexed by local node, the
+  # 2. Build the map on the LOCAL nodes, since b1_map is indexed by local node, the
   # same convention delta_B uses, so under MPI each rank supplies its own share.
   nodes = phantom.local_nodes.astype(np.float64)
   radius = np.hypot(nodes[:, 0], nodes[:, 1])
@@ -118,7 +118,7 @@ if __name__ == '__main__':
 
   # The signal peak is NOT where the transmit field peaks. The node is picked
   # GLOBALLY: `radius` and `Mxy_90` are this rank's slice, so an argmax over
-  # them names a different node on every rank -- which moved the reported
+  # them names a different node on every rank, which moved the reported
   # centre inversion below from -0.588 to -0.691 at 8 ranks.
   def _extreme(key, take_max):
     i = int(np.argmax(key) if take_max else np.argmin(key))
@@ -135,7 +135,7 @@ if __name__ == '__main__':
             'runs {:.1f} to {:.1f} deg'.format(
               b1_centre, b1_rim, 90*b1_centre, 90*b1_rim))
   MPI_print('Brightest signal sits at r = {:.3f} m of {:.3f} m, where |b1| = 1 '
-            'and the flip is 90 deg -- not at the centre'.format(
+            'and the flip is 90 deg, not at the centre'.format(
               peak_signal_r, r_max))
   # The point of the example: the signal peak is NOT the transmit peak.
   ring = r_max * np.sqrt((b1_centre - 1.0) / (b1_centre - b1_rim))

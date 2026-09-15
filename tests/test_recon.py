@@ -14,7 +14,7 @@ def _fields(n_coils=4, shape=(6, 5), seed=7):
     """A complex map and a complex object, both with structure in the PHASE.
 
     The map MUST be complex. A real map makes `conj(S)` and `S` the same thing,
-    so dropping the conjugate -- which doubles the object's phase error -- is
+    so dropping the conjugate, which doubles the object's phase error, is
     invisible; that is the one mistake this combination is prone to.
     """
     rng = np.random.default_rng(seed)
@@ -30,7 +30,7 @@ def _fields(n_coils=4, shape=(6, 5), seed=7):
 @pytest.mark.parametrize('n_coils', [2, 8])
 def test_roemer_inverts_a_known_sensitivity_exactly(n_coils):
     """`I_c = S_c m` is what the forward model produces, so the matched filter
-    returns `m` itself -- magnitude shading and coil phase both removed."""
+    returns `m` itself, with magnitude shading and coil phase both removed."""
     S, m = _fields(n_coils)
     got = _combine_channels(S * m[None], 'roemer', S)
     assert np.abs(got - m.astype(np.complex64)).max() < 1e-5 * np.abs(m).max()
@@ -41,7 +41,7 @@ def test_roemer_needs_the_conjugate_of_the_map():
 
     Measured on this map: 3.03 rad of worst-case phase error against 3.5e-08
     for the correct form, plus 52% on the magnitude. A REAL map shows neither,
-    since `conj(S) == S` there -- which is why the fixture is complex, and why
+    since `conj(S) == S` there, which is why the fixture is complex, and why
     a real-valued test of this estimator would pin nothing.
     """
     S, m = _fields(3)
@@ -93,7 +93,7 @@ def test_none_and_rss_pass_a_single_channel_through_where_roemer_divides():
 def test_roemer_zeroes_the_region_no_coil_can_see():
     """Where the denominator is at the working-precision floor the division is
     meaningless rather than merely noisy, so it returns zero instead of a large
-    complex number. Above the floor it is left alone -- the 1/|S| amplification
+    complex number. Above the floor it is left alone, the 1/|S| amplification
     is the estimator's physics and the caller's choice of map."""
     S, m = _fields(2)
     S[:, 0, 0] = 0.0
@@ -146,7 +146,7 @@ def test_the_combine_arguments_reach_both_dispatch_branches(monkeypatch,
     each. Neither had a test.
 
     What is checked is the plumbing: the channel axis must arrive LEADING, the
-    map must arrive unchanged, and the image shape must match it -- which is
+    map must arrive unchanged, and the image shape must match it, which is
     what `_combine_channels` then requires of them.
     """
     from feelmri import Recon

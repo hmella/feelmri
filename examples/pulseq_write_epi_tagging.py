@@ -67,7 +67,7 @@ def main(
     ramp_sampling : bool, optional
         Sample during the readout ramps instead of only the flat top. The
         ramps then contribute k-space coverage rather than dead time, which
-        shortens the echo train by about 40% -- worth having when the train
+        shortens the echo train by about 40%, worth having when the train
         is long against T2*. The samples are no longer evenly spaced in k,
         which the NUFFT reconstruction handles. Default True; False restores
         the flat-top-only readout.

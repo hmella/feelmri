@@ -34,7 +34,7 @@ from feelmri.PulseqAdapter import maxwell_moments, maxwell_phase_coefficients
 # encoding IS a bipolar pair.
 
 # BOTH HALVES CARRY IT. The solver integrates Bc up to the magnetization
-# snapshot -- prep, slice select, velocity-encoding lobes -- and the
+# snapshot: prep, slice select, velocity-encoding lobes, and the
 # assembler applies the rest during the ADC window, from a second trajectory
 # of time-integrated gradient products that factorises the same way `k` does
 # (`maxwell_moments` / `maxwell_phase_coefficients`, wired into `mri_signal`
@@ -156,7 +156,7 @@ if __name__ == '__main__':
     return np.angle(Mxy[:, 0])
 
   MPI_print('Note: Bc is carried through the blocks the solver integrates. '
-            'It is NOT applied during an ADC window -- see the scope note at '
+            'It is NOT applied during an ADC window. See the scope note at '
             'the top of this file.')
 
   control = phase_after_bipolar(concomitant=False)
@@ -168,7 +168,7 @@ if __name__ == '__main__':
   #   phi = -gamma * (r_perp^2 / 4) / (2*B0) * integral(Gz^2 dt)
   #
   # The SECOND moment is what enters, and a ramp contributes G^2*rise/3, not
-  # the G^2*rise/2 a trapezoidal rule over the corner list would give -- G^2 is
+  # the G^2*rise/2 a trapezoidal rule over the corner list would give, because G^2 is
   # quadratic in time along a ramp. On this waveform the two differ by 3.1%,
   # which is far larger than the solver's own error.
   second_moment = 2 * g_amp**2 * (g_flat + 2*g_rise/3.0)
@@ -213,7 +213,7 @@ if __name__ == '__main__':
 
   # 6. Show the phase across the slab. The nodes are an unstructured cloud, so
   # they are resampled onto a regular grid for display and drawn as a map with
-  # iso-phase contours -- the bull's-eye those contours form is the signature
+  # iso-phase contours, the bull's-eye those contours form is the signature
   # of a term quadratic in position. Under MPI each rank holds a subset of the
   # nodes, so this draws rank 0's own share.
   if MPI_rank == 0:

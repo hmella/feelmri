@@ -1,8 +1,8 @@
 """CLI used by ``tests/test_mpi_equivalence.py``.
 
 Runs one Bloch simulation with ALL THREE solver features added on the
-``realism`` branch active at once -- concomitant fields, a per-node B1+ map and
-a per-node T2' sub-ensemble -- then gathers Mxy / Mz to rank 0 in global node
+``realism`` branch active at once: concomitant fields, a per-node B1+ map and
+a per-node T2' sub-ensemble. It then gathers Mxy / Mz to rank 0 in global node
 order and writes a ``.npz``. Invoked both directly and under ``mpirun -n 2``;
 the test asserts the two agree.
 
@@ -42,7 +42,7 @@ GRADIENT_MS = 3.0
 
 
 def _build_sequence(scanner):
-  """90 -- gradient -- tau -- 180 -- tau. The gradient block is what makes the
+  """90, gradient, tau, 180, tau. The gradient block is what makes the
   concomitant term do anything; the 180 is what makes the T2' ensemble do
   anything."""
   seq = Sequence()
@@ -88,7 +88,7 @@ def _run_refusal_case(case, phantom, scanner, n_local, globals_):
         g[globals_ == 0, 1] = np.nan
         phantom.set_b0_gradient(g)
     elif case == 'no_assembler':
-        # `set_assembler` reached on rank 0 only -- the shape the repo's own
+        # `set_assembler` reached on rank 0 only, the shape the repo's own
         # rank-0-only mesh idiom invites. Whether `self.assembler` exists is
         # rank-local state, and the guard's first arm raised bare while its
         # second arm was the collective that reports such things.
@@ -140,7 +140,7 @@ def _run_refusal_case(case, phantom, scanner, n_local, globals_):
                   local_to_global_nodes=g2l)
         phantom._signal_modes(pod)
     elif case == 'signal_modes_weights_disagree':
-        # The structural check passes -- the attribute is there -- while the
+        # The structural check passes, the attribute is there, while the
         # decomposition is still per rank. The INVARIANT is what catches it:
         # `_signal_modes` redistributes the MODES and nothing redistributes
         # the WEIGHTS, so the weights have to be identical on every rank.
@@ -215,7 +215,7 @@ def main(argv=None):
   nodes = phantom.local_nodes.astype(np.float64)
   # GLOBAL, not per-rank. A rank-local maximum makes the maps a function of
   # how the mesh was cut, so the two runs would be comparing different physical
-  # fields -- which on this symmetric rod happens to agree at exactly 2 ranks
+  # fields, which on this symmetric rod happens to agree at exactly 2 ranks
   # and stops agreeing at 3.
   reach = float(MPI_comm.allreduce(float(np.abs(nodes[:, 0]).max()),
                                    op=MPI.MAX)) or 1.0
@@ -230,7 +230,7 @@ def main(argv=None):
     # Every rank reports what happened to IT, and the caller counts the
     # markers. Counting tracebacks does not work: one traceback contains the
     # word "Error" twice, so a "at least two ranks raised" assertion passes on
-    # a single-rank raise -- which is precisely the bug under test. A rank that
+    # a single-rank raise, which is precisely the bug under test. A rank that
     # blocks in a collective prints neither marker and the timeout catches it.
     if args.refusal_case in ('signal_modes_per_rank',
                              'signal_modes_weights_disagree'):
@@ -241,7 +241,7 @@ def main(argv=None):
     globals_ = np.asarray(phantom.local_to_global_nodes)
     try:
       _run_refusal_case(args.refusal_case, phantom, scanner, n_local, globals_)
-    except Exception as exc:                       # noqa: BLE001 -- reporting
+    except Exception as exc:                       # noqa: BLE001, reporting
       print(f'RANK {MPI_rank} REFUSED {type(exc).__name__}: {exc}', flush=True)
       return 1
     print(f'RANK {MPI_rank} ACCEPTED', flush=True)
@@ -249,7 +249,7 @@ def main(argv=None):
 
 
   # A per-rank field built against the wrong node count is the realistic way
-  # this goes wrong -- under dual partitioning the two layouts have different
+  # this goes wrong, under dual partitioning the two layouts have different
   # per-rank counts, so an array can match on one rank and not on another.
   delta_B = np.zeros((nodes.shape[0], 1))
   if args.poison_rank == MPI_rank:

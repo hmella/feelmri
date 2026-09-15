@@ -19,8 +19,8 @@ namespace py = pybind11;
 // Return tuple: (Mxy, Mz, Bz_old_final, rf_old_final).
 //   Mxy            (n_pos, n_out) complex
 //   Mz             (n_pos, n_out) real
-//   Bz_old_final   (n_pos,) real         -- per-node Bz at the last time step, for cross-block Magnus state
-//   rf_old_final   scalar complex        -- shared RF at the last time step
+//   Bz_old_final   (n_pos,) real        , per-node Bz at the last time step, for cross-block Magnus state
+//   rf_old_final   scalar complex        : shared RF at the last time step
 //
 // n_out is 1 by default: the magnetisation is advanced in place through two
 // rolling per-node buffers and only the final state is materialised, because
@@ -42,7 +42,7 @@ using MagnetizationState = std::tuple<
 //   Order = 4 -> 4th-order Magnus (M2 result plus -dt^2/12 commutator term).
 //
 // UniformRelax selects the relaxation-exponential strategy. When T1 and T2 are
-// constant across nodes -- the case for every phantom built from scalar T1/T2 --
+// constant across nodes, the case for every phantom built from scalar T1/T2 --
 // exp(-dt/T1) and exp(-dt/T2) are scalars, so a change of time step costs two
 // std::exp calls instead of 2 * n_pos of them. This matters because a Pulseq /
 // apodized-sinc raster is not uniform in dt: the free-running imaging block has
@@ -86,7 +86,7 @@ MagnetizationState<T> solve_mri_impl(
   const int n_pos = r0.rows();
   const int n_time = rf_all.size();
   // Loop-invariant: zero disables the concomitant term exactly. A NEGATIVE B0
-  // is not a sentinel, it is malformed input -- treating it as "off" made an
+  // is not a sentinel, it is malformed input. Treating it as "off" made an
   // explicit concomitant_fields=True a silent no-op.
   //
   // Both tests read the IEEE bit pattern rather than comparing the float.
@@ -129,7 +129,7 @@ MagnetizationState<T> solve_mri_impl(
         "solve_mri: conc_offset must have 0, 1 or n_time entries");
   }
   // `Bc_off` is read only inside the concomitant branch, which `B0 > 0`
-  // selects -- so with `B0 <= 0` a caller's offset is SILENTLY DISCARDED
+  // selects, so with `B0 <= 0` a caller's offset is SILENTLY DISCARDED
   // rather than applied or refused. `BlochSolver` never reaches that state,
   // but only because two independent gates happen to line up, and this is a
   // public entry point. Refused by name instead.
@@ -144,7 +144,7 @@ MagnetizationState<T> solve_mri_impl(
   // A static lab-frame field that is quadratic in position: six coefficients
   // over x^2, y^2, z^2, xy, xz and yz, in the frame `curr` lives in. They do
   // not follow the gradient, so unlike the concomitant form they are
-  // solve-invariant and cost no memory at all -- which is why a polynomial
+  // solve-invariant and cost no memory at all, which is why a polynomial
   // field is carried exactly rather than expanded per node.
   const bool has_field_quad = (field_quad.size() != 0);
   if (has_field_quad && field_quad.size() != 6) {
@@ -160,7 +160,7 @@ MagnetizationState<T> solve_mri_impl(
 
   // A per-node field gradient: the first-order Eulerian expansion of a field
   // no polynomial represents. RowMajor to match `r0` and `curr`, so it is one
-  // contiguous 3-float stream per node read alongside the position -- the
+  // contiguous 3-float stream per node read alongside the position, the
   // ColMajor spelling `static_lin` uses would give three strided streams and
   // forfeit the locality this term's cost rests on.
   const bool has_node_lin = (node_lin.rows() != 0);
@@ -300,8 +300,8 @@ MagnetizationState<T> solve_mri_impl(
 
     // With no B1 the effective field is purely longitudinal, the rotation
     // axis is z, and the Cayley-Klein off-diagonal beta is exactly zero. The
-    // transverse algebra -- a square root, a complex division and four
-    // complex products per node -- then contributes nothing, so it is
+    // transverse algebra, a square root, a complex division and four
+    // complex products per node, then contributes nothing, so it is
     // skipped. The dropped terms are exact zeros (x + 0 == x, a2 - 0 == a2),
     // which is why the reduced update still forms a2 the same way instead of
     // assuming |alpha|^2 == 1: the rotation is unitary in exact arithmetic
@@ -319,7 +319,7 @@ MagnetizationState<T> solve_mri_impl(
 
         // Transmit field seen by THIS node. b1 is time-invariant, so
         // scaling both trapezoid endpoints is identical to scaling the
-        // assembled rotation -- and doing it here means the order-4 terms
+        // assembled rotation, and doing it here means the order-4 terms
         // pick up the right power automatically: theta_xy is linear in RF
         // and takes b1, theta_z's commutator is bilinear and takes |b1|^2.
         // Scaling an assembled term once by b1 would get the second wrong.
@@ -352,10 +352,10 @@ MagnetizationState<T> solve_mri_impl(
         // The `else` branches are textually unchanged but NOT bit-identical,
         // and unlike `static_lin` they cannot be: a position-dependent term
         // cannot be hoisted out of the node loop, so the loop itself is
-        // recompiled and -ffast-math contracts its FMAs differently. Measured
-        // against the build that predates this term, 6 of the 24 A/B cases
-        // move, worst 1.521e-06, ALL of them float32 -- float64 is unchanged at
-        // 3.366e-15, which is what identifies it as reassociation rather than a
+        // recompiled and -ffast-math contracts its FMAs differently. Against the
+        // build that predates this term only float32 cases move, while float64
+        // stays at machine epsilon, which identifies it as reassociation
+        // rather than a
         // change in the algebra. It also sits an order below the solver's own
         // float32-vs-float64 gap of 1.2e-05. A compile-time branch was tried
         // and is worse on both counts (3.175e-06, and 96 node-loop
@@ -541,7 +541,7 @@ MagnetizationState<T> solve_mri_impl(
       }
     };
 
-    // Both branches are selected once per time step, never per node -- the same
+    // Both branches are selected once per time step, never per node, the same
     // shape as the rf-free hoist. `concomitant` is loop-invariant, so with the
     // feature off the Maxwell arithmetic is not emitted at all rather than
     // computed and multiplied by zero.

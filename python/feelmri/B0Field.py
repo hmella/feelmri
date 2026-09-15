@@ -4,7 +4,7 @@ The scanner-fixed B0 field.
 :class:`B0Field` is main-field inhomogeneity: it belongs to the bore, so a
 moving spin samples it at its CURRENT position. That is what separates it from
 ``delta_B`` / ``phi_dB0``, which are one value per NODE and travel with the
-material point -- right for chemical shift and susceptibility, wrong for a
+material point, right for chemical shift and susceptibility, wrong for a
 shim.
 
 The field is given as an expression in SCANNER coordinates and expanded once,
@@ -14,8 +14,8 @@ back to a per-node Taylor expansion for anything a polynomial cannot carry.
 simulation take from it.
 
 The module and the class share a name, as ``datetime`` does. ``feelmri.B0Field``
-resolves to the CLASS -- ``feelmri/__init__.py`` binds it after the submodule
-exists -- so ``from feelmri import B0Field`` and
+resolves to the CLASS, because ``feelmri/__init__.py`` binds it after the submodule
+exists, so ``from feelmri import B0Field`` and
 ``from feelmri.B0Field import B0Field`` both give you the class.
 """
 import collections
@@ -57,20 +57,20 @@ class B0Field:
 
     This is the lab-frame counterpart of ``BlochSolver(delta_B=)`` and
     ``FEMPhantom.set_static_fields(phi_dB0=)``. Those are one value per mesh
-    node, frozen onto the node, so they travel with the tissue -- right for
+    node, frozen onto the node, so they travel with the tissue, right for
     chemical shift and local susceptibility, wrong for a shim residual or a
     main-field imperfection, which stay where the magnet put them. A spin that
     moves through this field samples a different value; a spin that moves
     through ``delta_B`` does not.
 
     The field is given as an expression of position and carried as whichever
-    of three representations it actually needs -- :attr:`kind` says which:
+    of three representations it actually needs. :attr:`kind` says which:
 
         'uniform' / 'linear'  dB0(x) = c0 + g . x                    [mT]
         'polynomial'          every monomial up to :attr:`MAX_ORDER`
         'nodal'               one value and one gradient PER NODE
 
-    with ``x`` in metres, in the SCANNER frame, measured from isocentre -- not
+    with ``x`` in metres, in the SCANNER frame, measured from isocentre, not
     the imaging frame, and not relative to the slice location.
     :meth:`in_frame` converts to whatever frame a caller works in, and refuses
     a per-node field, which has no closed form to convert.
@@ -115,7 +115,7 @@ class B0Field:
     #: search stops there rather than at `rtol`. The floor is sqrt(eps), not
     #: eps: the normal equations square the condition number, the same reason
     #: `pod-motion.md` records a 1.5e-8 floor for the method of snapshots.
-    #: Measured separation is seven orders -- a true polynomial lands at 0 to
+    #: Measured separation is seven orders, a true polynomial lands at 0 to
     #: 1e-8, the nearest miss (a degree-4 field fitted at degree 3) at 4.7e-01.
     # Kept as the documented floor of the fit rather than as a stopping rule:
     # the normal equations square the condition number, so a residual below
@@ -163,7 +163,7 @@ class B0Field:
         # The mirrors have to AGREE with the vector, not merely be the right
         # length. `__call__` evaluates the coefficients while `in_frame_full`
         # and `phi_offset` read the mirrors, so a hand-built field could answer
-        # 0 at a point and still report a 5 mT offset -- two different fields
+        # 0 at a point and still report a 5 mT offset, two different fields
         # from one object, each self-consistent on its own accessors.
         keep = min(4, n_terms)
         mirrors = np.concatenate(([self.offset_mT], g))[:keep]
@@ -174,14 +174,14 @@ class B0Field:
                 f"gradient given alongside them {mirrors}. They describe the "
                 f"same field and are read by different callers.")
         # Per-node fallback, set by `on_phantom` when no polynomial fits. The
-        # stamp records which node set it was built on -- a per-node array
+        # stamp records which node set it was built on, a per-node array
         # means nothing under a different partition or ordering.
         self._nodal_mT = None
         self._nodal_grad = None
         self._nodal_stamp = None
         # How much of the field varies WITHIN one element, in mT. A per-node
         # field reaches the readout through the shape functions, so whatever it
-        # does between nodes is not represented at all -- a separate limit from
+        # does between nodes is not represented at all, a separate limit from
         # the Taylor one, and the only error left on the static-exact path.
         # Set by `on_phantom`; compare it against the field's own amplitude.
         self.mesh_residual_mT = 0.0
@@ -230,7 +230,7 @@ class B0Field:
             raise NotImplementedError(
                 f"B0Field.quadratic_mT_per_m2: this field is degree "
                 f"{self.order}, and monomials 4:10 of it are not its quadratic "
-                f"form -- returning them would drop every higher term "
+                f"form. Returning them would drop every higher term "
                 f"silently. Read `coefficients` instead.")
         out = np.zeros(6, dtype=np.float64)
         if self.order >= 2:
@@ -246,7 +246,7 @@ class B0Field:
             # aborts a strict subset and the rest block at the next collective.
             peak = (float(np.abs(self._nodal_mT).max())
                     if self._nodal_mT.size else 0.0)
-            resid = ('not measured -- no element connectivity'
+            resid = ('not measured. No element connectivity'
                      if self.mesh_residual_mT is None
                      else f"{self.mesh_residual_mT:.3g} mT")
             return (f"B0Field(kind='nodal', nodes={self._nodal_mT.size}, "
@@ -262,20 +262,20 @@ class B0Field:
         Returns ``(dk, phi_rate, maxwell)``: the k-space offset to ADD to each
         sample, the uniform part as an off-resonance RATE in rad/ms, and
         ``(N, 6)`` quadratic coefficients to add to whatever the concomitant
-        term contributes -- ``None`` below degree 2.
+        term contributes, and ``None`` below degree 2.
 
         `Trajectory.b0_terms` and `PulseqAdapter.b0_readout_terms` are the two
         callers and both used to spell this out themselves. Two copies of one
         algebra can drift in the sign, the frame, the time origin or the dtype
         with nothing to notice, and they had already drifted in what the second
-        return value MEANS -- a rate in one and a phase in the other. The
+        return value MEANS, a rate in one and a phase in the other. The
         shared form returns the rate; a caller wanting the phase multiplies by
         its own `t`.
         """
         if self.kind == 'nodal':
             raise TypeError(
                 "polynomial_readout_terms: this field is a per-node "
-                "expansion; none of these three channels can carry one -- a "
+                "expansion; none of these three channels can carry one, a "
                 "k-space shift is linear in position and the six maxwell "
                 "coefficients are quadratic. It rides the phantom instead: "
                 "add `readout_terms(...).phi_nodal` to `phi_dB0` and pass "
@@ -305,7 +305,7 @@ class B0Field:
         field.is_zero_on_all_ranks()`` short-circuits, so a rank whose field is
         ``None`` never enters the ``allreduce`` the others are inside and they
         block there forever. A field present on some ranks only is an error in
-        its own right -- it describes one scanner -- so it is refused by name
+        its own right, it describes one scanner, so it is refused by name
         rather than left to deadlock at the next collective.
         """
         from feelmri.MPIUtilities import MPI_comm, collective_raise
@@ -319,8 +319,8 @@ class B0Field:
             mismatch = (f"BlochSolver: a `b0_field` was given on some ranks "
                         f"and not on others (absent on rank(s) {absent}). It "
                         f"describes one scanner, so every rank must build it.")
-        # Uniform by construction -- every rank formed it from the same
-        # gathered list -- so this is safe to reach from every rank.
+        # Uniform by construction. Every rank formed it from the same
+        # gathered list, so this is safe to reach from every rank.
         collective_raise(mismatch)
         if not all(present):
             return False
@@ -343,13 +343,13 @@ class B0Field:
     def is_zero_on_all_ranks(self, collective=True):
         """:attr:`is_zero`, agreed across every rank.
 
-        "everywhere" -- its old name -- reads as "at every point in space",
+        "everywhere", its old name, reads as "at every point in space",
         which is what :attr:`is_zero` already claims; this is the reduction
         over RANKS.
 
         For a per-node field :attr:`is_zero` inspects the LOCAL slice, so a
         rank whose own nodes all sit where the field vanishes answers True
-        while its peers answer False -- measured on a rod split four ways under
+        while its peers answer False. Measured on a rod split four ways under
         a shim residual confined to half of it, 1 of 4 ranks disagreed. That
         predicate decides which kernel channels exist, so it has to be reduced
         before anything branches on it.
@@ -368,7 +368,7 @@ class B0Field:
         an object that also carries a quadratic form returns a number that is
         not the field anywhere: measured on a degree-2 fixture, 4.8e-20 mT
         where the field is 2.5e-06. A per-node field is refused rather than
-        answered with the zeros it was constructed with -- every other accessor
+        answered with the zeros it was constructed with. Every other accessor
         on this class refuses, and this is the one a caller reaches for first.
         """
         if self.kind == 'nodal':
@@ -391,7 +391,7 @@ class B0Field:
             g_used = g           (physical=True, x_used = x_scanner - LOC)
                    = M.T @ g     (physical=False, x_used = M.T (x_scanner - LOC))
 
-        So the slice offset lands entirely in the constant -- a linear field is
+        So the slice offset lands entirely in the constant, a linear field is
         origin-correct without any change to the node array.
 
         Returns ``(offset_mT, gradient_mT_per_m)``.
@@ -401,7 +401,7 @@ class B0Field:
         if np.any(q):
             raise NotImplementedError(
                 f"B0Field.in_frame: this field is degree {self.order}, and the "
-                f"constant and linear parts alone are not it -- returning them "
+                f"constant and linear parts alone are not it. Returning them "
                 f"would silently truncate the quadratic part. Use "
                 f"`in_frame_full`, which returns all three, or the "
                 f"`solver_terms` / `readout_terms` accessors.")
@@ -437,7 +437,7 @@ class B0Field:
             Q' = R^T Q R
 
         so the slice offset moves down into the lower orders rather than being
-        lost -- the same algebra that re-centres the concomitant term, and the
+        lost, the same algebra that re-centres the concomitant term, and the
         reason a degree-2 field cannot simply reuse the linear adapter. ``R^T``
         is dropped when ``physical``, because the caller's frame is then already
         the scanner's apart from the translation.
@@ -448,14 +448,14 @@ class B0Field:
         if self.kind == 'nodal':
             raise TypeError(
                 "B0Field.in_frame_full: this field is a per-node expansion, "
-                "which has no constant, gradient or quadratic form -- "
+                "which has no constant, gradient or quadratic form. "
                 "returning the zeros it was constructed with would drop the "
                 "whole field with no symptom. Use `solver_terms` / "
                 "`readout_terms`, which hand each consumer what it can carry.")
         if self.order >= 3:
             raise NotImplementedError(
                 f"B0Field.in_frame_full: this field is degree {self.order}, and "
-                f"a constant, a gradient and a quadratic form are not it -- "
+                f"a constant, a gradient and a quadratic form are not it. "
                 f"returning them would drop every higher monomial. Measured on "
                 f"a Z3 shim, that is 100% of the field. Build it with "
                 f"`B0Field.on_phantom`, which falls back to the per-node "
@@ -489,7 +489,7 @@ class B0Field:
         it has a `pod_trajectory` and the readout knows separately whether it
         was given a `pod`, and the two may legitimately disagree. A phantom
         that does not move samples the field at `x0` for the whole solve, so a
-        per-node value IS the Eulerian answer there -- exact, at no cost,
+        per-node value IS the Eulerian answer there, exact, at no cost,
         however rough the field.
         """
         if self.kind != 'nodal':
@@ -498,7 +498,7 @@ class B0Field:
             if np.any(q) and not moving:
                 # A phantom that does not move samples the field at x0 for the
                 # whole solve, so the quadratic part is a CONSTANT per node and
-                # folds into `delta_B` -- exact, and it needs no kernel channel
+                # folds into `delta_B`, exact, and it needs no kernel channel
                 # at all. Only the linear case is left on the hoisted gradient
                 # scalars, so nothing that works today changes path.
                 x = np.asarray(phantom.local_nodes, dtype=np.float64)
@@ -534,7 +534,7 @@ class B0Field:
         :meth:`FEMPhantom.set_b0_gradient` takes.
         ``node_gradient_rad_per_ms_per_m`` is ``None``
         on a phantom that does not move, where the nodal value IS the Eulerian
-        answer. A field a polynomial can carry is REFUSED -- see the message.
+        answer. A field a polynomial can carry is REFUSED. See the message.
         The
         assembler's nodes are always the imaging ones, so unlike the solver
         there is no physical-frame case here.
@@ -556,8 +556,8 @@ class B0Field:
         # DISPLACEMENT rather than the absolute position:
         #   dB0(x0 + u) ~= dB0(x0) + g . u
         # so `phi_nodal` is the field itself and the gradient rides its own
-        # channel. The solver's kernel has no choice -- its gradient scalars
-        # multiply the absolute `curr` -- but the assembler interpolates both
+        # channel. The solver's kernel has no choice. Its gradient scalars
+        # multiply the absolute `curr`, but the assembler interpolates both
         # arrays through the element shape functions, and interpolating
         # `g . x0` separately from `g` leaves an artifact that does not vanish
         # at rest. The assembler's nodes are always the imaging ones, so
@@ -570,11 +570,11 @@ class B0Field:
         ``phi_dB0``.
 
         A rate, not a phase: the assembler multiplies it by the sample time.
-        "offset" -- its old name -- reads as the rad that `ADC.phase_offset`
+        "offset", its old name, reads as the rad that `ADC.phase_offset`
         and `RF.phase_offset` carry, and a caller who added this to a phase
         would be wrong by a factor of t.
 
-        Uniform in space, so it carries no rotation -- but it DOES depend on
+        Uniform in space, so it carries no rotation, but it DOES depend on
         where isocentre is: a slice offset turns part of the gradient into a
         constant, so pass the same ``location`` :meth:`in_frame` gets or a
         shifted slice loses that term.
@@ -599,7 +599,7 @@ class B0Field:
         ``expression`` takes an ``(N, 3)`` array of SCANNER-frame positions in
         metres and returns ``(N,)`` in mT, or a pint Quantity. Orders 0, 1, 2
         are tried in turn and the first whose residual RMS falls below ``rtol``
-        times the RMS of the field's VARIATION is kept -- the mean is removed
+        times the RMS of the field's VARIATION is kept, the mean is removed
         first, so a large uniform offset cannot flatter the fit. A shim spelled
         as a big constant plus a small spatial term is therefore judged on the
         spatial term alone, and reaches the per-node fallback more readily than
@@ -640,7 +640,7 @@ class B0Field:
         # The fit is done on the field with its MEAN REMOVED, and the mean is
         # put back on the constant coefficient at the end. Two things follow,
         # and both are needed for a field written the way a B0 map is written
-        # -- a large uniform offset plus a small spatial term:
+        #, a large uniform offset plus a small spatial term:
         #
         #  * the yardstick becomes the RMS of the VARIATION. Scored against
         #    the RMS of the VALUES, a small spatial term sits under `rtol`
@@ -700,7 +700,7 @@ class B0Field:
             coef, _res, _rank_A, _sv = np.linalg.lstsq(A, b, rcond=None)
             # The rank is taken from the DESIGN's spectrum, not the normal
             # matrix's. `A` is symmetric positive semidefinite, so its singular
-            # values are the SQUARED singular values of the design -- testing
+            # values are the SQUARED singular values of the design: testing
             # `_rank_A` refuses at `cond(design) ~ 1.5e7`, about half the
             # decades a rank test on the design allows, and calls a
             # sub-millimetre cloud degenerate when it is merely small.
@@ -710,12 +710,12 @@ class B0Field:
                 if sv.size and sv[0] > 0.0 else 0)
             # The point count is not enough: monomials that are linearly
             # dependent ON THESE POINTS make the fit exact and arbitrary off
-            # the sampled manifold -- a coplanar cloud fits `x^2 + z^2` at
+            # the sampled manifold, a coplanar cloud fits `x^2 + z^2` at
             # order 2 with a zero residual and a zz coefficient of zero.
             # `order > 0` because degree 0 is the one fit that must always
             # produce an answer: it is a single constant monomial, so a
             # rank-deficient design there means there is nothing to fit at all
-            # -- an empty point cloud -- and the honest result is the uniform
+            #, an empty point cloud, and the honest result is the uniform
             # field at the mean, not an unpack of `best` that is still None.
             if order > 0 and rank < n_terms:
                 blocked = (order, f"the degree-{order} monomials are linearly "
@@ -729,7 +729,7 @@ class B0Field:
             best = (order, coef, resid_rms)
             # Two stopping rules, and the first is the one that matters. A
             # residual at round-off means the expression IS this polynomial --
-            # every shim is -- so it is carried exactly and there is nothing to
+            # every shim is, so it is carried exactly and there is nothing to
             # gain from a higher degree. `rtol` is the weaker rule for a field
             # that is only well approximated.
             if (scale == 0.0 or resid_rms <= rtol * scale):
@@ -745,7 +745,7 @@ class B0Field:
                 (f"Degree {blocked[0]} was not attempted: {blocked[1]}. "
                  if blocked else "") +
                 f"This field needs the per-node expansion instead of the "
-                f"global one -- build it with `B0Field.on_phantom`, which "
+                f"global one. Build it with `B0Field.on_phantom`, which "
                 f"falls back to that.")
 
         # Back into physical units: the monomial `x^a y^b z^c` was fitted on
@@ -785,7 +785,7 @@ class B0Field:
             # A caller-supplied `max_order` above the class cap produces a fit
             # nothing downstream can consume: `quadratic_mT_per_m2` and
             # `in_frame_full` both refuse degree 3, so the field would raise
-            # from inside `BlochSolver` instead of falling back here -- which
+            # from inside `BlochSolver` instead of falling back here, which
             # is the outcome the docstring promises and the constructor check
             # exists to prevent.
             if fitted.order > cls.MAX_ORDER:
@@ -804,7 +804,7 @@ class B0Field:
                 # coarse structured mesh is the ordinary way in: 27 nodes on a
                 # 3 x 3 x 3 lattice carry only THREE distinct values per axis,
                 # and a degree-2 polynomial passes through any three points
-                # exactly -- so `sin(x / 0.02)` over 10 radians fitted with a
+                # exactly, so `sin(x / 0.02)` over 10 radians fitted with a
                 # residual of 0.0. Exact at the nodes, wrong everywhere else,
                 # which costs nothing while the phantom is still and is the
                 # whole answer once it moves.
@@ -819,7 +819,7 @@ class B0Field:
         except NoPolynomialFits:
             # Only this one. A bare `except ValueError` also swallows the
             # expression-shape contract error and `numpy.linalg.LinAlgError`,
-            # which is a ValueError subclass -- turning a caller's bug into a
+            # which is a ValueError subclass: turning a caller's bug into a
             # silent per-node fallback.
             if not nodal:
                 raise
@@ -859,13 +859,13 @@ class B0Field:
             # A rank may legitimately own no nodes; indexing one here would
             # raise from inside every per-node accessor instead.
             return (part, nodes.shape, 0.0, 0.0, 0.0)
-        # The first and last coordinate alone miss a rigid translation -- a
+        # The first and last coordinate alone miss a rigid translation, a
         # pure shift along y left the stamp bit-identical while every node had
-        # moved, which is exactly the pairing the stamp exists to refuse.
+        # moved, and that is the pairing the stamp exists to refuse.
         #
         # The two MOMENTS catch a translation and a change of shape and neither
         # can see a REORDERING: both are symmetric functions of the rows, so a
-        # permuted node set gives a bit-identical stamp -- and a reordering is
+        # permuted node set gives a bit-identical stamp, and a reordering is
         # exactly the pairing this exists to refuse, since every value stays
         # valid while the node it belongs to moves. The index-weighted sum is
         # the term that sees it. (`flat @ flat` is also invariant under a
@@ -924,15 +924,15 @@ class B0Field:
         difference of a callable that is not differentiable produces a
         confident number that is entirely wrong, and that is exactly the input
         this class refuses in prose. Comparing the estimate at `h` against the
-        one at `2h` separates the two -- a smooth field moves by its O(h^2)
+        one at `2h` separates the two, a smooth field moves by its O(h^2)
         truncation, a kink or a lookup moves by the order of the gradient
         itself.
         """
         from feelmri.MPIUtilities import MPI_comm, collective_raise
 
         # Which BRANCH is taken decides how many collectives this call makes
-        # -- the analytic one below makes none, the finite-difference path
-        # three -- so the ranks have to agree on it before either runs.
+        #, the analytic one below makes none, the finite-difference path
+        # three, so the ranks have to agree on it before either runs.
         analytic = gradient is not None
         if collective and MPI_comm.Get_size() > 1:
             seen = MPI_comm.allgather(analytic)
@@ -981,7 +981,7 @@ class B0Field:
         coarse = central(2.0 * h)
         # POINTWISE, against a floor tied to the global peak. Comparing the two
         # global maxima instead hides a kink wherever the gradient is small
-        # against the largest gradient anywhere -- which is most of a localised
+        # against the largest gradient anywhere, which is most of a localised
         # defect, and exactly the input this class refuses in prose.
         scale = float(np.abs(g).max()) if g.size else 0.0
         if collective:
@@ -1002,14 +1002,14 @@ class B0Field:
                 f"moves by {drift / scale:.1%} between a step of {h:g} m and "
                 f"one of {2 * h:g} m. A smooth field moves by its truncation "
                 f"error, which is far smaller; this much means the expression "
-                f"is not differentiable -- a lookup, a step, or interpolated "
+                f"is not differentiable, a lookup, a step, or interpolated "
                 f"data. Pass an analytic `gradient=`, or put the field on "
                 f"`delta_B`, which needs no derivative.")
         # Gated, like every other guard here: `collective=False` promises this
         # call makes none, and `collective_raise` allgathers whenever the size
         # is > 1. Ungated it desynchronises the ranks that took this branch
         # from the ones that did not, and the NEXT allgather then returns each
-        # rank its own value paired with someone else's -- silently, so the
+        # rank its own value paired with someone else's, silently, so the
         # corruption surfaces somewhere unrelated.
         if collective:
             collective_raise(problem, ValueError)
@@ -1024,7 +1024,7 @@ class B0Field:
         The element centroids are the cheapest such set: they are inside the
         mesh, they need no new geometry, and on a structured mesh they are
         exactly the places the nodes cannot see. Counting points is not enough
-        to catch this -- the design can be full rank and the fit exact while
+        to catch this, the design can be full rank and the fit exact while
         the polynomial is interpolating the lattice.
 
         Returns ``(worst residual, field variation)``, both in mT and both
@@ -1041,8 +1041,8 @@ class B0Field:
         # IDENTITIES for the reductions, not zeros. A rank that owns no
         # elements has no opinion about the field's range, and contributing
         # 0.0 to a MIN and a MAX makes the span straddle zero: on a field that
-        # does not -- a shim written as a large uniform offset plus a small
-        # spatial term, which is how this class documents them -- the span is
+        # does not, a shim written as a large uniform offset plus a small
+        # spatial term, which is how this class documents them, the span is
         # then inflated by the whole offset and the threshold below cannot
         # fire. Measured on a 1 ppm shim at 1.5 T, 1.8e-04 mT of real
         # variation was reported as 5.0 mT.
@@ -1073,21 +1073,21 @@ class B0Field:
         A per-node field reaches the readout through the shape functions, so
         whatever it does between nodes is not represented at all. Comparing the
         expression at each element centroid against the mean of that element's
-        nodal values measures exactly that -- and unlike an interpolant it needs
+        nodal values measures exactly that, and unlike an interpolant it needs
         no per-cell-type basis, so it is valid for every element the mesh may
         hold.
 
         Returns ``None`` when NO rank has the connectivity to measure it. That
         is not the same as zero, and zero is the most reassuring answer this
-        function can give -- "the per-node representation loses nothing" --
-        which is exactly the wrong thing to return for a check that could not
+        function can give, "the per-node representation loses nothing",
+        which is the wrong thing to return for a check that could not
         run. Same distinction `_holdout_residual` draws.
 
         REDUCED across ranks, like every other error metric on this class. A
         per-rank figure is worse than none: it was reported once, from
         whichever rank happened to ask, and that rank's slice may be the
         smoothest part of the field. Measured on `spamm.py` at 8 ranks, the
-        unreduced form read 4.370e-07 mT against a true 7.483e-07 -- an
+        unreduced form read 4.370e-07 mT against a true 7.483e-07, an
         UNDER-report, which is the dangerous direction for a number whose job
         is to say how much of the field is being dropped.
         """
@@ -1115,7 +1115,7 @@ class B0Field:
         """Exponent triples up to `order`, in the order the columns are laid out.
 
         Degrees 0-2 are spelled out rather than generated, so the layout stays
-        ``1 | x y z | x^2 y^2 z^2 xy xz yz`` -- `coefficients[1:4]` is the
+        ``1 | x y z | x^2 y^2 z^2 xy xz yz``, so `coefficients[1:4]` is the
         gradient and the six quadratic slots match the order the assembler's
         `maxwell` channel expects. Degree 3 and up are generated.
         """

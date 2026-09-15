@@ -39,7 +39,7 @@ class Scanner:
         Maximum gradient slew rate (mT/m/ms). Default is 180 mT/m/ms.
     b1_max : Quantity, optional
         Peak transmit amplitude (mT). Default 0.025 mT (25 uT), a typical
-        whole-body limit. Nothing enforces it implicitly -- it exists so
+        whole-body limit. Nothing enforces it implicitly. It exists so
         :meth:`feelmri.Bloch.Sequence.check_hardware` has something to compare
         an imported pulse against.
 
@@ -62,8 +62,8 @@ class Scanner:
         self.gradient_strength = gradient_strength
         self.gradient_slew_rate = gradient_slew_rate
         self.b1_max = b1_max
-        # Transmit/receive dead times. A .seq file does not record them -- they are
-        # a property of the scanner, not of the sequence -- so they arrive here.
+        # Transmit/receive dead times. A .seq file does not record them. They are
+        # a property of the scanner, not of the sequence, so they arrive here.
         # They default to zero, which preserves the adapter's behaviour before they
         # existed; set them to a real spec and pypulseq's four dead-time checks go
         # live on import. Do not default them non-zero: the analytical fixtures are
@@ -243,7 +243,7 @@ class Gradient:
         if isinstance(other, (int, float, np.number)):
             if self.user_defined:
                 # A user-supplied gradient has no slope/lenc/strength to
-                # rebuild from -- scale the samples it actually carries.
+                # rebuild from: scale the samples it actually carries.
                 return Gradient(
                     timings=self.timings,
                     amplitudes=self.amplitudes * other,
@@ -313,8 +313,8 @@ class Gradient:
 
         # Shift timing by sequence offsets. NOT in place: `timings` was float32
         # until 2026-09-10 and `+=` kept that dtype under numpy's same-kind
-        # casting, quantising the absolute sequence time -- 2.7e-5 ms of corner
-        # error at t = 1000 ms, enough to put a raster point past the corner it
+        # casting, which quantises the absolute sequence time. A second into the
+        # sequence that is enough to put a raster point past the corner it
         # was meant to name. The arrays are four entries long, so float64 costs
         # nothing worth counting.
         timings = timings + (self.time - self.ref)
@@ -343,7 +343,7 @@ class Gradient:
         self.ref = ref.to("ms")
         self.dur2 = (self.dur - self.ref).to("ms")
         # group_timings places the waveform at (time - ref), so a changed
-        # reference must rebuild it -- otherwise only dur2 moves and the
+        # reference must rebuild it, otherwise only dur2 moves and the
         # interpolator keeps sampling the old timeline. RF.change_ref has
         # always rebuilt; this is the same contract.
         if not self.user_defined:
@@ -991,7 +991,7 @@ class RF:
         ww = waveform.m_as('mT') if isinstance(waveform, Quantity) else np.array(waveform, dtype=np.complex128)
 
         # Apply phase + frequency offsets, as the analytic generators do. This is
-        # the only path an imported pulse takes -- PulseqAdapter builds them all
+        # the only path an imported pulse takes: PulseqAdapter builds them all
         # with shape='custom'.
         #
         # Two deliberate choices:
@@ -1100,8 +1100,8 @@ class RF:
         Plot the RF pulse waveform.
 
         For an analytic shape this draws the internal (unscaled) generator, for
-        visual inspection of the pulse design. A custom waveform -- which is
-        what every imported Pulseq pulse is -- has no analytic generator, so its
+        visual inspection of the pulse design. A custom waveform, which is
+        what every imported Pulseq pulse is, has no analytic generator, so its
         stored samples are drawn instead. Calling the generator unconditionally
         used to raise on every imported pulse.
         """

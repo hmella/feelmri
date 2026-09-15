@@ -15,7 +15,7 @@ from feelmri.MRObjects import RF, Scanner
 
 def make_empty_block(dur_ms: float, dt_ms: float = 0.1) -> SequenceBlock:
   """An empty (dead-time) block of the given duration. M evolves only
-  under T1 / T2 / B0 — no RF, no gradient. The block is marked with
+  under T1 / T2 / B0: no RF, no gradient. The block is marked with
   ``empty=False`` so BlochSolver runs its full per-step kernel."""
   return SequenceBlock(
     dur=Quantity(float(dur_ms), 'ms'),

@@ -232,7 +232,7 @@ if __name__ == '__main__':
   traj_points = traj.points
   traj_times  = traj.times.m_as('ms') - traj.t_start.m_as('ms')
   # Only the uniform part of the scanner field rides on the off-resonance
-  # channel -- it is spatially constant, so no k-space offset can carry it. The
+  # channel. It is spatially constant, so no k-space offset can carry it. The
   # rest of it becomes the shift below, kept apart from `traj_points` because
   # the reconstruction grids on the nominal trajectory and the difference
   # between the two is the geometric distortion.
@@ -264,7 +264,7 @@ if __name__ == '__main__':
       # Elapsed time since the MAGNETIZATION SNAPSHOT, not since the
       # trajectory's own origin. `mri_signal` applies exp(-t/T2*) and
       # exp(-i*phi*t) continuing from the instant the magnetization was
-      # captured, and on a CartesianStack that instant is `t_start` -- the
+      # captured, and on a CartesianStack that instant is `t_start`, the
       # timeline runs from the RF centre and the readout begins where the
       # imaging block ends. Feeding absolute times applies a spurious
       # exp(-t_start/T2*) and, worse, a SPATIALLY VARYING phi*t_start:

@@ -123,7 +123,7 @@ if __name__ == '__main__':
   # to the bore and not to the tissue: a spin that moves samples it wherever it
   # has moved to, which is what B0Field gives both the solver and the readout.
   # The chemical shift below stays on delta_B, frozen onto the node as a tissue
-  # property is. One field for every species -- normalised over the whole imaged
+  # property is. One field for every species, normalised over the whole imaged
   # slab, not per submesh, or each species would see a different bore.
   lab_nodes = (phantoms[-1].global_nodes @ planning.MPS.T
                + planning.LOC.m_as('m'))

@@ -5,7 +5,7 @@ Adds the tests/ directory to ``sys.path`` so the shared helper modules
 files via ``from _phantom_fixtures import …``.
 
 Also owns the canonical ``.seq`` fixture list and the two cached readers
-every Pulseq test file shares -- see ``SEQ_FILES`` below."""
+every Pulseq test file shares. See ``SEQ_FILES`` below."""
 
 import functools
 import os
@@ -36,7 +36,7 @@ def skip_if_pypulseq_too_old(seq_path):
     """Skip when the installed pypulseq cannot read this .seq file's format.
 
     pypulseq reads only up to its own format version, and the v1.5 layout is
-    not backward readable -- 1.4.x mis-parses a v1.5 file and dies inside
+    not backward readable. 1.4.x mis-parses a v1.5 file and dies inside
     calculate_kspace. FEelMRI's own reader handles both, so the combination is
     unsupported rather than broken, and CI exercises both versions.
     """
@@ -61,9 +61,9 @@ def skip_if_pypulseq_too_old(seq_path):
 #
 # Reading a sequence twice gives the same answer, so the results are cached for
 # the whole session. Before this, each test file rebuilt its own module-scoped
-# pypulseq cache and called import_pulseq fresh inside every test body: 15
-# fixtures x 14 test functions was about 210 imports of the same files, with
-# the two 231-block EPI files parsed 14 times each.
+# pypulseq cache and called import_pulseq fresh inside every test body, so
+# every fixture was read once per test function and the two large EPI files
+# were parsed many times over.
 #
 # The cached objects are shared, so a test that MUTATES an import would corrupt
 # every later one. Copy first (PulseqImport.copy_block does) or build your own.
@@ -111,7 +111,7 @@ def pypulseq_ref():
 
     Two distinct reasons pypulseq may refuse a file: it is too old for the
     format (say so precisely), or the file uses an extension it does not
-    implement at all -- ROTATIONS, which it has no support for. The file is
+    implement at all: ROTATIONS, which it has no support for. The file is
     valid either way, so this skips rather than fails.
     """
     pytest.importorskip('pypulseq')

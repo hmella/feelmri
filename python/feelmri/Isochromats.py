@@ -53,11 +53,11 @@ def lineshape_bins(K, lineshape='gaussian'):
   lorentzian     3.3e-01   2.4e-01   1.0e-01   3.8e-02
   ============  ========  ========  ========  ========
 
-  * ``'gaussian'`` -- Gauss-Hermite. Decay ``exp(-tau^2 / 2 T2'^2)``.
+  * ``'gaussian'``: Gauss-Hermite. Decay ``exp(-tau^2 / 2 T2'^2)``.
     Machine precision by K=24.
-  * ``'uniform'`` -- Gauss-Legendre on a half-width of ``sqrt(3)/T2'``, chosen
+  * ``'uniform'``: Gauss-Legendre on a half-width of ``sqrt(3)/T2'``, chosen
     so the variance matches the Gaussian of the same ``T2'``. Decay is a sinc,
-    so the signal has true zero crossings and partial recoveries -- the right
+    so the signal has true zero crossings and partial recoveries, the right
     model for a linear susceptibility gradient across the voxel.
   **A finite bin set is quasi-periodic, so the decay REVIVES at long tau.**
   With K discrete frequencies the ensemble cannot stay cancelled forever; it
@@ -72,11 +72,11 @@ def lineshape_bins(K, lineshape='gaussian'):
   ============  ======  ======  ======  ======
 
   So for the gaussian rule size ``K >= 5 * tau_max / T2'``, where ``tau_max``
-  is the longest time coherence survives WITHOUT a refocusing pulse -- a 180
+  is the longest time coherence survives WITHOUT a refocusing pulse, a 180
   restarts the clock, so echo-based sequences are far less demanding than the
   bound suggests. The uniform rule barely needs sizing.
 
-  * ``'lorentzian'`` -- equal-probability quantile midpoints. The only rule
+  * ``'lorentzian'``: equal-probability quantile midpoints. The only rule
     that targets the conventional ``exp(-t/T2*)``, and the only inaccurate one:
     it converges roughly as ``K^-0.55``, so 3.8e-2 at K=256. That is not an
     implementation limit. ``exp(-t/T2*)`` is the Fourier transform of a
@@ -117,7 +117,7 @@ def lineshape_bins(K, lineshape='gaussian'):
   # phantom at the wrong M0.
   w = w / w.sum()
   # Drop sub-spins that cannot contribute. Gauss-Hermite spends its extreme
-  # abscissae on weights far below machine epsilon -- 4 of 32, 70 of 128 --
+  # abscissae on weights far below machine epsilon: 4 of 32, 70 of 128 --
   # and each is a full sub-spin carried through every time step and then
   # multiplied by nothing. Pruning at float64 epsilon changes no result
   # float64 can represent.
@@ -136,17 +136,17 @@ def _draw_in_sphere_offsets(M, R, distribution='uniform', seed=None):
   """Draw ``M`` offset vectors uniformly distributed inside a 3-sphere of radius ``R``.
 
   Three samplers are supported. All three use the same inverse-CDF
-  mapping from the unit cube to the sphere — ``r = R * u^(1/3)``,
-  ``cos(theta) = 1 - 2v``, ``phi = 2*pi*w`` — and differ only in how
+  mapping from the unit cube to the sphere: ``r = R * u^(1/3)``,
+  ``cos(theta) = 1 - 2v``, ``phi = 2*pi*w``: and differ only in how
   ``(u, v, w) in [0, 1)^3`` is drawn:
 
-  * ``'uniform'`` — i.i.d. ``Uniform([0, 1])`` via
+  * ``'uniform'``: i.i.d. ``Uniform([0, 1])`` via
     ``numpy.random.default_rng(seed)``. Monte-Carlo residual rate
     :math:`\\rho \\sim K^{-1/2}`.
-  * ``'sobol'`` — :class:`scipy.stats.qmc.Sobol`, a low-discrepancy
+  * ``'sobol'``: :class:`scipy.stats.qmc.Sobol`, a low-discrepancy
     sequence. Quasi-Monte-Carlo residual rate
     :math:`\\rho = \\mathcal O((\\log K)^d / K)`.
-  * ``'halton'`` — :class:`scipy.stats.qmc.Halton`, same QMC class as
+  * ``'halton'``: :class:`scipy.stats.qmc.Halton`, same QMC class as
     Sobol; cheaper to seed but empirically slightly weaker in 3-D
     due to higher-prime axis correlations.
 
@@ -178,7 +178,7 @@ def _draw_in_sphere_offsets(M, R, distribution='uniform', seed=None):
     if dist == 'sobol':
       # Sobol's (t, m, s)-net balance properties hold exactly when n
       # is a power of 2. Generate the smallest 2**m >= M and slice
-      # rather than calling random(M) — strictly higher-quality, and
+      # rather than calling random(M): strictly higher-quality, and
       # avoids the scipy UserWarning about non-power-of-2 sample counts.
       qmc = Sobol(d=3, seed=seed)
       m_exp = int(np.ceil(np.log2(max(M_int, 1))))
@@ -225,7 +225,7 @@ def create_multi_isochromats(x, T1, T2, delta_B, Mxy0, Mz0,
   pos_jitter : float, optional
       Radius of the in-sphere offset (m). Default 0.2 mm.
   distribution : {'uniform', 'sobol', 'halton'}, optional
-      Sampler for the offsets — see :func:`_draw_in_sphere_offsets`.
+      Sampler for the offsets: see :func:`_draw_in_sphere_offsets`.
       Default ``'uniform'`` preserves the pre-refactor behaviour.
   seed : int or None, optional
       RNG / QMC seed forwarded to the sampler. ``None`` is
@@ -250,6 +250,26 @@ def create_multi_isochromats(x, T1, T2, delta_B, Mxy0, Mz0,
 
 
 def collapse_isochromats(Mxy_big, Mz_big, K, mode="mean"):
+    """Average each node's K sub-spins back down to one value per node.
+
+    The inverse of :func:`create_multi_isochromats`, which lays the sub-spins
+    out as K consecutive rows per node.
+
+    Parameters
+    ----------
+    Mxy_big, Mz_big : np.ndarray
+        Expanded magnetization, ``(n_nodes * K, nv)`` or ``(n_nodes * K,)``.
+    K : int
+        Sub-spins per node.
+    mode : str, optional
+        ``'mean'`` averages them, which is what a voxel signal does. Any other
+        value sums them instead.
+
+    Returns
+    -------
+    tuple of np.ndarray
+        ``(Mxy, Mz)``, one row per node.
+    """
     Mxy_big = np.asarray(Mxy_big)
     Mz_big  = np.asarray(Mz_big)
 
@@ -358,7 +378,7 @@ def plot_isochromat_voxel(positions, *, R=None, ax=None,
     pass
 
   # The other ranks are already in this Barrier, so rank 0 must reach it
-  # whatever the drawing does -- a savefig onto an unwritable path would
+  # whatever the drawing does, a savefig onto an unwritable path would
   # otherwise strand them.
   try:
     if export_to is not None:
@@ -398,7 +418,7 @@ def spoiling_residual(K, k_sp, voxel_size, *,
   voxel_size : float
       Sphere radius for the isochromat draw (m).
   distribution : {'uniform', 'sobol', 'halton'}
-      Sampler — see :func:`_draw_in_sphere_offsets`.
+      Sampler: see :func:`_draw_in_sphere_offsets`.
   seed : int or None
       Base seed; trial ``t`` uses ``seed + t``.
   n_trials : int
@@ -464,7 +484,7 @@ def plot_multi_isochromat_dephasing(
 
     # Rank-0 guarded, like `plot_isochromat_voxel`: without it every rank
     # opened its own window. There is no collective in this body, so no
-    # Barrier is needed -- and adding one would create the hazard rather
+    # Barrier is needed, and adding one would create the hazard rather
     # than remove it.
     if MPI_rank != 0:
         return None

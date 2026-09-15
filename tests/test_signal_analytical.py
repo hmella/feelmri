@@ -135,7 +135,7 @@ def test_uniform_relaxation_and_offresonance_factor_out(tmp_path):
       S(k,t) = exp(-t/T2) exp(-i dw t) * INT Mxy exp(-i phi_shared t) exp(-i 2pi k.x) dV
 
   This is what lets several chemical species share one mesh, one partition and one
-  assembler, carried as separate `nv` columns -- see
+  assembler, carried as separate `nv` columns. See
   `feelmri_paper_experiments/water_and_fat.py`. It holds ONLY while those two
   quantities are uniform per species; a spatially varying T2 needs its own
   assembler.
@@ -179,8 +179,8 @@ def test_offresonance_continues_across_the_solver_to_assembler_handoff(tmp_path)
 
   The solver turns `Mxy` as `exp(-i*gamma*delta_B*t)` and the assembler applies
   `exp(-i*phi*t)` to the snapshot it is handed, so one physical field described
-  to both halves -- `delta_B` in mT, `phi_dB0 = 2*pi*gammabar*delta_B` in rad/ms
-  -- must produce a single unbroken precession.
+  to both halves, `delta_B` in mT and `phi_dB0 = 2*pi*gammabar*delta_B` in
+  rad/ms, must produce a single unbroken precession.
 
   Asserted as a splitting invariant, which needs no sign convention of its own:
   evolving for `TA` in the solver and a further `TB` in the assembler must equal
@@ -261,7 +261,7 @@ def test_kspace_is_hermitian_for_a_real_object(tmp_path):
   """A real, non-negative object must give `S(k) = conj(S(-k))`.
 
   The box-transform test in `test_pulseq_analytical.py` checks only `|S(k)|`
-  and so discards exactly the phase this identity lives in -- a sign error in
+  and so discards exactly the phase this identity lives in, a sign error in
   the encoding exponent would leave the magnitude untouched and break this.
   Also re-pins `S(0) == volume` on the same samples, which is the one absolute
   scale the assembler has.
@@ -312,7 +312,7 @@ def test_adc_frequency_offset_tunes_the_receiver(tmp_path):
   The Pulseq specification calls `adc.freq` the "frequency offset of ADC
   receiver relative to the system frequency". So placing a narrow rod at `x0`
   and tuning the receiver to `gammabar*Gx*x0` must put it at the centre of the
-  image -- that population IS what the receiver is listening to. Getting the
+  image. That population IS what the receiver is listening to. Getting the
   sign wrong does not merely reverse the shift, it DOUBLES it: measured
   `+7.927 mm` for an `x0` of `+4 mm`, against `-0.008 mm` when correct.
   """
@@ -377,7 +377,7 @@ def test_adc_frequency_offset_tunes_the_receiver(tmp_path):
 # Both tests below pin the whole chain against a closed form by first measuring
 # the assembler's own nodal weights. At k = 0 and t = 0 the signal is
 # ``S = sum_n m_n Mxy_n`` with ``m_n = integral of basis function n``, which is
-# linear in the nodal vector -- so handing it a unit vector per node recovers
+# linear in the nodal vector, so handing it a unit vector per node recovers
 # the weights, and the prediction that follows is exact rather than a
 # tolerance. The weights differ from node to node on an irregular mesh, so a
 # handoff that paired the wrong rows cannot pass.
@@ -438,7 +438,7 @@ def test_concomitant_phase_reaches_kspace(tmp_path):
   With `G = (14, -9, 20)` the same two mistakes change it by 41x and 37x.
 
   The prediction is written in the FACTORED form `(Bx^2 + By^2) / (2 B0)`,
-  which the library does not use -- it expands the square -- so the check is
+  which the library does not use, it expands the square, so the check is
   independent of the expression it is checking.
   """
   pytest.importorskip('mpi4py')
@@ -564,7 +564,7 @@ def test_a_b1_map_reaches_kspace_node_by_node(tmp_path):
 
 def test_a_zero_or_non_finite_static_field_is_refused(tmp_path):
   """`T2 = 0` inverts to Inf, and `exp(-t*Inf)` is NaN even at `t = 0`, so ONE
-  bad node used to turn EVERY k-space sample into NaN -- not just its own
+  bad node used to turn EVERY k-space sample into NaN, not just its own
   contribution. Nothing rejected it on either side of the boundary.
 
   A negative T2 is the worse case: it is finite, so there is no NaN to notice
@@ -575,7 +575,7 @@ def test_a_zero_or_non_finite_static_field_is_refused(tmp_path):
   implies -ffinite-math-only and folds that to false. It goes through the same
   IEEE bit-pattern helper the b1_map guard uses, now shared in `Numeric.h`.
 
-  An INFINITE T2 is not an error -- it inverts to exactly zero and is the
+  An INFINITE T2 is not an error. It inverts to exactly zero and is the
   idiomatic way to switch relaxation off, which several tests here rely on.
   """
   pytest.importorskip('mpi4py')
@@ -607,7 +607,7 @@ def test_a_zero_or_non_finite_static_field_is_refused(tmp_path):
                                 phi_dB0=poisoned)
 
   # The C++ side refuses it too, reached directly so the Python check cannot
-  # be what fires -- the same arrangement the b1_map guard's test uses.
+  # be what fires, the same arrangement the b1_map guard's test uses.
   for assembler in phantom.assembler:
     with pytest.raises(Exception, match='T2'):
       assembler.set_static_fields(t2_with(0.0), good_phi)
@@ -615,7 +615,7 @@ def test_a_zero_or_non_finite_static_field_is_refused(tmp_path):
   # A SHORT map is the silent case: the assembler indexes these by element
   # connectivity under -DNDEBUG, so it reads adjacent heap. Measured before
   # the length check, 22 entries for 27 nodes: 6.348e-08 against a true
-  # 6.336e-08 -- and a DIFFERENT wrong value on a re-run, which is what
+  # 6.336e-08, and a DIFFERENT wrong value on a re-run, which is what
   # identifies it as a heap read rather than an arithmetic error.
   with pytest.raises(ValueError, match='local nodes'):
     phantom.set_static_fields(T2=np.full(n - 5, 60.0, dtype=np.float32),
@@ -716,7 +716,7 @@ def _nodal_phase(coef_row, points):
 @pytest.mark.parametrize('scale, tag', [(1.0, '1 rad'), (20.0, '20 rad')])
 def test_the_concomitant_readout_term_matches_its_closed_form(tmp_path, scale, tag):
   """`signal_sum` is an unweighted sum over nodes, so `S = sum_n exp(i phi_n)`
-  is exact -- no quadrature, no interpolation, nothing to approximate.
+  is exact. No quadrature, no interpolation, nothing to approximate.
 
   **Do not use the quadrature path as a nodal reference.** It evaluates the
   phase AT the quadrature points, whereas a nodal prediction interpolates
@@ -770,7 +770,7 @@ def test_zero_coefficients_are_bit_identical_to_the_term_being_off(tmp_path):
 
 def test_the_readout_term_follows_a_moving_phantom(tmp_path):
   """The term is quadratic in the CURRENT position, so under a POD trajectory
-  it must be evaluated at the displaced coordinates -- exactly as `-k.x` is.
+  it must be evaluated at the displaced coordinates, exactly as `-k.x` is.
   A constant displacement must therefore be indistinguishable from building
   the phantom at the displaced position."""
   pytest.importorskip('meshio')
@@ -844,7 +844,7 @@ def test_the_concomitant_term_continues_across_the_solver_to_assembler_handoff(
 
   **The oblique case is the one that pins the FRAME.** Run axially, the
   rotation is the identity and the whole six-coefficient apparatus collapses
-  to the four the field naturally has -- so the axial arm passes whether or not
+  to the four the field naturally has, so the axial arm passes whether or not
   either half knows about `FEMPhantom.orient`. With the phantom tilted, the
   solver must evaluate `Bc` on physical-frame coordinates and gradients while
   the assembler works in the imaging frame, and the two must still meet.
@@ -853,7 +853,7 @@ def test_the_concomitant_term_continues_across_the_solver_to_assembler_handoff(
 
   The `offset` arm covers the other half of the geometry. `orient` measures the
   nodes from the SLICE centre while `Bc` is a quadratic form about ISOCENTRE, so
-  both halves owe the rest of the expansion about `LOC` -- a k-space shift and
+  both halves owe the rest of the expansion about `LOC`, a k-space shift and
   a uniform phase. With the readout's share dropped the offset arms read
   **2.66e-01** (axial) and **4.25e-01** (oblique) while the isocentre arms do
   not move at all, which is why `LOC = 0` everywhere else hid it.
@@ -955,7 +955,7 @@ def test_an_oblique_orientation_gives_the_same_physics(tmp_path):
   about 20 degrees off axial, so this is not a corner case.
 
   Without the rotation folded in, the Maxwell expression is evaluated in the
-  imaging frame and treats the slice normal as B0 -- which the second half
+  imaging frame and treats the slice normal as B0, which the second half
   measures, so the test cannot pass by the rotation being irrelevant.
   """
   from feelmri.MRObjects import Scanner
@@ -1031,7 +1031,7 @@ def _a_receive_map_folds_onto_the_coil_axis(tmp_path):
   """`S[e*n_coils + c] = sum_n m_n C[n,c] Mxy[n,e]`, exactly.
 
   The nodal weights are measured off the assembler first, so this is a closed
-  form and not a tolerance -- and they differ by 9x across this mesh, so a fold
+  form and not a tolerance, and they differ by 9x across this mesh, so a fold
   that paired the wrong rows cannot pass.
 
   It also pins the column ORDER, which is the part a caller has to unpack:
@@ -1088,7 +1088,7 @@ def _a_receive_map_weights_the_node_it_belongs_to(tmp_path):
 
 
 def _clearing_the_receive_map_restores_the_plain_signal(tmp_path):
-  """`None` must leave no trace -- bit-identical, not merely close, since the
+  """`None` must leave no trace, bit-identical and not merely close, since the
   fold is skipped rather than multiplied by ones."""
   phantom = _irregular_phantom(tmp_path / 'clear.vtu')
   n = phantom.local_nodes.shape[0]
@@ -1133,8 +1133,8 @@ def test_a_bad_receive_map_is_refused(tmp_path, bad, match):
 # never been driven through.
 #
 # Written during audit 5. The `xy` coefficient was multiplied by zero in every
-# existing test -- a gradient held on one axis gives |p3|/max|p| == 0.000
-# exactly -- so `m3 * mxy` in all three kernels was executed by nothing.
+# existing test, a gradient held on one axis gives |p3|/max|p| == 0.000
+# exactly, so `m3 * mxy` in all three kernels was executed by nothing.
 # `signal_nodal` with `maxwell` had no test at all, and that gap was hiding a
 # read of uninitialised memory.
 
@@ -1145,7 +1145,7 @@ def _maxwell_phantom(tmp_path, name, *, nodal, lumped=False):
   `nodal=True` gives `nodal_approximation`, which is what builds the
   mass-matrix projection `signal_nodal` reads; `nodal=False` is the quadrature
   configuration every other test here uses. `lumped` makes that projection
-  DIAGONAL, which is what lets the nodal identity below be exact -- a
+  DIAGONAL, which is what lets the nodal identity below be exact, a
   consistent mass matrix couples neighbouring nodes, so applying the phase to
   the magnetization and letting the kernel apply it at the node are then
   genuinely different quantities.
@@ -1173,7 +1173,7 @@ def _six_coefficients():
   """A full quadratic form: all six monomials live, none degenerate.
 
   Hand-written rather than taken from a gradient, because a gradient whose
-  direction is fixed in time produces `p3 == 0` identically -- which is exactly
+  direction is fixed in time produces `p3 == 0` identically, which is
   why the `xy` branch had no coverage.
   """
   # Scaled so the phase spans a few radians over this 20 cm cloud: the
@@ -1202,14 +1202,14 @@ def test_every_maxwell_monomial_reaches_both_nodal_paths(tmp_path, path_name,
 
   `signal_nodal` is driven with a LUMPED mass matrix here, because that is
   what makes the projection diagonal in the node index. With the consistent
-  matrix the two sides are different quantities -- `sum_n (M Mxy)_n e^(i phi_n)`
-  against `sum_n (M (Mxy e^(i phi)))_n` -- and the linearity test below is what
+  matrix the two sides are different quantities, since `sum_n (M Mxy)_n e^(i phi_n)`
+  against `sum_n (M (Mxy e^(i phi)))_n`, and the linearity test below is what
   covers that configuration instead.
 
   The identity needs no knowledge of the mass matrix and no quadrature
   reference, and it is sharp: it fixes the sign, the factor and the position
   index of every one of the six monomials independently. The mutation below
-  drives the point -- negating the `xy` coefficient alone has to be visible,
+  drives the point, since negating the `xy` coefficient alone has to be visible,
   and before this nothing in the suite multiplied `m3` by anything but zero.
 
   The coil arm runs the same identity per channel, which is the first test of
@@ -1262,7 +1262,7 @@ def test_every_maxwell_monomial_reaches_both_nodal_paths(tmp_path, path_name,
 
 def test_every_maxwell_monomial_reaches_the_quadrature_path(tmp_path):
   """The quadrature path evaluates the phase AT the quadrature points, so the
-  nodal identity above does not hold for it -- `exp(i phi)` interpolated from
+  nodal identity above does not hold for it, because `exp(i phi)` interpolated from
   the nodes is not `exp(i phi)` integrated over the element, and at these
   element sizes the two differ by tens of percent.
 
@@ -1313,12 +1313,12 @@ def test_every_maxwell_monomial_reaches_the_quadrature_path(tmp_path):
 
 def test_signal_nodal_refuses_a_phantom_that_never_built_its_projection(tmp_path):
   """`signal_nodal` reads `f_M_Mxy_nodes_`, which only
-  `update_nodal_magnetization` writes -- and Python calls that only when the
+  `update_nodal_magnetization` writes, and Python calls that only when the
   assembler was built with `nodal_approximation=True`.
 
   `Phantom.signal_nodal` is public and unconditional, so on a phantom built
   the other way every read was a `middleRows` on a 0 x 0 matrix multiplied
-  against a `q_count`-long row -- a dimension mismatch that only `eigen_assert`
+  against a `q_count`-long row, a dimension mismatch that only `eigen_assert`
   would catch, and `-DNDEBUG` compiles that out. Measured on this build it
   returned `0+0j` on every run: a silently EMPTY k-space rather than a crash,
   which is the worst of the available outcomes.
@@ -1386,7 +1386,7 @@ def test_the_concomitant_phase_vanishes_on_its_null_line(tmp_path):
   two, positive semidefinite, and identically zero along `(2Gx, 2Gy, Gz)`.
 
   This is the ONLY property that can catch a cross-term sign error. Negating
-  `Gx*Gz*x*z` turns `(Gx z - Gz x/2)^2` into `(Gx z + Gz x/2)^2` -- still a sum
+  `Gx*Gz*x*z` turns `(Gx z - Gz x/2)^2` into `(Gx z + Gz x/2)^2`, still a sum
   of squares with the same eigenvalues, because the flip is conjugation by
   `diag(1, 1, -1)`, an orthogonal similarity. No rank, determinant or
   "can only retard" test can see it; what moves is the null LINE. Measured on
@@ -1405,7 +1405,7 @@ def test_the_concomitant_phase_vanishes_on_its_null_line(tmp_path):
   on_line = _monomial_phase(coef[1], nodes)
   # The residual is the rod's own CROSS-SECTION, not the algebra: the form is
   # PSD and stationary on the line, so an offset `h` off it costs order
-  # `lambda h^2` -- 3.2e-07 rad at the 1e-4 m width used here, and it does not
+  # `lambda h^2`, negligible at the 1e-4 m width used here, and it does not
   # grow along the rod. On the line itself the form is zero to 5.6e-17.
   assert float(np.abs(on_line).max()) < 1e-6, (
     f'the analytic form is not zero on its own null line: '
@@ -1450,7 +1450,7 @@ def _a_receive_map_does_not_survive_a_repartition(tmp_path):
   not clear the map either. At one rank the row counts coincide and nothing
   shows; at several ranks the map is silently paired with the wrong nodes, or
   raises a bare numpy broadcast error from inside
-  `_update_magnetization_local` -- which is AFTER an `Alltoallv`, the hang
+  `_update_magnetization_local`, which is AFTER an `Alltoallv`, the hang
   shape this module works hard to avoid.
   """
   phantom, _points = _maxwell_phantom(tmp_path, 'repart.vtu', nodal=False)
@@ -1473,9 +1473,9 @@ def _a_receive_map_does_not_survive_a_repartition(tmp_path):
 
 
 def test_orienting_after_set_assembler_is_refused(tmp_path):
-  """The assembler captures the node coordinates in its constructor -- node
+  """The assembler captures the node coordinates in its constructor, so node
   positions, element sizes, the quadrature cache, the mass matrix and the
-  ownership mask all come from them -- so moving the mesh afterwards leaves
+  ownership mask all come from them, so moving the mesh afterwards leaves
   every one of them describing a phantom that no longer exists.
 
   Nothing downstream notices; the signal is simply computed at the old
@@ -1570,15 +1570,15 @@ def test_a_lab_frame_field_splits_between_the_solver_and_the_readout(tmp_path,
                                                                     frame):
   """A scanner field described once must survive the solver-to-assembler split.
 
-  The linear part of a lab-frame field is `-gamma*t*(g.x)`, which is exactly
+  The linear part of a lab-frame field is `-gamma*t*(g.x)`, which is
   what a k-space offset of `gammabar*t*g` applies, so the readout needs no new
-  assembler channel -- the shift alone has to carry it. Asserted the same way
+  assembler channel, the shift alone has to carry it. Asserted the same way
   the off-resonance handoff is: `TA` in the solver plus `TB` on the readout must
   equal `TA + TB` in the solver, an identity that fixes the sign, the factor of
   `2*pi` and the frame without assuming any of them.
 
-  What this pins is the HANDOFF -- the sign, the factor of `2*pi` and the
-  time scaling -- and not the frame: both halves read the field through the same
+  What this pins is the HANDOFF, the sign, the factor of `2*pi` and the
+  time scaling, and not the frame: both halves read the field through the same
   `in_frame`, so a wrong rotation is common to them and cancels in the identity.
   Measured, dropping the `R^T` or the `g.LOC` leaves both arms passing. The
   frame is pinned against the lab-frame field itself by
@@ -1600,7 +1600,7 @@ def test_a_lab_frame_field_splits_between_the_solver_and_the_readout(tmp_path,
   scanner = Scanner()
   gamma = scanner.gamma.m_as('rad/ms/mT')
   # 6e-3 mT/m over the 20 mm cube is ~0.2 rad/ms of spread, so TB alone puts
-  # about a radian across the object -- enough that a wrong shift cannot hide.
+  # about a radian across the object: enough that a wrong shift cannot hide.
   field = B0Field(offset=Q_(2.0e-3, 'mT'),
                   gradient=Q_(np.array([6.0e-3, -4.0e-3, 9.0e-3]), 'mT/m'))
   TA, TB = 4.0, 3.0
@@ -1628,7 +1628,7 @@ def test_a_lab_frame_field_splits_between_the_solver_and_the_readout(tmp_path,
     # points. Through a quadrature rule the split arm carries the field into
     # the element interior exactly while the whole arm carries a projected
     # version of it, and the two differ by the interpolation error of the
-    # basis -- 1.0e-02 on this cube, which is the mesh, not the handoff.
+    # basis: 1.0e-02 on this cube, which is the mesh, not the handoff.
     phantom.set_assembler(voxel_size=1e3, lorder=2,
                           nodal_approximation=True, lumped=True)
     seq = Sequence()
@@ -1670,7 +1670,7 @@ def test_a_lab_frame_field_splits_between_the_solver_and_the_readout(tmp_path,
       f'the solver')
 
   # Without the shift the readout carries none of the field, so the same
-  # comparison must fail by orders of magnitude -- otherwise the geometry is too
+  # comparison must fail by orders of magnitude, otherwise the geometry is too
   # weak to prove anything.
   naked = abs(readout(ph_a, mxy_a, TB, shifted=False) - whole) / abs(whole)
   assert naked > 100.0 * max(gap, 1e-12), (
@@ -1698,11 +1698,11 @@ def test_a_lab_frame_field_is_the_same_field_however_the_phantom_is_placed(
   concomitant term has already rotated the positions), the readout always takes
   `R^T g` since the assembler's nodes are never rotated, and both absorb `g.LOC`
   into the constant. Dropping any one of those three leaves the halves
-  consistent with each other and wrong -- which is why this is measured against
+  consistent with each other and wrong, which is why this is measured against
   the expression and not against the other half.
 
   Measured on the oblique arm with the `R^T` removed: **0.114** on the solver at
-  `concomitant=False` and **0.064** on the readout at `concomitant=True` -- two
+  `concomitant=False` and **0.064** on the readout at `concomitant=True`, two
   different cells, because the concomitant path rotates the solver's positions
   itself while the assembler's are never rotated. Dropping the `g.LOC` or
   transposing the rotation fails it too.
@@ -1900,13 +1900,13 @@ def test_a_rough_field_follows_a_moving_spin_through_the_readout(tmp_path,
 
   The readout's Eulerian channel is a per-node gradient: `phi_dB0` carries the
   field itself and `set_b0_gradient` carries `g`, so the kernel forms
-  `phi + g.(x(t) - x0)` -- written against the DISPLACEMENT, unlike the
+  `phi + g.(x(t) - x0)`, written against the DISPLACEMENT, unlike the
   solver, which has no choice but the absolute position. That is the field at
   `x(t)` to first order, against the frozen value the Lagrangian channel would
   keep.
 
-  Scored against the exact answer -- the same mesh built at the displaced
-  position with the field written there per node -- because the model is an
+  Scored against the exact answer, the same mesh built at the displaced
+  position with the field written there per node, because the model is an
   approximation and the claim is that it is a far better one than freezing.
   Run on all three signal paths: each has its own copy of the phase line.
 
@@ -1917,7 +1917,7 @@ def test_a_rough_field_follows_a_moving_spin_through_the_readout(tmp_path,
   | 0 mm | 0.0 / 4.2e-08 / 0.0 | 0.0 |
   | 20 mm | 2.8e-03 / 2.7e-03 / 2.5e-03 | 1.75e-01 / 1.79e-01 / 1.79e-01 |
 
-  in `signal_sum` / `signal_nodal` / `signal` order -- a factor of 65, uniform
+  in `signal_sum` / `signal_nodal` / `signal` order, a factor of 65, uniform
   across the three, and exactly zero at rest.
   """
   pytest.importorskip('meshio')
@@ -1931,7 +1931,7 @@ def test_a_rough_field_follows_a_moving_spin_through_the_readout(tmp_path,
   scanner = Scanner()
   gamma = scanner.gamma.m_as('rad/ms/mT')
 
-  # A cube of 27 nodes over 12 cm, and a 2 cm rigid translation -- the scale
+  # A cube of 27 nodes over 12 cm, and a 2 cm rigid translation, the scale
   # `spamm.py` actually produces.
   seed_path, _v = make_cube_mesh(tmp_path / f'seed_{path_name}.vtu', 'tetra',
                                  n=2, scale=0.12)
@@ -2020,7 +2020,7 @@ def test_the_readout_refuses_a_per_node_field_on_the_channels_that_cannot_carry_
   """A k-space shift is linear in position and the six `maxwell` coefficients
   are quadratic, so neither can carry a per-node expansion. Returning the
   nominal points would be a wrong image with no symptom, which is the failure
-  this whole channel exists to avoid -- so both refuse and name the setter.
+  this whole channel exists to avoid, so both refuse and name the setter.
   """
   pytest.importorskip('meshio')
   pytest.importorskip('mpi4py')
@@ -2087,7 +2087,7 @@ def test_a_quadratic_field_follows_a_moving_phantom_through_the_readout(tmp_path
   DEFORMED position, "so it follows the tissue for free". Every test of that
   channel ran with `pod=None`, so the claim was never exercised.
 
-  Scored against the exact Eulerian answer -- the same mesh built where the
+  Scored against the exact Eulerian answer, the same mesh built where the
   spins end up, with the field written there per node. Measured: the split
   channels (k-shift + `phi_dB0` + `maxwell`) reproduce it to **1.8e-06**, while
   freezing the field onto the node leaves **1.6e-02**, a separation of 8700.
@@ -2112,7 +2112,7 @@ def test_a_quadratic_field_follows_a_moving_phantom_through_the_readout(tmp_path
   shift = np.array([0.020, -0.013, 0.017])
 
   # Degree 2 in every slot, and scaled so the quadratic part dominates the
-  # displacement term -- otherwise the linear k-shift alone would pass.
+  # displacement term, otherwise the linear k-shift alone would pass.
   expr = lambda q: 1.0e-3 * (0.3 + 2.0 * q[:, 0] - 1.5 * q[:, 2]
                              + 60.0 * q[:, 0] ** 2 - 50.0 * q[:, 1] ** 2
                              + 30.0 * q[:, 2] ** 2 + 20.0 * q[:, 0] * q[:, 1]
@@ -2180,7 +2180,7 @@ def test_the_signal_paths_refuse_an_assembler_with_no_static_fields(
 
   Every loop reads `f_nodes_phi_.segment(q_start, q_count)` with `q_start`
   bounded by the node count, so an assembler whose static fields were never set
-  indexes a zero-length array out of bounds -- and under `-DEIGEN_NO_DEBUG`
+  indexes a zero-length array out of bounds, and under `-DEIGEN_NO_DEBUG`
   that is not an assertion, it is a segmentation fault. Reproduced on all
   three paths, with and without a B0 gradient installed, so it is the assembler
   and not the B0 channel.
@@ -2222,13 +2222,13 @@ def test_a_per_node_field_and_the_maxwell_channel_compose_in_one_readout(
 
   The phase line has a separate branch for `has_maxwell`, and the per-node B0
   gradient folds into `f_po` inside it exactly as it does in the plain branch
-  -- but every test of the gradient ran with `maxwell=None` and every test of
+ , but every test of the gradient ran with `maxwell=None` and every test of
   `maxwell` ran with no gradient, so the two together were never compiled
   through. A concomitant readout on a phantom carrying a shim residual is the
   ordinary case that reaches it.
 
   On a LUMPED nodal path the phase is applied at the node, so the whole signal
-  has a closed form in the assembler's own node weights -- no mass matrix and
+  has a closed form in the assembler's own node weights. No mass matrix and
   no quadrature reference needed, and the prediction is exact rather than a
   tolerance.
   """
@@ -2511,8 +2511,8 @@ def test_the_deprecated_signal_names_still_work(tmp_path):
 
   They were renamed because they said which integration rule each used and not
   the thing a caller must know: `signal_nodal` and `signal_sum` see assembler
-  GROUP 0 only. Missing that counted every node once per group -- 346 950 for
-  173 475 nodes -- and separately mis-tuned a benchmark sweep via node_weight.
+  GROUP 0 only. Missing that counted every node once per group, which doubled the node count for
+  173 475 nodes, and separately mis-tuned a benchmark sweep via node_weight.
   """
   import warnings as _w
 

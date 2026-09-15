@@ -3,18 +3,18 @@ Bloch-equation simulation of MRI pulse sequences on FEM phantom meshes.
 
 Core classes:
 
-* :class:`ADC` — analog-to-digital converter timing specification.
-* :class:`SequenceBlock` — atomic unit containing gradients, RF pulses and an
+* :class:`ADC`: analog-to-digital converter timing specification.
+* :class:`SequenceBlock`: atomic unit containing gradients, RF pulses and an
   optional ADC window.
-* :class:`Sequence` — ordered list of :class:`SequenceBlock` objects that
+* :class:`Sequence`: ordered list of :class:`SequenceBlock` objects that
   defines a complete MRI pulse sequence.
-* :class:`BlochSolver` — drives the C++ Bloch simulator
+* :class:`BlochSolver`: drives the C++ Bloch simulator
   (:mod:`feelmri.BlochSimulator`) over an :class:`~feelmri.Phantom.FEMPhantom`
   mesh and assembles the magnetization response.
 
 Helper utilities:
 
-* :func:`create_multi_isochromats` / :func:`collapse_isochromats` — build and
+* :func:`create_multi_isochromats` / :func:`collapse_isochromats`: build and
   reduce off-resonance isochromat ensembles for T2* simulation.
 """
 import copy
@@ -66,7 +66,7 @@ CONCOMITANT_DT_GR_MS = 0.01
 # own `dt` is: x1.00 on `epi_v142`, x1.10 on `gre_v15`, x1.75 on
 # `flash_tr_v15`. Those are all SHORT-TR sequences. A long block at the
 # adapter's default `dt = 10 ms` is capped to 1 ms throughout, so a 3 s T1
-# recovery or a 5 s inversion delay reaches x9.97-9.98 -- on the step count
+# recovery or a 5 s inversion delay reaches x9.97-9.98, on the step count
 # and on the (n_nodes, n_steps) working set alike. A block whose own `dt` is
 # already at or below the cap is left untouched.
 B0_MOTION_DT_MS = 1.0
@@ -77,7 +77,7 @@ def demodulation_phase(times_ms, freq_offset_hz=0.0, phase_offset_rad=0.0,
     """Receiver phase Pulseq specifies for a set of ADC sample times, in rad.
 
     ``-2*pi*freq_offset*t + phase_offset + phase_modulation``, with ``t``
-    measured from the FIRST sample given -- the ADC event's own origin, which
+    measured from the FIRST sample given, the ADC event's own origin, which
     is what the offsets are referenced to.
 
     **The frequency term is NEGATED, the phase terms are not.** The Pulseq
@@ -86,19 +86,19 @@ def demodulation_phase(times_ms, freq_offset_hz=0.0, phase_offset_rad=0.0,
     the spins precessing ``+df`` faster to DC. Applied as ``exp(-i*phase)``,
     that needs ``exp(+i*2*pi*df*t)``. Measured on a narrow rod at ``+4 mm``
     under ``Gx = 10 mT/m``, demodulating at ``gammabar*Gx*4mm``: the rod lands
-    at ``-0.008 mm`` with the negation and at ``+7.927 mm`` without it -- the
+    at ``-0.008 mm`` with the negation and at ``+7.927 mm`` without it, the
     unnegated form pushes it FURTHER off centre, doubling the offset instead
     of removing it.
 
     ``phase_offset`` and ``phase_modulation`` keep their sign: ``MRObjects.RF``
     transmits ``exp(+i*phase_offset)``, so receive must conjugate it or RF
-    spoiling stops cancelling. Same shape as the assembler fix -- only the one
+    spoiling stops cancelling. Same shape as the assembler fix, only the one
     term is negated.
 
     The single implementation behind both :meth:`ADC.demodulate` and
     :meth:`feelmri.PulseqAdapter.ReadoutWindow.demodulate`, so the two cannot
-    drift. The solver never samples the ADC -- readout is synthesized from the
-    trajectory -- so applying this is the caller's job, and a caller driving
+    drift. The solver never samples the ADC. Readout is synthesized from the
+    trajectory, so applying this is the caller's job, and a caller driving
     ``mri_signal`` by hand must do it explicitly.
     """
     t = np.asarray(times_ms, dtype=float).reshape(-1)
@@ -150,7 +150,7 @@ def _raster_tolerance(*steps):
     A fixed tolerance is only safe while every real step is far above it. Ask
     for dt_rf = 1e-7 ms against a fixed 1e-6 and EVERY point is within tolerance
     of its neighbour, so the block collapses to a single time and is never
-    integrated -- a finer raster silently producing no raster at all.
+    integrated, a finer raster silently producing no raster at all.
     """
     positive = [float(s) for s in steps if s is not None and float(s) > 0.0]
     return min([RASTER_TOL_MS] + [0.01 * min(positive)]) if positive \
@@ -165,7 +165,7 @@ def _sloped_segment_times(g, dt):
     a straight segment exactly from its endpoints, which is why ``dt_gr``
     defaults to disabled. And whenever ``concomitant_fields`` is on, for EVERY
     method: ``Bc`` goes as ``G^2``, so along a ramp it is quadratic in time and
-    no trapezoidal rule is exact on it -- see ``CONCOMITANT_DT_GR_MS``.
+    no trapezoidal rule is exact on it. See ``CONCOMITANT_DT_GR_MS``.
     """
     ts = g.timings.m_as('ms') if isinstance(g.timings, Quantity) else np.asarray(g.timings, dtype=np.float64)
     amp = g.amplitudes.m_as('mT/m') if isinstance(g.amplitudes, Quantity) else np.asarray(g.amplitudes, dtype=np.float64)
@@ -198,7 +198,7 @@ def _rf_support_ms(rf):
 
     Authoritative on both construction paths: an analytic pulse builds timings
     as linspace(time - ref, time - ref + dur) so this reproduces that pair,
-    while an imported pulse carries its delay only in timings -- _convert_rf
+    while an imported pulse carries its delay only in timings, and _convert_rf
     sets time = ref = 0 and dur to the support LENGTH, so the (time, dur) pair
     describes [0, length] rather than [delay, delay + length].
 
@@ -224,8 +224,8 @@ def _concomitant_mT(pos, G, B0_mT):
     **This must stay identical to the kernel's own expression**
     (`BlochSimulator.cpp`, the `Bz_new` line). It exists as one function
     because the per-block Magnus seed recomputes the field in Python in TWO
-    places -- the plain path and the spoiler path, the latter on jittered
-    isochromat positions -- and a seed that disagrees with the kernel puts an
+    places, the plain path and the spoiler path, the latter on jittered
+    isochromat positions, and a seed that disagrees with the kernel puts an
     O(dt) error at every block boundary, silently.
 
     ``B0_mT <= 0`` returns exactly zero, which is how the feature is disabled.
@@ -250,7 +250,7 @@ def _concomitant_recentre(G, L, B0_mT):
 
     the quadratic part is unchanged, ``2 M L`` is a per-time-step 3-vector that
     rides the kernel's gradient hoist and ``L^T M L`` a per-time-step scalar.
-    So the node array never has to move -- which matters, because the LINEAR
+    So the node array never has to move, which matters, because the LINEAR
     encoding is deliberately measured from the slice centre and shifting the
     positions would corrupt it.
 
@@ -275,7 +275,7 @@ def _field_quad_mT(pos, q):
     """A static quadratic lab-frame field at `pos` (m), in mT.
 
     `q` is ``(xx, yy, zz, xy, xz, yz)`` in mT/m^2, in the frame `pos` is in.
-    **Must stay identical to the kernel's own expression** -- the two Magnus
+    **Must stay identical to the kernel's own expression**, the two Magnus
     seeds recompute the field in Python, and a seed that disagrees puts an
     O(dt) error at every block boundary, silently.
     """
@@ -358,8 +358,8 @@ class ADC:
     Notes
     -----
     The three offsets are demodulation parameters. ``BlochSolver`` does not
-    sample the ADC -- readout is synthesized from the k-space trajectory by
-    :meth:`~feelmri.Phantom.FEMPhantom.mri_signal` -- so applying them is the
+    sample the ADC. Readout is synthesized from the k-space trajectory by
+    :meth:`~feelmri.Phantom.FEMPhantom.mri_signal`, so applying them is the
     caller's job.
     """
 
@@ -385,7 +385,7 @@ class ADC:
     def demodulate(self, signal):
         """Apply this ADC's frequency/phase offsets to a signal sampled on it.
 
-        Needed by any caller assembling signal by hand -- `simulate_pulseq`
+        Needed by any caller assembling signal by hand, since `simulate_pulseq`
         does this for its own readout windows, but a manual
         `update_magnetization` + `mri_signal` pipeline gets nothing unless it
         calls this.
@@ -493,7 +493,7 @@ class SequenceBlock:
         p_gr = np.sum([g(t) for g in self.P_gradients], axis=0)
         s_gr = np.sum([g(t) for g in self.S_gradients], axis=0)
         # Informational: which of the requested times are ADC samples. The
-        # solver does not consume it -- readout is synthesized from the
+        # solver does not consume it: readout is synthesized from the
         # k-space trajectory, not from the magnetization time course.
         rel = np.asarray(t, dtype=np.float64)
         adc_local = (np.sort(np.asarray(self.adc.times.m_as('ms'),
@@ -668,8 +668,8 @@ class SequenceBlock:
         all_timings = _collapse_near_duplicates(np.sort(all_timings), tol)
 
         # A block's raster must not leave the block. Several sources feed it and
-        # they do not share an origin -- a user-defined Gradient keeps its own
-        # `timings` without applying `time` -- so a block whose extent starts late
+        # they do not share an origin, a user-defined Gradient keeps its own
+        # `timings` without applying `time`, so a block whose extent starts late
         # could otherwise be handed points before its own start.
         lo, hi = self.time_extent[0].m, self.time_extent[1].m
         inside = (all_timings >= lo - tol) & (all_timings <= hi + tol)
@@ -782,6 +782,19 @@ class Sequence:
         return f"Sequence with {len(self.blocks)} blocks."
 
     def add_block(self, block: SequenceBlock | Quantity, dt: Quantity = None):
+        """Append a block, a delay, or the blocks of another sequence.
+
+        Parameters
+        ----------
+        block : SequenceBlock, Sequence or Quantity
+            A block is appended as it stands. A ``Quantity`` of time becomes an
+            empty delay block of that length. Another ``Sequence`` has all of
+            its blocks appended, shifted by one common offset so their spacing
+            is preserved.
+        dt : Quantity, optional
+            Raster step for a delay block. Ignored for the other two kinds,
+            whose rasters are fixed when they are built.
+        """
         # `dt` builds the raster of a DELAY block and is meaningless for the
         # other two branches: a SequenceBlock's discrete_times are fixed at
         # construction and only ever shifted, and a nested Sequence carries its
@@ -911,6 +924,11 @@ class Sequence:
         return tuple(problems)
 
     def flatten(self):
+        """Return one block holding every gradient and RF pulse of the sequence.
+
+        The events keep their own absolute timings, so the result plays the
+        same waveform as the sequence it came from.
+        """
         # Flatten the sequence by creating a single block
         all_gradients = []
         all_rf_pulses = []
@@ -1027,7 +1045,7 @@ class BlochSolver:
     scanner : Scanner, optional
         Scanner hardware definition. Default is a standard 1.5 T scanner.
     M0 : float, optional
-        Scalar only -- the C++ kernel takes ``const T&``. A nodal array raises
+        Scalar only, the C++ kernel takes ``const T&``. A nodal array raises
         ``TypeError`` from the pybind signature, and would in any case broadcast
         ``M0 * ones((N, 1))`` to ``(N, N)``. For a spatially varying equilibrium
         use ``initial_Mz``, which is a nodal ``(N, 1)`` array.
@@ -1046,8 +1064,8 @@ class BlochSolver:
         the reversible part explicitly as a sub-ensemble and the readout
         replays it per sub-spin, so T2* on both sides would decay it twice.
 
-        Without ``t2_prime``, for a sequence with no refocusing pulse -- every
-        gradient-echo example shipped here -- pass T2* to BOTH: the reversible
+        Without ``t2_prime``, for a sequence with no refocusing pulse. Every
+        gradient-echo example shipped here. Pass T2* to BOTH: the reversible
         dephasing is never recovered, so that is the correct model and
         splitting them is not.
         Split (T2 here, T2* on the signal side) only when a refocusing pulse
@@ -1073,7 +1091,7 @@ class BlochSolver:
         Intra-voxel field-inhomogeneity time constant (ms), scalar or one
         entry per local node. ``None`` (the default) is the off switch. When set, every node carries
         ``spectral_bins`` sub-spins with static frequency offsets drawn from
-        ``lineshape``, and the ensemble PERSISTS across blocks -- so the
+        ``lineshape``, and the ensemble PERSISTS across blocks, so the
         reversible dephasing it produces is genuinely REPHASED by a refocusing
         pulse, which no scalar T2* can do.
 
@@ -1085,7 +1103,7 @@ class BlochSolver:
         in proportion to it (2.4e-2 relative at ``|Bz|`` = 8 mT). The solver
         warns if you ask for both.
     spectral_bins : int, optional
-        Number of sub-spins per node, as an UPPER BOUND -- :func:`lineshape_bins`
+        Number of sub-spins per node, as an UPPER BOUND. :func:`lineshape_bins`
         prunes bins whose weight is below float64 epsilon, of which
         Gauss-Hermite produces many (4 of 32, 70 of 128). Default 16, which is
         machine-precision for the gaussian and uniform lineshapes. See
@@ -1093,7 +1111,7 @@ class BlochSolver:
     lineshape : {'gaussian', 'uniform', 'lorentzian'}, optional
         Shape of the intra-voxel field distribution. Default ``'gaussian'``.
         ``'lorentzian'`` is the only one that targets the conventional
-        ``exp(-t/T2*)`` and the only inaccurate one -- see
+        ``exp(-t/T2*)`` and the only inaccurate one. See
         :func:`lineshape_bins`.
     pod_trajectory : POD or None, optional
         Motion trajectory for moving-phantom simulations. Default is None.
@@ -1108,9 +1126,9 @@ class BlochSolver:
         every coherence pathway that survives a block boundary, so it is
         wrong for FLASH, bSSFP, EPI echo trains and anything driven by a
         stimulated echo. ``None`` (the default) resolves to ``False`` when
-        the sequence sets ``Sequence.explicit_spoiling`` -- which
+        the sequence sets ``Sequence.explicit_spoiling``, which
         :func:`~feelmri.PulseqAdapter.import_pulseq` does, since a ``.seq``
-        file spells its spoilers out -- and ``True`` otherwise. Pass a bool
+        file spells its spoilers out, and ``True`` otherwise. Pass a bool
         to override.
     """
 
@@ -1174,12 +1192,12 @@ class BlochSolver:
             """Broadcast a scalar or per-node value onto the (n, 1) node column.
 
             `ones` is (n, 1), so the bare `value * ones` idiom turns a plain
-            (n,) array into an (n, n) OUTER PRODUCT rather than raising -- at
+            (n,) array into an (n, n) OUTER PRODUCT rather than raising, at
             63 357 nodes that is a silent 32 GB allocation, which is how this
             was found.
 
             Accepts a scalar, a SIZE-1 array or list (`np.atleast_1d(x)`, a
-            one-element parameter file, a keepdims reduction -- all ordinary
+            one-element parameter file, a keepdims reduction. All ordinary
             ways to spell a scalar, and all of which the `* ones` idiom used to
             broadcast), an (n,) array, or an (n, 1) array.
             """
@@ -1195,7 +1213,7 @@ class BlochSolver:
 
             if isinstance(value, Quantity):
                 # np.asarray on a Quantity SILENTLY strips the unit, so a
-                # delta_B given in T would arrive as if it were mT -- a 1000x
+                # delta_B given in T would arrive as if it were mT, a 1000x
                 # error. T1/T2 reach here already converted; anything else must
                 # name its unit.
                 return refuse(
@@ -1223,7 +1241,7 @@ class BlochSolver:
                     arr = arr.reshape(-1, 1)
             # Preserve the template's dtype. Under NEP 50 `np.asarray(1000.0) *
             # ones_f32` promotes to float64, where the bare `1000.0 * ones_f32`
-            # idiom stayed float32 -- which would silently double the memory of
+            # idiom stayed float32, which would silently double the memory of
             # T1/T2/delta_B and force a copy in every solve().
             return (arr * base).astype(base.dtype, copy=False)
 
@@ -1288,10 +1306,10 @@ class BlochSolver:
                 "discarded (Mxy is zeroed regardless). Pass "
                 "perfect_spoiling=False to keep it, or drop the spoiler flag.")
         # Multi-isochromat dephasing controls for blocks with spoiler=True.
-        # K          -- number of isochromats per local FE node.
-        # distribution -- 'uniform' (Monte-Carlo, ~1/sqrt(K) residual) or
+        # K: number of isochromats per local FE node.
+        # distribution: 'uniform' (Monte-Carlo, ~1/sqrt(K) residual) or
         #                 'sobol'/'halton' (QMC, ~(log K)^d / K residual).
-        # seed       -- reproducibility for both samplers; default 0 makes
+        # seed: reproducibility for both samplers; default 0 makes
         #                 spoiler results deterministic across runs.
         self.isochromat_K = int(isochromat_K)
         self.isochromat_distribution = str(isochromat_distribution).lower()
@@ -1299,7 +1317,7 @@ class BlochSolver:
         # Concomitant (Maxwell) fields. OFF by default: switching it on moves
         # every existing result, so it must be a knowing choice. When off the
         # kernel is handed B0 = 0, which makes the term identically zero
-        # rather than merely small -- the 24-case numerical A/B against the
+        # rather than merely small, the 24-case numerical A/B against the
         # feature-off build reads 0.000e+00.
         self.concomitant_fields = bool(concomitant_fields)
         self._B0_mT = (float(scanner.field_strength.m_as('mT'))
@@ -1365,8 +1383,8 @@ class BlochSolver:
             self._bin_w = None
             self._n_bins = 1
         else:
-            # Scalar, (n,) or (n, 1). Per-node is the useful case -- T2' is a
-            # tissue property and is dominated by local susceptibility -- and it
+            # Scalar, (n,) or (n, 1). Per-node is the useful case, since T2' is a
+            # tissue property and is dominated by local susceptibility, and it
             # costs nothing here, because the offsets ride delta_B rather than
             # the relaxation path that guard 2 protects.
             t2p = np.asarray(Quantity(t2_prime).m_as('ms'),
@@ -1392,15 +1410,15 @@ class BlochSolver:
             # Follow the rule, not the request: lineshape_bins prunes sub-spins
             # whose weight is below float64 epsilon.
             self._n_bins = int(self._bin_z.size)
-            # The bin offsets are small -- z/(T2'*gamma) is 3e-5 to 5e-4 mT at
-            # T2' = 50 ms -- and the kernel adds them to `curr.G + delta_B`, which is
+            # The bin offsets are small: z/(T2'*gamma) is 3e-5 to 5e-4 mT at
+            # T2' = 50 ms, and the kernel adds them to `curr.G + delta_B`, which is
             # O(1-10 mT) under a readout gradient. In float32 the rounding quantum of
             # that sum swamps the offset in proportion to the background field. It is a
             # floor, not a step-size error, so a finer dt does not help.
             if self._dtype == 'float32':
                 warnings.warn(
                     "BlochSolver: t2_prime with dtype='float32' loses the bin "
-                    "offsets into the background field -- measured 1.9e-3 "
+                    "offsets into the background field. Measured 1.9e-3 "
                     "relative at |Bz| = 1 mT and 2.4e-2 at 8 mT, and it does "
                     "not improve with dt. Use dtype='float64' for quantitative "
                     "T2' work.")
@@ -1454,7 +1472,7 @@ class BlochSolver:
         The POD modes are static: ``POD.get_modes`` hands back the same array
         on every call and only the *weights* move with time. Rebuilding the
         kernel's view of them per block therefore repeats an identical copy for
-        every block of the sequence -- and on a ``PODSum`` the
+        every block of the sequence, and on a ``PODSum`` the
         ``np.concatenate`` of the two mode sets is repeated too. Both are
         hoisted here and cached until the trajectory object or the local node
         count changes.
@@ -1524,7 +1542,7 @@ class BlochSolver:
 
     @property
     def n_spectral_bins(self):
-        """Sub-spins per node actually in use -- at most ``spectral_bins``."""
+        """Sub-spins per node actually in use, at most ``spectral_bins``."""
         return self._n_bins
 
     @property
@@ -1550,7 +1568,7 @@ class BlochSolver:
 
         The per-node tests are made COLLECTIVE. They inspect local-node data,
         so a global field that is uniform overall can look non-uniform on one
-        rank only -- that rank would raise in ``__init__`` while the others
+        rank only. That rank would raise in ``__init__`` while the others
         proceeded into ``solve()`` and blocked forever on its closing
         ``Barrier``.
         """
@@ -1580,7 +1598,7 @@ class BlochSolver:
 
         # Guard 1: a K-fold node expansion also duplicates the POD mode matrix,
         # which is rebuilt and Fortran-transposed on every block once the ensemble
-        # persists -- 3*N*K*M reals. Supporting it needs a kernel bin axis sharing
+        # persists: 3*N*K*M reals. Supporting it needs a kernel bin axis sharing
         # positions and modes, so refuse instead.
         #
         # Collective: this sits between the allgather above and the allreduces
@@ -1594,7 +1612,7 @@ class BlochSolver:
              "sub-spins."), exc_type=NotImplementedError)
         # Guard 2: UniformRelax survives np.repeat of a constant, but a per-node
         # T1/T2 drops onto the kernel's per-node std::exp path, which recomputes
-        # on every dt change -- 2*N*K libm calls on roughly half of all steps,
+        # on every dt change: 2*N*K libm calls on roughly half of all steps,
         # which would dominate the node loop.
         for name, arr in (('T1', self.T1.m), ('T2', self.T2.m)):
             a = np.asarray(arr).reshape(-1)
@@ -1631,17 +1649,17 @@ class BlochSolver:
                for b in getattr(self.sequence, 'blocks', [])):
             raise NotImplementedError(
                 "BlochSolver: t2_prime with a spoiler=True block is not "
-                "supported. They are two independent sub-voxel axes -- a "
+                "supported. They are two independent sub-voxel axes, a "
                 "spatial spread is rewound by a gradient, a frequency spread by "
-                "a 180 -- so they would need a tensor product.")
+                "a 180, so they would need a tensor product.")
 
     def _bin_state_is_current(self, initial_Mxy, initial_Mz):
         """Whether the carried sub-ensemble still matches the public state.
 
         The ensemble is resumed only when the caller has left ``initial_Mxy`` /
         ``initial_Mz`` at the values this solver published for them. If either
-        has been reassigned or written in place -- an inversion-recovery or
-        multi-TI loop resetting the magnetization between shots -- the caller's
+        has been reassigned or written in place, an inversion-recovery or
+        multi-TI loop resetting the magnetization between shots, the caller's
         value wins and the ensemble is re-seeded from it, rather than silently
         continuing the previous shot's sub-voxel coherence.
         """
@@ -1688,16 +1706,16 @@ class BlochSolver:
 
         Only called when a spatially varying `b0_field` and a
         `pod_trajectory` are both live. A gradient-free delay is exact under
-        any subdivision when the field is per-node constant -- which is why
-        the adapter builds one at `dt = 10 ms` -- and stops being so the
+        any subdivision when the field is per-node constant, which is why
+        the adapter builds one at `dt = 10 ms`, and stops being so the
         moment the spins move through a field that varies in space.
 
         Built LOCALLY and never written back, for the reason `_ramp_raster`
         gives. A block whose own `dt` is already at or below the cap is left
         alone: the caller has chosen a raster. An explicit `dt_gr` is NOT a
-        reason to bail out the way it is in `_ramp_raster` -- that is a
+        reason to bail out the way it is in `_ramp_raster`. That is a
         gradient sub-raster and says nothing about how finely the motion is
-        sampled -- but it does enter the collapse tolerance below.
+        sampled, but it does enter the collapse tolerance below.
         """
         t = np.asarray(times_ms, dtype=np.float64)
         if t.size < 2:
@@ -1730,6 +1748,36 @@ class BlochSolver:
             np.sort(np.concatenate([t] + extra)), tol)
 
     def solve(self, start: int = 0, end: int = None):
+        """Evolve the magnetization through a range of sequence blocks.
+
+        Each block is integrated on its own time raster, and the state carries
+        over from one block to the next, so a later call resumes where the
+        previous one stopped. Only the blocks flagged ``store_magnetization``
+        contribute a column to the result.
+
+        Parameters
+        ----------
+        start : int, optional
+            First block to solve. A negative value counts back from the end of
+            the sequence, which is how the per-shot steady-state loop in the
+            examples adds a couple of blocks and solves only those.
+        end : int, optional
+            One past the last block to solve. Defaults to the end of the
+            sequence.
+
+        Returns
+        -------
+        tuple of np.ndarray
+            ``(Mxy, Mz)``, each ``(n_local_nodes, n_stored)`` with one column
+            per block that asked for a snapshot, in block order. ``Mxy`` is
+            complex and ``Mz`` real.
+
+        Notes
+        -----
+        Ends on ``MPI_comm.Barrier()``, so a script timing this phase against
+        another must open its own timer on a barrier as well, or the two
+        timers share the inter-rank wait and both count it.
+        """
         # Current machine time
         t0 = time.perf_counter()
 
@@ -1777,8 +1825,8 @@ class BlochSolver:
         b0_varies_in_space = (b0_gradient is not None or b0_quad is not None
                               or b0_node_lin is not None)
 
-        # `orient` measures the nodes from the slice centre, so `Bc` -- which is
-        # centred on isocentre -- is evaluated at the wrong origin. Only when
+        # `orient` measures the nodes from the slice centre, so `Bc`, which is
+        # centred on isocentre: is evaluated at the wrong origin. Only when
         # the term is live; the linear encoding is correct as it stands and must
         # not move. `x` is then physical-frame but offset by -LOC, so this is
         # the offset in the frame the kernel sees.
@@ -1804,8 +1852,8 @@ class BlochSolver:
         field_quad = (np.empty(0, dtype=self._np_real) if b0_quad is None
                       else np.ascontiguousarray(b0_quad, dtype=self._np_real))
 
-        # Per node, so it rides every expansion below -- the sub-ensemble repeat
-        # and the isochromat one -- exactly as `delta_B` and `b1_map` do.
+        # Per node, so it rides every expansion below, the sub-ensemble repeat
+        # and the isochromat one, exactly as `delta_B` and `b1_map` do.
         node_lin = (np.empty((0, 3), dtype=self._np_real) if b0_node_lin is None
                     else np.ascontiguousarray(b0_node_lin, dtype=self._np_real))
 
@@ -1830,7 +1878,7 @@ class BlochSolver:
 
         # Re-check the sub-ensemble's preconditions against the live attributes.
         # They were validated in __init__, but all of them are public and mutable,
-        # and `modes` -- the array guard 1 protects -- is sized from the
+        # and `modes`, the array guard 1 protects, is sized from the
         # un-expanded node count.
         self._check_bin_preconditions()
 
@@ -1846,7 +1894,7 @@ class BlochSolver:
         # the WHOLE sequence. The two agree only for a whole-sequence solve.
         store_indices = [i for i, block in enumerate(blocks) if block.store_magnetization]
         # Only for an imported sequence, which is the only thing that carries
-        # a ReadoutWindow to disagree with -- the per-shot `solve(start=-2)`
+        # a ReadoutWindow to disagree with, the per-shot `solve(start=-2)`
         # idiom on a natively built sequence is correct and must stay quiet.
         # Once per solver and on rank 0 only, and the NORMALISED start is what
         # is tested: a negative start is the only non-zero start in examples/.
@@ -1891,8 +1939,8 @@ class BlochSolver:
             #
             # COLLECTED, not raised on the spot. This runs upstream of the row
             # check below and of `solve()`'s closing Barrier, so a bare reshape
-            # error here -- which is what a caller who reassigned `delta_B` to
-            # the wrong length gets -- leaves the offending rank outside both.
+            # error here, which is what a caller who reassigned `delta_B` to
+            # the wrong length gets: leaves the offending rank outside both.
             _b0 = np.asarray(b0_delta_B, dtype=self._np_real)
             mismatch = ('' if _b0.size == delta_B.size else
                         f"BlochSolver: `delta_B` holds {delta_B.size} entries "
@@ -1929,7 +1977,7 @@ class BlochSolver:
         # Checked once here on the PER-NODE arrays and again below on the
         # expanded ones. Without this pass a wrong length surfaces inside the
         # K-fold expansion instead, as `operands could not be broadcast
-        # together with shapes (64,1) (40,1)` -- which names neither the
+        # together with shapes (64,1) (40,1)`, which names neither the
         # attribute nor the node count.
         _check_rows_collectively(
             (('T1', T1, 1), ('T2', T2, 1), ('delta_B', delta_B, 1),
@@ -1937,7 +1985,7 @@ class BlochSolver:
             nb_nodes, f"{nb_nodes} nodes")
 
         # Spectral sub-ensemble. Every per-node array grows K-fold through
-        # np.repeat, so node n occupies rows [n*K : (n+1)*K] -- the same
+        # np.repeat, so node n occupies rows [n*K : (n+1)*K], the same
         # consecutive-duplicate ordering create_multi_isochromats uses. Only
         # delta_B actually differs between a node's bins: a sub-spin shares its
         # node's position, relaxation and transmit sensitivity.
@@ -2067,7 +2115,7 @@ class BlochSolver:
                 # The argument is time measured from the start of this block, and the two
                 # roles it plays are different quantities:
                 #
-                #   fold(t + timeshift)  picks the cardiac phase -- absolute
+                #   fold(t + timeshift)  picks the cardiac phase, absolute
                 #   t itself             is `t_ro`, the Taylor time
                 #
                 # PODVelocity models position as `x0 + v * t_ro` with `t_ro` measured from
@@ -2088,7 +2136,7 @@ class BlochSolver:
                     self.pod_trajectory.update_timeshift(user_shift)
 
                 # Get the static modes mapped to the original local nodes
-                # (built once and cached -- they do not change between blocks)
+                # (built once and cached. They do not change between blocks)
                 modes = self._trajectory_modes(nb_nodes)
 
                 # Format weights securely for PyBind11
@@ -2183,7 +2231,7 @@ class BlochSolver:
                 # Same consecutive-duplicate ordering: the gradient is a
                 # property of the NODE, so all K isochromats share it. The
                 # kernel multiplies it by the JITTERED position, so each one
-                # picks up g . jitter -- the correct first-order variation of
+                # picks up g . jitter, the correct first-order variation of
                 # the field across the dephasing sphere, for free.
                 node_lin_big = (node_lin if node_lin.size == 0
                                 else np.ascontiguousarray(
@@ -2292,15 +2340,15 @@ class BlochSolver:
             initial_Mz[:, 0]  = Mz_[:, -1]
 
         # Keep the public attributes in step with the working copies. They are
-        # normally the very same buffers -- np.ascontiguousarray is a no-op
-        # when dtype and layout already match -- so rebinding only does
+        # normally the very same buffers: np.ascontiguousarray is a no-op
+        # when dtype and layout already match, so rebinding only does
         # anything when a dtype conversion forced a copy above.
         if n_bins > 1:
             # Keep the sub-ensemble for the next solve() and expose the collapsed
             # per-node state on the public attributes. Both are stamped with the
             # per-node state they correspond to, so a caller who resets
-            # initial_Mxy/initial_Mz between calls -- an inversion-recovery or
-            # multi-TI loop -- is honoured instead of resuming the previous ensemble.
+            # initial_Mxy/initial_Mz between calls, an inversion-recovery or
+            # multi-TI loop, is honoured instead of resuming the previous ensemble.
             self._bin_Mxy = initial_Mxy
             self._bin_Mz = initial_Mz
             self.initial_Mxy = collapse_bins(
@@ -2339,7 +2387,7 @@ def _check_rows(arrays, n_rows, detail):
 
   The kernel sizes everything from ``r0.rows()`` and validates no other length
   (only ``b1_map``), so a wrong length is an out-of-bounds WRITE under
-  ``-DNDEBUG -DEIGEN_NO_DEBUG`` rather than an exception -- it corrupts the
+  ``-DNDEBUG -DEIGEN_NO_DEBUG`` rather than an exception. It corrupts the
   heap. Every array here is reachable as a public attribute, and reassigning
   one between solves is the way in: ``solver.initial_Mxy = 0.0 + 0j`` is the
   exact spelling the constructor accepts, and ``np.ascontiguousarray`` of a
@@ -2366,7 +2414,7 @@ def _check_rows_collectively(arrays, n_rows, detail):
   """:func:`_check_rows`, reported through the collective.
 
   The arrays it inspects are per-LOCAL-node and reachable as public
-  attributes, so a bad one can exist on a single rank -- and ``solve()`` ends
+  attributes, so a bad one can exist on a single rank, and ``solve()`` ends
   in ``MPI_comm.Barrier()``. A bare raise there leaves the offending rank
   outside that barrier while every other rank waits in it: reproduced as a
   hang under ``mpirun -n 2`` with ``solver.delta_B`` one node short on rank 1,

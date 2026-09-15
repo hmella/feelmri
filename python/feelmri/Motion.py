@@ -366,7 +366,7 @@ class RespiratoryMotion:
             raise ValueError(
                 f"{type(self).__name__}: no motion data at t = {first:.6g} ms; "
                 f"the record covers [{lo:.6g}, {hi:.6g}] ms and the "
-                f"interpolator does not extrapolate, so it answers NaN -- "
+                f"interpolator does not extrapolate, so it answers NaN, "
                 f"which multiplies into every node and every k-space sample "
                 f"rather than into that one time point. Pass "
                 f"`is_periodic=True` if the motion repeats, extend the "
@@ -421,8 +421,8 @@ class POD:
         ``phantom.local_to_global_nodes``. Used as ``phi[local_to_global_nodes]``
         to slice this rank's rows out of the global modes, so it maps local to
         global and not the other way round. If given, the decomposition still
-        runs on the GLOBAL snapshots -- which is what makes every rank agree on
-        the weights -- and only the modes are sliced.
+        runs on the GLOBAL snapshots, which is what makes every rank agree on
+        the weights, and only the modes are sliced.
 
         Was called ``global_to_local``, which names the opposite direction;
         that spelling is still accepted.
@@ -648,7 +648,7 @@ class POD:
         ``_pp_batch`` is built with ``extrapolate=False``, so scipy answers
         NaN outside ``[times[0], times[-1]]`` rather than raising. That NaN
         then multiplies into every mode, so ONE out-of-range time point does
-        not spoil its own sample -- it turns the whole displacement field, and
+        not spoil its own sample. It turns the whole displacement field, and
         with it the entire magnetization and every k-space sample, into NaN.
 
         The predicate is on TIME, which is sequence-level and therefore the
@@ -666,7 +666,7 @@ class POD:
             raise ValueError(
                 f"{type(self).__name__}: no motion data at t = {first:.6g} ms; "
                 f"the snapshots cover [{lo:.6g}, {hi:.6g}] ms and the "
-                f"interpolator does not extrapolate, so it answers NaN -- "
+                f"interpolator does not extrapolate, so it answers NaN, "
                 f"which spreads to every mode, every node and every k-space "
                 f"sample rather than to that one time point. Pass "
                 f"`is_periodic=True` if the motion repeats, extend the "
@@ -801,7 +801,7 @@ class POD:
         :meth:`reconstruction_error` is an energy-weighted average over
         time, so it is dominated by the high-amplitude snapshots. Frames
         carrying little energy can be reconstructed far worse than the
-        global figure implies — on pulsatile flow, a truncation that holds
+        global figure implies: on pulsatile flow, a truncation that holds
         systole to a few percent routinely leaves diastole at tens of
         percent. Check this curve before trusting a mode count.
 
@@ -872,8 +872,8 @@ class PODVelocity(POD):
         t_eff = self._fold_time(t_array + self.timeshift)
         weights = self._weights_at(t_eff).astype(np.float32)
         # Scale by readout time to convert displacement modes to instantaneous
-        # velocity. `t_array` is `t_ro`, the time since the EXCITATION -- the
-        # Taylor time of `x = x0 + v * t_ro` -- while `t_eff` above is absolute
+        # velocity. `t_array` is `t_ro`, the time since the EXCITATION, the
+        # Taylor time of `x = x0 + v * t_ro`, while `t_eff` above is absolute
         # and only picks the cardiac phase. The two are different quantities
         # and must not be conflated: handing this absolute sequence time made
         # the displacement grow without bound over a long sequence.
@@ -898,7 +898,7 @@ class PODSum:
         self.pod1 = pod1
         self.pod2 = pod2
         # An OFFSET on top of whatever each child already carries, not a value
-        # that replaces them -- see update_timeshift.
+        # that replaces them. See update_timeshift.
         self.timeshift = 0.0
 
     @property

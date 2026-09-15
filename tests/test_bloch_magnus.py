@@ -104,7 +104,7 @@ def test_the_bare_bloch_closed_forms(minimal_phantom):
 
   One test rather than three: they share a fixture and a single empty block,
   and each is one line of algebra with no interaction between them. The kernel
-  returning only the FINAL state -- one column, not a history -- is asserted
+  returning only the FINAL state, one column, not a history, is asserted
   here because every other test in this file depends on it.
   """
   T1_ms, T2_ms, dB0_mT = 200.0, 50.0, 1.0e-3
@@ -148,8 +148,8 @@ def test_hard_pulse_orders_agree_on_constant_field(minimal_phantom):
 
   This is the bridge that lets the five closed-form tests above run at the
   default method alone rather than three times each. Their fields are all
-  piecewise-constant -- zero for the relaxation pair, a constant Bz for
-  precession, a constant B1 for the two hard pulses -- which is exactly the
+  piecewise-constant: zero for the relaxation pair, a constant Bz for
+  precession, a constant B1 for the two hard pulses, which is the
   regime pinned here. Relaxation is finite so the shared T1/T2 path is
   covered too, not only the rotation.
   """
@@ -248,7 +248,7 @@ def test_sinc_convergence_slopes(minimal_phantom):
     which this implementation does not include.
 
   The test asserts the slopes and also verifies that magnus4 produces
-  a uniformly smaller error than magnus2 at every dt — that is what
+  a uniformly smaller error than magnus2 at every dt: that is what
   the commutator correction actually buys."""
   dt_grid = np.array([0.05, 0.025, 0.0125, 0.00625])
   dt_ref = 0.001
@@ -282,7 +282,7 @@ def test_sinc_convergence_slopes(minimal_phantom):
   # pulse the commutator |rf_new*Bz_old - rf_old*Bz_new| is tiny vs.
   # the leading M2 error from the trapezoidal Omega_1 quadrature. We
   # still verify that magnus4 doesn't *regress* by more than a small
-  # constant factor relative to magnus2 at the coarsest dt — the
+  # constant factor relative to magnus2 at the coarsest dt: the
   # slice-select test exercises the regime where the commutator
   # genuinely helps.
   ratio_coarse = all_errors['magnus4'][0] / all_errors['magnus2'][0]
@@ -394,7 +394,7 @@ def test_magnus_state_reseeded_at_block_start(minimal_phantom):
   bogus zero-field average on step 0 of any block beyond the first.
   Phase is not asserted here because the FEelMRI discrete-time
   generator uses ``np.arange(start, end, dt)`` (endpoint-exclusive),
-  which costs ``dt`` of evolution at every block boundary — this
+  which costs ``dt`` of evolution at every block boundary: this
   affects all three orders identically and is unrelated to Magnus."""
   for method in METHODS:
     seq = Sequence()
@@ -436,7 +436,7 @@ T2_PRIME_MS = 20.0
 
 
 def _t2_prime_echo_sequence(tau_ms, n_steps, refocus, pulse_ms=0.002):
-  """90 -- tau -- (180) -- tau, sampled every tau/n_steps."""
+  """90, tau, (180), tau, sampled every tau/n_steps."""
   seq = Sequence()
   seq.add_block(make_hard_pulse_block(np.pi / 2, dur_ms=pulse_ms, dt_ms=1e-4))
   step = tau_ms / n_steps
@@ -482,8 +482,8 @@ def test_free_induction_decays_with_the_shape_of_its_lineshape(
 
   The residual is set by the finite pulse width, not the quadrature: the time
   origin is the pulse CENTRE while the first sample is taken at its end.
-  Measured, it falls exactly linearly with the pulse duration -- 3.86e-4 at
-  20 us, 3.86e-5 at 2 us, 3.87e-6 at 0.2 us -- so at the 2 us used here the
+  It falls linearly with the pulse duration, measured at
+  20 us, 3.86e-5 at 2 us, 3.87e-6 at 0.2 us, so at the 2 us used here the
   quadrature (1.7e-8 at K=16) is nowhere near the limit.
   """
   n_steps, tau = 12, 30.0
@@ -498,7 +498,7 @@ def test_spin_echo_rephases_what_t2_prime_dephased(minimal_phantom):
   """The point of the whole feature, and the one thing no scalar can do.
 
   T2 is infinite, so every radian lost is REVERSIBLE and a 180 must bring all
-  of it back. Under the scalar model -- T2* handed to the solver as T2 -- the
+  of it back. Under the scalar model, T2* handed to the solver as T2, the
   magnetization decays monotonically and reaches exp(-2 tau / T2*) at the echo
   with no recovery whatever, which is the control asserted below.
   """
@@ -527,7 +527,7 @@ def test_spin_echo_rephases_what_t2_prime_dephased(minimal_phantom):
 
 def test_rephasing_is_exact_for_every_lineshape_and_bin_count(minimal_phantom):
   """Refocusing is exact for ANY static distribution, so the echo amplitude
-  does not depend on the quadrature rule -- only the decay BETWEEN echoes
+  does not depend on the quadrature rule, only the decay BETWEEN echoes
   does. Worth pinning: it is the reason the inaccurate lorentzian rule is
   still usable for echo-based sequences."""
   n_steps, tau = 6, 24.0
@@ -555,8 +555,8 @@ def test_bin_weights_are_a_probability_distribution(minimal_phantom):
       z, w = lineshape_bins(K, lineshape)
       # AT MOST K bins: the rule prunes sub-spins whose weight is below
       # float64 epsilon, which Gauss-Hermite produces in quantity (4 of 32,
-      # 70 of 128). Pruning them is free -- it moves neither the error nor the
-      # reach -- so the contract is the distribution, not the array length.
+      # 70 of 128). Pruning them is free. It moves neither the error nor the
+      # reach, so the contract is the distribution, not the array length.
       assert z.shape == w.shape and 1 <= z.size <= K
       assert w.min() >= 0.0, f'{lineshape} K={K} has a negative weight'
       assert abs(w.sum() - 1.0) < 1e-15, f'{lineshape} K={K} sums to {w.sum()}'
@@ -582,7 +582,7 @@ def test_bin_weights_are_a_probability_distribution(minimal_phantom):
 
 
 def test_t2_prime_refuses_what_stage_one_cannot_do(minimal_phantom):
-  """Each guard names a real cost, not a missing convenience -- see the
+  """Each guard names a real cost, not a missing convenience. See the
   docstrings. Silence here would mean a K-fold slowdown or a wrong answer."""
   seq = make_single_block_sequence(make_empty_block(5.0, dt_ms=1.0))
   common = dict(T1=Quantity(1e9, 'ms'), initial_Mz=1.0,
@@ -617,7 +617,7 @@ def test_finite_bin_sets_revive_and_the_sizing_rule_holds():
   """A finite ensemble is quasi-periodic: it cannot stay cancelled forever.
 
   Pinned rather than merely documented because the failure is SILENT and looks
-  like signal -- a free induction decay that has reached zero climbs back out.
+  like signal, a free induction decay that has reached zero climbs back out.
   Measured usable range for the gaussian rule is tau/T2' = 0.2*K (2.50 at K=8,
   4.67 at 16, 7.86 at 32, 12.47 at 64), which is the source of the
   `K >= 5 * tau_max / T2'` guidance in `lineshape_bins`.
@@ -655,7 +655,7 @@ def test_finite_bin_sets_revive_and_the_sizing_rule_holds():
 @pytest.fixture(scope='module')
 def wide_phantom(tmp_path_factory):
   """A phantom whose bounding box is 20 x 23 x 17 cm, so a term quadratic in
-  position is measurable -- `minimal_phantom` spans 1 cm, where it is not --
+  position is measurable, while `minimal_phantom` spans 1 cm where it is not,
   and with every node at DISTINCT x, y and z.
 
   The distinctness matters. `make_minimal_tet_mesh` puts four of its five nodes
@@ -766,7 +766,7 @@ def test_concomitant_phase_matches_the_maxwell_closed_form(wide_phantom, G):
 
 def test_concomitant_phase_can_only_ever_retard(wide_phantom):
   """Bc is `(Bx^2 + By^2)/(2 B0)`, a sum of squares, so the phase it adds can
-  only ever be negative -- for every gradient and every position.
+  only ever be negative, for every gradient and every position.
 
   The previous version of this test looped 200 random gradients through the
   test's OWN helper, which is unfalsifiable and touches no library code, and
@@ -790,7 +790,7 @@ def test_concomitant_phase_can_only_ever_retard(wide_phantom):
   for _ in range(4):
     G = tuple(rng.uniform(-30.0, 30.0, 3))
     # Keep the accumulated phase inside one turn. np.angle wraps, so a phase
-    # past -pi comes back POSITIVE and would look like a sign error -- which is
+    # past -pi comes back POSITIVE and would look like a sign error, which is
     # how the first version of this test failed.
     per_ms = gamma * float(_concomitant_field_mT(nodes, G, B0_mT).max())
     dur_ms = min(5.0, 0.8 * np.pi / per_ms)
@@ -840,7 +840,7 @@ def test_the_solver_evaluates_bc_in_the_physical_frame(wide_phantom):
 
   Measured at a 20 deg tilt on this node cloud: 1.559 rad of disagreement,
   31.6% of the phase. The guard below is what makes that a finding rather than
-  a tolerance -- a shallow tilt would make the two frames agree for free, and
+  a tolerance, a shallow tilt would make the two frames agree for free, and
   the test would then pass on the unfixed code.
 
   float64 throughout: at float32 the solver's own noise is ~1e-2 rad, an order
@@ -887,9 +887,9 @@ def test_the_solver_evaluates_bc_in_the_physical_frame(wide_phantom):
   assert np.abs(np.exp(1j * lin_phys) - np.exp(1j * lin_img)).max() < 1e-3, (
     'the rotation moved the LINEAR encoding, which is frame-invariant')
 
-  # VACUITY GUARD. The frame-naive answer -- `Bc` evaluated on the imaging
+  # VACUITY GUARD. The frame-naive answer, `Bc` evaluated on the imaging
   # coordinates with the logical gradient, which is what the solver did before
-  # -- has to be far enough away that agreeing is evidence.
+  # has to be far enough away that agreeing is evidence.
   naive = -gamma * _concomitant_field_mT(X, tuple(G_img), B0_mT) * dur_ms
   truth = -gamma * _concomitant_field_mT(P, tuple(G_phys), B0_mT) * dur_ms
   gap = float(np.abs(naive - truth).max())
@@ -915,7 +915,7 @@ def _spin_echo_phase(phantom, gradients, with_180, dur_ms=4.0):
     if with_180:
       # NON-SELECTIVE. A slice-selective 180 plays a gradient symmetric about
       # the pulse, and `Bc` is EVEN in G, so the two halves of that lobe add
-      # instead of cancelling -- which would put concomitant phase into the
+      # instead of cancelling, which would put concomitant phase into the
       # very case that is supposed to refocus it.
       seq.add_block(make_hard_pulse_block(np.pi, dur_ms=0.2))
     seq.add_block(_gradient_block(gradients[1], dur_ms))
@@ -939,7 +939,7 @@ def test_the_spin_echo_trio_separates_the_linear_and_maxwell_terms(wide_phantom)
     C  (G, -G) with a 180   linear DOUBLES     Bc refocuses
 
   A 180 refocuses any static field, and `Bc(-G) == Bc(G)` because it is a sum
-  of squares -- so the two terms respond oppositely to the same pair of
+  of squares, so the two terms respond oppositely to the same pair of
   switches. A concomitant phase bolted on as a post-hoc `integral(G^2)` rather
   than carried through the evolution satisfies the closed-form test that
   already exists here and fails A and C by exactly 2x, because it has no way
@@ -1009,7 +1009,7 @@ def test_b1_scaling_is_identical_to_scaling_the_pulse(wide_phantom):
   |b1|^2. Substituting the scaled RF into both endpoints gets that right for
   free; scaling the assembled rotation once would get the second wrong.
 
-  It needs a complex, time-varying pulse under a gradient -- with a real hard
+  It needs a complex, time-varying pulse under a gradient, with a real hard
   pulse the commutator vanishes and the test passes under either scaling. The
   magnus2-vs-magnus4 gap below is the proof that it is live here.
   """
@@ -1068,7 +1068,7 @@ def test_b1_map_sets_the_flip_and_the_transmit_phase_per_node(minimal_phantom):
 
 
 def _echo_train(n_echoes, tau_ms, pulse_ms=0.002):
-  """90 -- tau -- [180 -- tau(ECHO) -- tau] x n. Only the echo instants carry
+  """90, tau, [180, tau(ECHO), tau] x n. Only the echo instants carry
   store_magnetization, so the returned columns are the echoes and nothing
   else."""
   seq = Sequence()
@@ -1093,7 +1093,7 @@ def test_cpmg_echoes_reach_exp_minus_t_over_t2_with_the_ensemble_on(
   between them. Every echo must still land on exp(-2 n tau / T2): the
   reversible part is fully refocused and only T2 survives.
 
-  This is the strongest test of persistence across block boundaries -- 19
+  This is the strongest test of persistence across block boundaries, with 19
   blocks, with coherence that has to survive every stitch.
   """
   T2_ms, T2_prime_ms, tau_ms, n_echoes = 200.0, 8.0, 12.0, 6
@@ -1142,7 +1142,7 @@ def test_cpmg_echoes_reach_exp_minus_t_over_t2_with_the_ensemble_on(
 def test_a_stimulated_echo_survives_being_stored_in_mz(minimal_phantom):
   """90 - t1 - 90 - t2 - 90 - t1. The second pulse parks the dephased pattern
   along z, where it does not dephase; the third brings it back and it rephases
-  t1 later at exactly HALF the magnetization -- only one of the two halves of
+  t1 later at exactly HALF the magnetization, only one of the two halves of
   cos(phi) refocuses.
 
   Nothing else in the suite plays three pulses on one magnetization, and this
@@ -1175,7 +1175,7 @@ def test_a_stimulated_echo_survives_being_stored_in_mz(minimal_phantom):
 def test_b1_map_and_a_per_node_t2_prime_stay_aligned(minimal_phantom):
   """Two INDEPENDENT per-node maps, both expanded K-fold by np.repeat, given
   deliberately opposite orderings. If the two expansions disagreed, each node
-  would silently get another node's constant -- and nothing else would notice,
+  would silently get another node's constant, and nothing else would notice,
   because the aggregate decay and the echo amplitude would both still be
   right."""
   n_nodes = minimal_phantom.local_nodes.shape[0]
@@ -1213,7 +1213,7 @@ def test_a_spin_echo_refocuses_delta_b_and_t2_prime_together(minimal_phantom):
 
   # PER-NODE, not scalar. A spatially uniform offset contributes the same phase
   # to every bin of every node, factors straight out, and cannot affect
-  # abs(Mxy) at all -- so the earlier scalar loop asserted the same number
+  # abs(Mxy) at all, so the earlier scalar loop asserted the same number
   # three times and would have passed with delta_B ignored entirely.
   n_nodes = minimal_phantom.local_nodes.shape[0]
   spread = np.linspace(-4e-3, 4e-3, n_nodes).reshape(-1, 1)
@@ -1287,7 +1287,7 @@ def test_the_new_features_hold_up_at_the_default_float32(wide_phantom,
   # phase, which reaches 3852 rad over this geometry and is represented to
   # float32 precision, so the on/off ratio cancels it only to eps32 * 3852 =
   # 4.6e-4 rad. Asserting that bound rather than a magic number, because it is
-  # what the number actually means -- the concomitant phase itself is 3.34 rad.
+  # what the number actually means, the concomitant phase itself is 3.34 rad.
   G, dur_ms = (16.0, -12.0, 20.0), 5.0
   block = _gradient_block(G, dur_ms)
   off = _precess(wide_phantom, block, dtype='float32', concomitant_fields=False)
@@ -1359,7 +1359,7 @@ def test_a_wrong_length_attribute_raises_instead_of_corrupting_the_heap(
            ('T2', Quantity(np.full((long, 1), 50.0), 'ms')),
            # Not a length but a column count: a rows-only test passes this.
            ('delta_B', np.zeros((n_nodes, 5))))
-  # `x` is checked on the same loop and cannot be reached from here -- it comes
+  # `x` is checked on the same loop and cannot be reached from here. It comes
   # from phantom.local_nodes, and the kernel's r0 is Matrix<T, Dynamic, 3>, so
   # pybind refuses anything but three columns before the check runs.
   for bins in (1, 8):
@@ -1381,7 +1381,7 @@ def test_a_failed_solve_does_not_tear_the_sub_ensemble(minimal_phantom):
   previous call left it, so a retry reproduces the clean run.
 
   The resume path used to alias self._bin_Mxy rather than copy it, and the
-  block loop writes in place -- so a failure left the ensemble half-advanced
+  block loop writes in place, so a failure left the ensemble half-advanced
   while the stamp still described the state before the call, and the next
   solve() resumed from it silently. Measured 0.2416 error, no warning.
   """
@@ -1443,7 +1443,7 @@ def test_a_non_finite_b1_map_is_refused_by_the_kernel_too(minimal_phantom):
 
   solve_mri_f64(**args, b1_map=np.ones(n_nodes, dtype=complex))
   for poison in (np.nan, np.inf):
-    # `1 + nan*1j` is nan in BOTH parts -- nan*0 is nan -- so the earlier
+    # `1 + nan*1j` is nan in BOTH parts, nan*0 is nan, so the earlier
     # version of this test never reached the `.imag()` half of the guard: the
     # `||` short-circuited on the real part every time. complex() builds the
     # one-sided cases explicitly.
@@ -1460,7 +1460,7 @@ def test_a_spoiler_block_solves_with_the_other_features_on(minimal_phantom):
   else in the suite solves a spoiler block at all, so both were dead code.
 
   With no gradient the jitter cannot change the field, so spoiler=True must
-  equal spoiler=False exactly -- and all three integrators must agree with the
+  equal spoiler=False exactly, and all three integrators must agree with the
   gradient on, which is the probe for a missing seed mirror since order 0 never
   reads the seed.
   """
@@ -1581,7 +1581,7 @@ def test_only_the_stored_columns_are_allocated(tmp_path_factory):
   over_all_blocks = n_nodes * n_bins * len(seq.blocks) * 16
   assert peak < 0.2 * over_all_blocks, (
     f'solve() peaked at {peak / 1e6:.1f} MB, against {over_all_blocks / 1e6:.1f} '
-    f'MB for the sub-ensemble over all {len(seq.blocks)} blocks -- it is still '
+    f'MB for the sub-ensemble over all {len(seq.blocks)} blocks. It is still '
     f'allocating columns it throws away')
 
 
@@ -1629,7 +1629,7 @@ def test_a_one_dimensional_per_node_array_is_accepted_between_solves(
   the same spelling assigned to a public attribute must work too.
 
   The universal length check added by the second audit required ndim == 2, so
-  `solver.delta_B = np.zeros(n)` -- correct data, one missing trailing axis --
+  `solver.delta_B = np.zeros(n)`, correct data with one missing trailing axis,
   was refused with a message claiming it was wrongly sized. The check still
   refuses a wrong LENGTH, which is the case that corrupts the heap.
   """
@@ -1663,7 +1663,7 @@ def test_the_spoiler_seed_carries_the_concomitant_field(wide_phantom):
   therefore exactly zero, so the seed at `Bloch.py`'s spoiler branch was
   executed and never checked. Here the gradient is constant over the block, so
   the trapezoidal average equals the end-of-interval value and `magnus2` must
-  reproduce `cayley_klein` EXACTLY -- and `cayley_klein` never reads the seed,
+  reproduce `cayley_klein` EXACTLY, and `cayley_klein` never reads the seed,
   which is what makes it the reference.
 
   Measured on this phantom at dt = 0.5 ms, worst |Mxy| difference against
@@ -1698,7 +1698,7 @@ def test_the_spoiler_seed_carries_the_concomitant_field(wide_phantom):
     gap = float(np.abs(run(method) - reference).max())
     assert gap < 1e-12, (
       f'{method} differs from cayley_klein by {gap:.3e} on a CONSTANT field, '
-      f'where the trapezoidal average is exact -- the jittered Magnus seed '
+      f'where the trapezoidal average is exact, the jittered Magnus seed '
       f'is not the field the kernel then integrates')
 
 
@@ -1712,7 +1712,7 @@ def _trapezoid_block(amp_mT_per_m, rise_ms, flat_ms, fall_ms, axis=2,
   """One trapezoid on a single axis, rastered COARSELY on purpose.
 
   `dt_ms` is deliberately longer than the whole event, so the block's raster is
-  the trapezoid's four corners and nothing else -- which is what an imported
+  the trapezoid's four corners and nothing else, which is what an imported
   Pulseq block gets, since the adapter builds every block with the default
   dt = 10 ms.
   """
@@ -1732,14 +1732,14 @@ def _trapezoid_block(amp_mT_per_m, rise_ms, flat_ms, fall_ms, axis=2,
 def test_the_concomitant_term_gets_the_exact_second_moment_of_a_ramp(
         wide_phantom):
   """`magnus2` integrates a straight ramp exactly from its endpoints, which is
-  why `dt_gr` defaults to disabled -- but that covers the LINEAR field only.
+  why `dt_gr` defaults to disabled, but that covers the LINEAR field only.
 
   `Bc` goes as `G^2`, so along a ramp it is QUADRATIC in time and the
   trapezoidal quadrature is not exact: over a ramp it charges `A^2*h/2` where
   the exact second moment is `A^2*h/3`. The error is one-signed, so every ramp
   over-counts. On this trapezoid the corner rule gives 920 against an exact
   880, and before the solver sub-sampled its ramps it reproduced the CORNER
-  value to 8.8e-14 rad -- 1.5e-2 rad of phase here, and 0.15 to 0.20 rad on
+  value almost exactly, which here is a small phase and far larger on
   gre_v15 / se_v15 / epi_v142, about 20% of the effect being modelled.
 
   The gradient is pure Gz and the phantom sits off-axis, so the linear term
@@ -1780,7 +1780,7 @@ def test_sub_sampling_the_ramps_is_paid_only_when_concomitant_is_on(
   """The densification must not touch the default path.
 
   With the term off, `magnus2` really does integrate the ramp exactly from the
-  corners, so refining the raster by hand changes nothing -- measured 5.9e-13
+  corners, so refining the raster by hand changes nothing. Measured 5.9e-13
   rad on gre_v15. That is what makes the fix a correction to the concomitant
   quadrature rather than a general raster effect, and it is also the guarantee
   that no existing result moves.
@@ -1817,14 +1817,14 @@ def test_balanced_ssfp_reaches_its_closed_form_per_node(minimal_phantom):
   references, which differs by a factor sqrt(E2).
 
   Every node carries a different `b1_map`, so each has its own flip angle and
-  its own closed form **in one solve** -- a per-node check of b1 in a coherent
+  its own closed form **in one solve**, a per-node check of b1 in a coherent
   multi-block steady state, where a flip error compounds over TRs. The other
   b1 tests are all single-pulse.
 
   Two traps, both measured: the steady state is not reached at 400 TRs (the
   error reads 3.4e-3 there against 5.0e-5 at 800), and the residual scales with
-  the PULSE WIDTH, not with dt -- 2.5e-3 at 0.05 ms, 1.0e-4 at 0.01, 2.0e-5 at
-  0.002 -- because the closed form assumes an instantaneous pulse and the
+  the PULSE WIDTH, not with dt, measured at
+  0.002, because the closed form assumes an instantaneous pulse and the
   solver relaxes during it.
   """
   T1_ms, T2_ms, TR_ms, pulse_ms, n_tr = 600.0, 100.0, 5.0, 0.002, 800
@@ -1889,7 +1889,7 @@ def test_a_nan_relaxation_time_is_refused_rather_than_absorbed(minimal_phantom):
   was silently given node 0's value and that node returned the HEALTHY
   exp(-0.04) = 0.96078944, while the same NaN at node 0 turned all 27 nodes
   into NaN. The blast radius depended on which local index the bad node landed
-  at -- i.e. on the partition, so the same input gave a different wrong answer
+  at, which is to say on the partition, so the same input gave a different answer
   at a different rank count.
   """
   n_nodes = minimal_phantom.local_nodes.shape[0]
@@ -1957,7 +1957,7 @@ def _displacement_probe_sequence(scanner, lead_ms, grad_mT_per_m, dur_ms):
   """An optional leading delay, then one gradient block that reads position.
 
   The gradient is constant, so the phase it winds is
-  `-gamma * G * (z0 + v*t_ro) * t` -- a direct readout of how far the solver
+  `-gamma * G * (z0 + v*t_ro) * t`, a direct readout of how far the solver
   thinks the spins have moved.
   """
   seq = Sequence()
@@ -1979,7 +1979,7 @@ def test_pod_velocity_taylor_time_is_measured_from_the_block(rod_phantom, lead_m
   the spins move during the readout block.
 
   `t_ro` is time since the excitation, so the displacement inside the block is
-  `v * t_ro` with `t_ro` running 0 -> dur -- whatever absolute time the block
+  `v * t_ro` with `t_ro` running 0 -> dur, whatever absolute time the block
   happens to sit at. Handing the trajectory absolute time instead makes the
   displacement grow with the delay, which is what this pins.
 
@@ -2061,7 +2061,7 @@ def test_a_partial_solve_is_quiet_on_a_natively_built_sequence(minimal_phantom):
   """`solve(start=-N)` inside a per-shot loop is the documented incremental
   steady-state idiom, and the warning about column numbering is about
   `ReadoutWindow.m_storage_idx`, which only an imported sequence carries. A
-  native sequence has no such index, so it must not warn -- under MPI the
+  native sequence has no such index, so it must not warn, under MPI the
   message was emitted once per rank on every run of `free_running.py`,
   `gradient_spoiling.py` and both water/fat examples.
   """
@@ -2106,10 +2106,10 @@ def test_a_lab_frame_field_moves_under_the_spins_and_delta_b_does_not():
   """The whole point of the channel, as a pair. Two fields that are numerically
   identical while the phantom is at rest must behave oppositely once it moves:
 
-    lab-frame  (`b0_field`)  -- the spin samples the field where it now IS,
+    lab-frame  (`b0_field`) , the spin samples the field where it now IS,
                                 so a rigid shift `s` changes every node's
                                 phase by exactly `-gamma (g.s) T`
-    tissue-bound (`delta_B`) -- the value is frozen to the node, so the same
+    tissue-bound (`delta_B`), the value is frozen to the node, so the same
                                 shift changes nothing at all
 
   Both arms are required. The equality alone passes for a solver that ignores
@@ -2178,7 +2178,7 @@ def test_bc_is_centred_on_isocentre_and_not_on_the_slice(wide_phantom):
 
   The node coordinates a solver sees are measured from the slice centre, which
   is what makes the linear encoding right. `Bc` is not translation invariant --
-  it is a quadratic form about ISOCENTRE -- so evaluating it on those same
+  it is a quadratic form about ISOCENTRE, so evaluating it on those same
   coordinates silently images an off-isocentre slab as though it sat in the
   middle of the bore.
 
@@ -2228,7 +2228,7 @@ def test_bc_is_centred_on_isocentre_and_not_on_the_slice(wide_phantom):
 
   # The re-centring has THREE mirrors, and the two Magnus seeds recompute the
   # field in Python. Under a constant gradient the trapezoidal rule is exact, so
-  # `magnus2` must reproduce `cayley_klein`, which never reads a seed -- and a
+  # `magnus2` must reproduce `cayley_klein`, which never reads a seed, and a
   # coarse raster is what makes the resulting O(dt) error visible: it reads
   # 1.3e-01 with the plain seed left on the slice-centred position.
   coarse = _gradient_block(tuple(G), dur_ms, dt_ms=0.5)
@@ -2243,8 +2243,8 @@ def test_bc_is_centred_on_isocentre_and_not_on_the_slice(wide_phantom):
 def test_a_moving_spin_samples_a_quadratic_field_where_it_moves_to(wide_phantom):
   """A degree-2 lab-frame field must be evaluated at the CURRENT position.
 
-  The quadratic part rides six solve-invariant scalars -- it does not follow
-  the gradient the way the concomitant term does -- so it costs no memory and
+  The quadratic part rides six solve-invariant scalars. It does not follow
+  the gradient the way the concomitant term does, so it costs no memory and
   the kernel evaluates it at `curr`, which is where the spin actually is. The
   closed form below needs no second solve to compare against.
 
@@ -2295,7 +2295,7 @@ def test_a_moving_spin_samples_a_quadratic_field_where_it_moves_to(wide_phantom)
     assert gap < 1e-6, (
         f'the quadratic field {label} disagrees with its closed form by {gap:.3e}')
 
-  # Freezing the field to the node -- what `delta_B` does -- gives the at-rest
+  # Freezing the field to the node, what `delta_B` does, gives the at-rest
   # answer wherever the spin has gone, which is the error being removed.
   frozen = float(np.abs(np.exp(1j * want_moved)
                         - np.exp(1j * want_still)).max())
@@ -2313,8 +2313,8 @@ def test_a_rough_field_follows_a_moving_spin_to_first_order(wide_phantom):
   gradient scalars it already hoists. Exact for a linear field; first order in
   the displacement otherwise, which is what the tolerance below reflects.
 
-  Two guards, and the test is worthless without them: the FROZEN answer -- what
-  `delta_B` alone gives -- must be far outside the tolerance, and the closed
+  Two guards, and the test is worthless without them: the FROZEN answer. What
+  `delta_B` alone gives, must be far outside the tolerance, and the closed
   form must not be reachable by a polynomial, or this would be testing rung B.
   """
   dur_ms = 4.0
@@ -2326,7 +2326,7 @@ def test_a_rough_field_follows_a_moving_spin_to_first_order(wide_phantom):
   shift = np.array([0.004, -0.003, 0.005])           # 7.1 mm
 
   # A 0.25 m sine: smooth, so the expansion is valid, but no polynomial up to
-  # the cap represents it -- `B0Field.fit` refuses it, which is the point.
+  # the cap represents it: `B0Field.fit` refuses it, which is the point.
   n = np.array([0.6, -0.5, 0.62]); n /= np.linalg.norm(n)
   amp = 2.0e-3
   rough = lambda p: amp * np.sin(2 * np.pi * (p @ n) / 0.25)
@@ -2370,14 +2370,14 @@ def test_a_rough_field_follows_a_moving_spin_to_first_order(wide_phantom):
 
 @pytest.mark.parametrize('spoiler', [False, True], ids=['plain', 'spoiler'])
 def test_the_per_node_field_reaches_both_magnus_seeds(wide_phantom, spoiler):
-  """The per-node gradient has three mirror sites -- the kernel and the two
-  Magnus seeds -- and a seed that disagrees with the kernel leaves an O(dt)
+  """The per-node gradient has three mirror sites, the kernel and the two
+  Magnus seeds, and a seed that disagrees with the kernel leaves an O(dt)
   error at every block boundary, silently.
 
   `cayley_klein` never reads a seed, so under a field that is CONSTANT IN TIME
   the trapezoidal rule is exact and `magnus2` must reproduce it. The POD here
-  has zero displacement, which keeps the per-node channel live -- the solver
-  only takes it when a trajectory is present -- while holding the field still.
+  has zero displacement, which keeps the per-node channel live, the solver
+  only takes it when a trajectory is present, while holding the field still.
   A coarse raster is what makes the O(dt) term visible; at the fine dt the rest
   of this file uses it hides under the tolerance.
 
@@ -2388,7 +2388,7 @@ def test_the_per_node_field_reaches_both_magnus_seeds(wide_phantom, spoiler):
   Measured with the term dropped from each seed in turn: **6.52e-01** plain and
   **3.98e-01** spoiler, against the 1e-9 gate below. Neither is visible to the
   moving-spin test above, which runs at a fine raster where the O(dt) term
-  hides -- that is why this probe exists separately.
+  hides. That is why this probe exists separately.
   """
   dur_ms = 6.0
   P = wide_phantom.local_nodes.astype(np.float64)
@@ -2403,7 +2403,7 @@ def test_the_per_node_field_reaches_both_magnus_seeds(wide_phantom, spoiler):
     # A CONSTANT displacement: the channel is live (the solver only takes it
     # with a trajectory present) but `curr` never changes, so the field is
     # constant in time and the trapezoidal rule is exact. A zero displacement
-    # would be refused -- a POD with no energy is undefined.
+    # would be refused, a POD with no energy is undefined.
     pod = _constant_displacement_pod(phantom.local_nodes.shape[0],
                                      np.array([0.004, -0.003, 0.005]),
                                      dur_ms=dur_ms)
@@ -2425,7 +2425,7 @@ def test_the_shim_channels_survive_the_concomitant_branch():
   """Switching the concomitant term on must not change a field it cannot touch.
 
   With `G = 0` the Maxwell field `Bc = (Bx^2 + By^2)/(2 B0)` is IDENTICALLY
-  zero -- both components are linear in the gradient -- so
+  zero, both components are linear in the gradient, so
   `concomitant_fields=True` is required to be bit-identical to False, whatever
   else the solver is carrying. That makes it an exact identity rather than a
   tolerance, and it needs no closed form.
@@ -2438,7 +2438,7 @@ def test_the_shim_channels_survive_the_concomitant_branch():
   opening trapezoidal step of every block carried the shim and no other step
   did. Measured before the fix, on this geometry: **2.32 rad** between the two
   flags, leaving the answer **1.83** from the Eulerian truth and **1.86** from
-  the frozen one -- neither of the two things it could legitimately have been.
+  the frozen one. Neither of the two things it could legitimately have been.
   """
   pytest.importorskip('meshio')
   import meshio
@@ -2457,7 +2457,7 @@ def test_the_shim_channels_survive_the_concomitant_branch():
   cells = mesh.cells_dict['tetra']
 
   # Curved on the scale of the object, so no polynomial up to the cap fits and
-  # `on_phantom` falls back to the per-node rung -- the channel under test.
+  # `on_phantom` falls back to the per-node rung, the channel under test.
   # Gentle enough that the first-order expansion is still valid over 31 mm.
   rough = lambda q: 1.0e-3 * np.sin(q[:, 0] / 0.25) * np.cos(q[:, 1] / 0.30)
 
@@ -2480,7 +2480,7 @@ def test_the_shim_channels_survive_the_concomitant_branch():
       f'at G = 0 the concomitant field is identically zero, so the flag must '
       f'change nothing; it moved the phase by {gap:.3e} rad')
 
-  # Both arms must be the EULERIAN answer, not the frozen one -- otherwise the
+  # Both arms must be the EULERIAN answer, not the frozen one, otherwise the
   # identity above is satisfied by dropping the channel on both sides.
   nodes = np.asarray(_phantom_from_points(P, cells, 'conc_shim_ref').local_nodes,
                      dtype=np.float64)
@@ -2504,7 +2504,7 @@ def _wobble_pod(n_nodes, dur_ms, amps=(0.012, -0.008, 0.010)):
   """A smooth displacement that is NOT zero at the coarse raster points.
 
   The obvious `sin(2 pi t / dur)` is degenerate here: it vanishes at 0, dur/2
-  and dur, which is exactly where a dt = 10 ms raster samples a 20 ms block,
+  and dur, which is where a dt = 10 ms raster samples a 20 ms block,
   so the trapezoid is accidentally exact and the probe reads 3e-15. The
   non-integer period and the phase offsets remove that coincidence.
   """
@@ -2521,8 +2521,8 @@ def _wobble_pod(n_nodes, dur_ms, amps=(0.012, -0.008, 0.010)):
 def test_a_gradient_free_block_resolves_the_motion_under_a_lab_field():
   """`G = 0` no longer means the block composes exactly.
 
-  A delay integrating at `dt = 10 ms` -- what the Pulseq adapter builds for
-  every event-free block -- is exact under any subdivision while `Bz` is per
+  A delay integrating at `dt = 10 ms`. What the Pulseq adapter builds for
+  every event-free block, is exact under any subdivision while `Bz` is per
   node constant, because the rotation and the relaxation both compose. With a
   scanner-fixed field the kernel forms `curr . (G + g)`, so a MOVING spin sees
   a changing field even at `G = 0`, and the trapezoidal Omega_1 has an ordinary
@@ -2540,7 +2540,7 @@ def test_a_gradient_free_block_resolves_the_motion_under_a_lab_field():
 
   The last row is the other half of the contract: a caller who chose a raster
   finer than the cap keeps it. The control below is what makes this a finding
-  rather than a re-derivation of the Magnus order -- with the field off the
+  rather than a re-derivation of the Magnus order, with the field off the
   same rasters agree to **exactly 0.000e+00**, so it really is the field and
   the motion together, not the step size alone.
   """
@@ -2587,7 +2587,7 @@ def test_a_gradient_free_block_resolves_the_motion_under_a_lab_field():
         'any subdivision, and it no longer does')
 
   # `_motion_raster` guards its `block.dt` read with `except AttributeError`,
-  # so it declares that it accepts a block without one -- and then read `dt`
+  # so it declares that it accepts a block without one, and then read `dt`
   # and `dt_rf` again OUTSIDE that guard to build the tolerance, raising the
   # exception it had just swallowed. Every step it reads goes through the same
   # accessor now. Both objects below are exactly what the guard promises to
@@ -2687,7 +2687,7 @@ def test_a_per_node_field_is_the_same_field_however_the_phantom_is_placed(
   Scored against a truth built from SCANNER coordinates and nothing the class
   owns. Measured: **7.7e-03** on the oblique arm, the same first-order Taylor
   residual the axial arm shows, against **9.4e-01** for an answer that forgets
-  the frame -- a factor of 121, so a dropped `R` cannot hide in the tolerance.
+  the frame, a factor of 121, so a dropped `R` cannot hide in the tolerance.
   """
   pytest.importorskip('meshio')
   import meshio
@@ -2705,7 +2705,7 @@ def test_a_per_node_field_is_the_same_field_however_the_phantom_is_placed(
   # Both arms carry an OFFSET. At `R = I, LOC = 0` the frame-naive answer
   # below is literally the same expression as the correct one, so the
   # discriminating assertion had to be skipped and the arm asserted only that
-  # the field agreed with itself -- it passed with `g @ R` deleted from
+  # the field agreed with itself. It passed with `g @ R` deleted from
   # `node_gradient` and with the rotation deleted from `_scanner_nodes`.
   if placement == 'axial+offset':
     R, LOC = np.eye(3), np.array([0.031, -0.047, 0.062])
@@ -2769,8 +2769,8 @@ def test_every_kernel_field_branch_reproduces_the_closed_form(
   and covered two, so with the concomitant term on the shim was dropped
   entirely while both Python Magnus seeds kept it.
 
-  Two of the eight are unreachable from `BlochSolver` -- `solver_terms` never
-  returns `quadratic` and `node_gradient` together -- so they carry the most
+  Two of the eight are unreachable from `BlochSolver`, since `solver_terms` never
+  returns `quadratic` and `node_gradient` together, so they carry the most
   complex expression in the file and nothing drives them. They stay, because
   the time-varying-field work will make the combination reachable, and this is
   what pins them meanwhile.
@@ -2831,7 +2831,7 @@ def test_every_kernel_field_branch_reproduces_the_closed_form(
   Mxy = solve_mri_f64(**kw)[0]
   if not conc:
     # `Bc_off` is read only inside the concomitant branch, so an offset passed
-    # with `B0 <= 0` used to be silently discarded -- neither applied nor
+    # with `B0 <= 0` used to be silently discarded. Neither applied nor
     # refused. `BlochSolver` never reaches that state, but only because two
     # independent gates line up, and this is a public entry point.
     with pytest.raises(Exception, match='conc_offset'):

@@ -85,7 +85,7 @@ if __name__ == '__main__':
   # second-order shim can null, curving on the scale of the chest rather than
   # of the heart. `on_phantom` tries a global polynomial first and falls back
   # to sampling the expression per node when none represents it, so what the
-  # expression is decides which channel carries it -- there is nothing to
+  # expression is decides which channel carries it. There is nothing to
   # select by hand.
   #
   # The per-node expansion is first order in the displacement, so the curvature

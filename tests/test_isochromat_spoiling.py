@@ -23,13 +23,13 @@ from feelmri import (
   plot_isochromat_voxel,
   spoiling_residual,
 )
-# Not in the package's `__all__` -- it is public on `Isochromats` and
+# Not in the package's `__all__`. It is public on `Isochromats` and
 # re-exported by `Bloch`, which is where its one caller would find it.
 from feelmri.Isochromats import plot_multi_isochromat_dephasing
 
 
 # Use a kspace wavenumber chosen so that |k_sp| * voxel_size > 1
-# (i.e. at least one phase winding across the voxel) — this is the
+# (i.e. at least one phase winding across the voxel). This is the
 # regime where the spoiling sum's convergence rate becomes visible.
 _K_SP = np.array([400.0, 0.0, 0.0], dtype=np.float64)   # 1/m
 _R    = 2.5e-3                                          # m
@@ -122,7 +122,7 @@ def test_both_isochromat_plotters_write_a_png(tmp_path):
   """Both visualisation helpers must produce a non-empty PNG when exported.
 
   They are checked together because they share the point set and neither
-  asserts physics -- this is a smoke test that the drawing code runs. It
+  asserts physics. This is a smoke test that the drawing code runs. It
   covers `plot_multi_isochromat_dephasing`, which is exported from the
   package and had no caller anywhere: 78 lines of public API that no test,
   example or library path had ever executed.

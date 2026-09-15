@@ -1,7 +1,7 @@
 """Serial vs ``mpirun -n N`` numerical-equivalence test.
 
-Runs ``tests/helpers/mpi_runner.py`` twice — once directly (1 rank)
-and once via ``mpirun -n 2`` — and asserts that the gathered Mxy/Mz
+Runs ``tests/helpers/mpi_runner.py`` twice: once directly (1 rank)
+and once via ``mpirun -n 2``: and asserts that the gathered Mxy/Mz
 arrays match within single-precision tolerance. Catches per-rank
 ordering bugs and any non-deterministic divergence between serial
 and parallel execution paths."""
@@ -148,7 +148,7 @@ def test_a_bad_per_node_array_on_one_rank_raises_everywhere(tmp_path):
   It was not: `_node_column` raised on the spot for T1, T2, delta_B and both
   initial magnetizations, while every other rank walked on into the allgather
   that reports such problems and blocked there. Reproduced as a hang under
-  `mpirun -n 2` -- rank 1 raised, rank 0 never returned and had to be killed.
+  `mpirun -n 2`: rank 1 raised while rank 0 never returned.
 
   This is not a contrived input. Under dual partitioning the bloch and signal
   layouts carry different per-rank node counts, so an array built from
@@ -246,7 +246,7 @@ def test_simulate_pulseq_matches_serial_under_mpi(tmp_path):
   worst = float(np.abs(k1 - k2).max() / scale)
   # The assembler accumulates in float32, so a different partition sums the
   # same terms in a different order. Measured 1.3e-5 at 2 ranks and 1.5e-5 at
-  # 4 -- FLAT in rank count, which is what distinguishes reassociation from a
+  # 4: FLAT in rank count, which is what distinguishes reassociation from a
   # real duplication bug (the signal_sum interface-node defect grew with rank
   # count: 6.6e-2 / 1.5e-1 / 1.2e-1 at 2 / 4 / 8). Same 1e-4 scale as the
   # native-sequence test above.
@@ -255,7 +255,7 @@ def test_simulate_pulseq_matches_serial_under_mpi(tmp_path):
       f'{worst:.3e} of peak, well above float32 reassociation')
 
   # gather_data is a Reduce to root, so a non-root rank receives zeros. This is
-  # documented and load-bearing -- a caller that reconstructs on every rank
+  # documented and load-bearing, a caller that reconstructs on every rank
   # would silently image nothing.
   rank1 = out_mpi.parent / (out_mpi.name + '.rank1.npz')
   assert rank1.exists(), 'the rank-1 process wrote no output'
@@ -270,7 +270,7 @@ def test_simulate_pulseq_matches_serial_under_mpi(tmp_path):
 @pytest.mark.timeout(420)
 def test_a_receive_map_survives_mpi_and_dual_partitioning(tmp_path):
   """A receive map is a per-LOCAL-node array, so under dual partitioning it is
-  redistributed into the signal layout before it is folded in -- and nothing
+  redistributed into the signal layout before it is folded in, and nothing
   covered that path.
 
   The map is tied to NODE POSITION rather than being constant, which is the
@@ -339,7 +339,7 @@ def test_a_receive_map_survives_mpi_and_dual_partitioning(tmp_path):
     # different partition sums the same terms in a different order.
     assert worst < 1e-4, (
       f'{label} differs from serial by {worst:.3e} of peak, above float32 '
-      f'reassociation -- the map is following the partition, not the node')
+      f'reassociation, the map is following the partition, not the node')
 
 
 @pytest.mark.slow
@@ -353,7 +353,7 @@ def test_the_bin_readout_survives_mpi_and_dual_partitioning(tmp_path):
   It had no coverage of either. The bins are per-LOCAL-node arrays and the
   readout runs on the SIGNAL layout, so under dual partitioning every
   `set_static_fields` and `update_magnetization` inside the bin loop is an
-  Alltoallv that has to move the right rows -- and `bin_offsets` is indexed by
+  Alltoallv that has to move the right rows, and `bin_offsets` is indexed by
   the bloch layout, which is the one the caller set the static fields in.
   Nothing checked that those two agree.
   """
@@ -427,7 +427,7 @@ def test_a_rank_asymmetric_refusal_does_not_hang(tmp_path):
   layouts have different per-rank node counts, so the comparison is
   rank-local: measured on a 4-cube at 6 ranks, it fired on 4 of them. Calling
   the collective inside that branch left the other 2 walking into the
-  redistribution while 4 waited in the allgather -- all six timed out.
+  redistribution while 4 waited in the allgather. All six timed out.
 
   solve()'s length check had the same shape: it raised on the offending rank
   while every other rank waited in solve()'s closing Barrier, and the barrier
@@ -509,7 +509,7 @@ def test_every_per_node_refusal_reaches_every_rank(tmp_path, case):
     check, so the kernel's own length check threw rank-locally and the other
     ranks waited in solve()'s closing Barrier.
   - `coil_map`: the receive sensitivity, added later and given the collected
-    form from the start rather than after a hang -- one NaN at a single global
+    form from the start rather than after a hang, one NaN at a single global
     node lives on one rank, and the setter redistributes.
   - `b0_gradient`: the scanner field's per-node Eulerian channel, the same
     shape as `coil_map` and upstream of the same Alltoallv.
@@ -532,15 +532,15 @@ def test_every_per_node_refusal_reaches_every_rank(tmp_path, case):
 
   - `no_assembler`: `_require_assembler` checked two per-rank conditions and
     made only the second collective. Whether the phantom HAS an assembler is
-    rank-local too -- a `set_assembler` under `if MPI_rank == 0:` gives it to
-    one rank -- and that arm raised bare, two lines above the allgather the
+    rank-local too, a `set_assembler` under `if MPI_rank == 0:` gives it to
+    one rank, and that arm raised bare, two lines above the allgather the
     others were entering. Measured under `mpirun -n 2`: **the job timed out
     (exit 124)**; it now raises on both ranks naming the rank that is short.
 
   - `signal_modes_weights_disagree`: the same defect reached through the
     attribute test's blind side. `_signal_modes` redistributes the MODES and
     nothing redistributes the WEIGHTS, so the weights must be identical on
-    every rank -- that is the property, and asking which attributes the object
+    every rank. That is the property, and asking which attributes the object
     carries is only a proxy for it. A per-rank decomposition handed
     `local_to_global_map` by hand walks straight past the proxy.
 
@@ -568,7 +568,7 @@ def test_every_per_node_refusal_reaches_every_rank(tmp_path, case):
   assert proc.returncode != 0, f'{case} was accepted'
   # Count the runner's own per-rank markers, not tracebacks: ONE traceback
   # contains the word "Error" twice, so the obvious `count('Error') >= 2`
-  # passes on a single-rank raise -- exactly the bug these cases exist for.
+  # passes on a single-rank raise, exactly the bug these cases exist for.
   # Verified by mutation: with the collective replaced by a bare raise, this
   # reads 1 refusal where the old form read 2 "Error"s and passed.
   assert out.count('REFUSED') == 2, (
@@ -587,7 +587,7 @@ def test_every_per_node_refusal_reaches_every_rank(tmp_path, case):
                'b0_expression_rows': 'it must map (N, 3) positions to (N,)',
                'b0_field_present': 'given on some ranks'}.get(case)
   assert signature is None or signature in out, (
-    f'{case} was refused, but not by the guard it exists for -- no '
+    f'{case} was refused, but not by the guard it exists for. No '
     f'"{signature}" in the output:\n{out[-3000:]}')
 
 
@@ -601,7 +601,7 @@ def test_the_holdout_span_ignores_a_rank_that_owns_no_elements(tmp_path):
 
   A rank owning no elements has no opinion about it, so it must contribute the
   reduction IDENTITIES. It contributed 0.0, which makes the span straddle zero
-  -- and on a field that does not, the span becomes the DC offset instead of
+ , and on a field that does not, the span becomes the DC offset instead of
   the variation and the threshold can never fire. Measured on a 1 ppm shim
   spelling at 1.5 T, rank 0 holding every element and rank 1 none:
 
@@ -639,7 +639,7 @@ def test_the_holdout_span_ignores_a_rank_that_owns_no_elements(tmp_path):
 
   # The other reduction in the same class. `is_zero` reads the LOCAL slice, so
   # a per-node field that vanishes over one rank's nodes answers differently
-  # on different ranks -- and that answer decides which kernel channels the
+  # on different ranks, and that answer decides which kernel channels the
   # rank passes, so a rank-local verdict has the ranks running different
   # physics. Reduced with LAND it comes back live everywhere.
   local_zero = [int(l.split()[3]) for l in out.splitlines()
@@ -661,7 +661,7 @@ def test_the_holdout_span_ignores_a_rank_that_owns_no_elements(tmp_path):
 def test_a_per_node_b0_field_survives_mpi_and_dual_partitioning(tmp_path):
   """A per-node scanner field is TWO per-local-node arrays, and under dual
   partitioning both are redistributed into the signal layout before the
-  assembler ever sees them -- `phi_nodal` through `set_static_fields` and the
+  assembler ever sees them: `phi_nodal` through `set_static_fields` and the
   gradient through `set_b0_gradient`. Neither path had any coverage: the only
   MPI test touching the gradient exercises its REFUSAL, never a number.
 
@@ -715,7 +715,7 @@ def test_a_per_node_b0_field_survives_mpi_and_dual_partitioning(tmp_path):
   # The READOUT GRADIENT has to matter, not merely the field. The control arm
   # differs in that channel and in NOTHING else: it runs the identical
   # simulation with `_set_b0_gradient_local` disabled. Withholding `b0_field`
-  # instead -- what this used to do -- also removes the field from the Bloch
+  # instead, what this used to do, also removes the field from the Bloch
   # SOLVE, worth of order a radian here on its own, so the assertion was
   # satisfied without the readout channel ever being exercised and the
   # mutation it claimed to have been verified by could not have been run.
@@ -735,7 +735,7 @@ def test_a_per_node_b0_field_survives_mpi_and_dual_partitioning(tmp_path):
     worst = float(np.abs(runs[label] - reference).max() / scale)
     assert worst < 1e-4, (
         f'{label} differs from serial by {worst:.3e} of peak, above float32 '
-        f'reassociation -- the per-node field is following the partition '
+        f'reassociation, the per-node field is following the partition '
         f'rather than the node')
 
 
@@ -748,7 +748,7 @@ def test_a_per_rank_trajectory_is_refused_under_dual_partitioning(tmp_path):
     Each rank runs its own SVD, so its modes carry its own normalisation and
     its weights undo exactly that normalisation. Dual partitioning
     redistributes the modes BETWEEN ranks, which pairs a node's mode vector
-    with another rank's weights -- and the displacement comes out wrong,
+    with another rank's weights, and the displacement comes out wrong,
     silently. Measured on a 4 mm cube at 2 ranks: **1.76e-02 of peak**, against
     **8.8e-07** for the same motion built the documented way, from the global
     snapshots plus `local_to_global_nodes`.

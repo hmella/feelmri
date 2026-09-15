@@ -12,7 +12,7 @@
 // spelling and compiles to a register move.
 //
 // Any finiteness check anywhere in cpp/ must go through this, or it is dead
-// code -- which is exactly what happened to the first b1_map guard.
+// code, and that is what happened to the first b1_map guard.
 template <typename T>
 inline bool feelmri_is_finite(T value) {
   static_assert(std::numeric_limits<T>::is_iec559,

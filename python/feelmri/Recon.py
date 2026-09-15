@@ -44,7 +44,7 @@ def CartesianRecon(K, trajectory, filter_type='Tukey', filter_width=0.9, filter_
     -----
     **This is not channel-aware.** It inverse-transforms whatever axes it is
     given and never collapses one, so a receive-coil axis passes through
-    untouched and the caller combines it afterwards -- with
+    untouched and the caller combines it afterwards, with
     :func:`reconstruct_nufft`'s ``combine`` machinery, or by applying
     :func:`_combine_channels`' matched filter by hand. That is deliberate:
     the assembler's ``nv`` axis carries coils AND velocity encodings AND
@@ -283,7 +283,7 @@ def reconstruct_nufft(
         off-resonance, or anything else read out of the argument.
     sensitivities : np.ndarray or None, optional
         Receive sensitivities on the IMAGE grid, shaped
-        ``(Nchannels, *img_shape)`` -- the same field handed to
+        ``(Nchannels, *img_shape)``, the same field handed to
         :meth:`~feelmri.Phantom.FEMPhantom.set_receive_sensitivity`, sampled at
         the voxels rather than at the mesh nodes. Required by
         ``combine='roemer'`` and ignored otherwise.
@@ -336,13 +336,13 @@ def reconstruct_nufft(
 
 
 def _combine_channels(img, combine, sensitivities):
-    """Collapse the leading channel axis of ``img`` -- shape ``(C, *img_shape)``.
+    """Collapse the leading channel axis of ``img``, shape ``(C, *img_shape)``.
 
     ``None`` keeps every channel (and unwraps a single one, for compatibility
     with callers that never expected a channel axis at all).
 
     ``'rss'`` is root-sum-of-squares. It needs no map, which is its whole
-    appeal, and it **destroys the phase** -- so it is unusable for phase
+    appeal, and it **destroys the phase**, so it is unusable for phase
     contrast, off-resonance, or anything else read out of the argument rather
     than the modulus.
 
@@ -376,7 +376,7 @@ def _combine_channels(img, combine, sensitivities):
             raise ValueError(
                 "reconstruct_nufft: combine='roemer' is the matched filter for "
                 "a KNOWN sensitivity map, so it needs `sensitivities`. Pass the "
-                "map on the IMAGE grid, shaped (C, *img_shape) -- the same "
+                "map on the IMAGE grid, shaped (C, *img_shape), the same "
                 "field given to set_receive_sensitivity, sampled at the voxels "
                 "rather than at the mesh nodes. With no map use 'rss', which "
                 "needs none but discards the phase.")
@@ -389,7 +389,7 @@ def _combine_channels(img, combine, sensitivities):
         den = np.sum(np.abs(S) ** 2, axis=0)
         num = np.sum(np.conj(S) * img, axis=0)
         # Below this the division is meaningless in the working precision, not
-        # merely noisy -- it is the true background, outside every coil. Where
+        # merely noisy. It is the true background, outside every coil. Where
         # the denominator is small but real the matched filter amplifies noise
         # by 1/|S|, which is the physics of the estimator and the caller's
         # choice of map, so it is left alone.

@@ -66,6 +66,11 @@ class Bloch:
         return dMxdt, dMydt, b1
 
     def bloch(self, t, M):
+        """Full Bloch right-hand side at time ``t`` for state ``M``.
+
+        ``M`` is ``[Mx, My, Mz]``. Use :meth:`bloch_small` instead when
+        the flip is small enough that Mz can be held fixed.
+        """
         dMxdt, dMydt, b1 = self._transverse(t, M)
         dMzdt = self.gamma * (np.imag(b1) * M[0] - np.real(b1) * M[1])
         return np.array([dMxdt, dMydt, dMzdt]).reshape((3,))

@@ -268,14 +268,14 @@ def test_plot_pod_energy_accepts_both_sources():
 #
 # The spline batch is built with `extrapolate=False`, so scipy answers NaN
 # rather than raising. A NaN weight multiplies into every mode, so one
-# out-of-range time point does not spoil its own sample -- it turns the whole
+# out-of-range time point does not spoil its own sample. It turns the whole
 # displacement field, the magnetization and every k-space sample into NaN.
 
 
 @pytest.mark.parametrize('cls_name', ['POD', 'PODVelocity'])
 @pytest.mark.parametrize('t_bad', [200.0, -10.0], ids=['after', 'before'])
 def test_a_time_outside_the_snapshots_is_refused(cls_name, t_bad):
-    """Both ends, and both classes -- `PODVelocity` overrides `get_weights`,
+    """Both ends, and both classes. `PODVelocity` overrides `get_weights`,
     so it has its own path to the same interpolator."""
     from feelmri import Motion
     cls = getattr(Motion, cls_name)
@@ -296,7 +296,7 @@ def test_a_time_outside_the_snapshots_is_refused(cls_name, t_bad):
 
 def test_a_periodic_pod_accepts_any_time():
     """The fold maps every time back into the covered range, so a periodic
-    trajectory must stay usable arbitrarily far from its snapshots -- which is
+    trajectory must stay usable arbitrarily far from its snapshots, which is
     what every shipped example relies on."""
     from feelmri.Motion import PODVelocity
     times = np.arange(4, dtype=np.float32) * 50.0

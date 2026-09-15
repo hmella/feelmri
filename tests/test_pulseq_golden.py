@@ -7,8 +7,8 @@ from pathlib import Path
 from conftest import SEQ_FILES, seq_ids, skip_if_pypulseq_too_old
 
 # Absolute regression on what each bundled .seq imports to. The timing gate in
-# test_pulseq_timing.py is a RELATIVE check -- it compares our reading of a
-# file against pypulseq's -- so it cannot see a change that moves both the
+# test_pulseq_timing.py is a RELATIVE check: it compares our reading of a
+# file against pypulseq's, so it cannot see a change that moves both the
 # same way, such as a pypulseq upgrade that alters calculate_kspace. This one
 # pins the numbers themselves: durations, event counts, TE-defining ADC
 # placement, k-space extent and gradient maxima.

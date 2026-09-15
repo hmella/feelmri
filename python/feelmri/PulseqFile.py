@@ -3,7 +3,7 @@ The Pulseq ``.seq`` file format: reading it, and nothing else.
 
 This half knows about sections, shapes, event libraries and the v1.2-v1.5
 column layouts. It builds a :class:`PulseqSequence` of plain dataclasses and
-stops there -- turning those into ``feelmri`` gradients, RF pulses and
+stops there. Turning those into ``feelmri`` gradients, RF pulses and
 sequence blocks is :mod:`feelmri.PulseqAdapter`, which is also where anything
 needing ``pypulseq`` lives.
 
@@ -48,6 +48,8 @@ def _to_float_or_str(token: str) -> Union[float, str]:
 
 @dataclass(order=True, frozen=True)
 class Version:
+    """The ``[VERSION]`` section of a ``.seq`` file."""
+
     major: int
     minor: int
     revision: int
@@ -611,6 +613,13 @@ class ADC:
 
 @dataclass
 class Trigger:
+    """One TRIGGERS extension entry.
+
+    Parsed so the file round-trips, but the simulator has no counterpart: a
+    WAIT trigger stalls a scanner for a time nothing here can know, so
+    ``import_pulseq`` warns and ignores it.
+    """
+
     channel: int
     mode: int
     rise: float
@@ -619,12 +628,16 @@ class Trigger:
 
 @dataclass
 class LabelSet:
+    """A LABELSET entry: assign ``value`` to counter ``label``."""
+
     label: str   # e.g. 'SET', 'LIN', 'SLC', 'NAV', 'REF', ...
     value: int
 
 
 @dataclass
 class LabelInc:
+    """A LABELINC entry: add ``value`` to counter ``label``."""
+
     label: str
     value: int
 
@@ -711,8 +724,8 @@ def _rotate_on_union_grid(R: np.ndarray,
   waveform is exactly reproduced by adding corners to it, so this is lossless
   on each input and exact on the output.
 
-  The result is emitted as an extended trapezoid -- ``A`` the per-sample
-  amplitudes, ``T`` the per-step dwells -- which is the one Grad shape that
+  The result is emitted as an extended trapezoid, with ``A`` the per-sample
+  amplitudes, ``T`` the per-step dwells, which is the one Grad shape that
   can carry a non-uniform grid. Outside its own support a gradient is zero,
   which is what the ``left``/``right`` of the interpolation says.
 
@@ -756,7 +769,7 @@ def _warn_discontinuous_gradients(filename, pulseq_seq, rtol: float = 1e-3):
 
   Pulseq expects a gradient to return to zero at a block boundary unless the
   next block carries it on. When one does not, the trajectory and the solver
-  are reading two different waveforms -- see the call site for the measured
+  are reading two different waveforms. See the call site for the measured
   cost. `check_timing` does not look at this.
 
   ``rtol`` is relative to the event's own peak, so a boundary sample at
@@ -787,7 +800,7 @@ def _warn_discontinuous_gradients(filename, pulseq_seq, rtol: float = 1e-3):
         "%s: %d gradient event(s) end away from zero with nothing continuing "
         "them (%s). The k-space trajectory comes from pypulseq, which bridges "
         "the gap linearly to the next event on that axis, while the solver "
-        "reads zero there -- so the readout carries phase the simulation never "
+        "reads zero there, so the readout carries phase the simulation never "
         "played. Make the waveform return to zero, or continue it in the next "
         "block.",
         filename, len(problems),
@@ -1520,7 +1533,7 @@ def read_seq(filename: str, gamma: float = GAMMA) -> PulseqSequence:
 
     # Add first and last points for gradients. v1.5 files already carry
     # these boundary samples on every arbitrary gradient row, so the
-    # in-house recomputation is skipped — the file is authoritative.
+    # in-house recomputation is skipped: the file is authoritative.
     if pulseq_version < Version(1, 5, 0):
         fix_first_last_grads(seq)
 

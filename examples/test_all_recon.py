@@ -174,7 +174,7 @@ if __name__ == '__main__':
   phantom.set_assembler(voxel_size=vxsz[0], lorder=1, horder=6, nodal_approximation=True, lumped=False)
 
   # Set static fields. Only the uniform part of the scanner field rides on the
-  # off-resonance channel -- it is spatially constant, so no k-space offset can
+  # off-resonance channel. It is spatially constant, so no k-space offset can
   # carry it; the rest of it becomes the per-trajectory shift below.
   T2star = (parameters.Phantom.T2star * np.ones([phantom.local_nodes.shape[0]])).astype(np.float32)
   phantom.set_static_fields(
@@ -226,7 +226,7 @@ if __name__ == '__main__':
       # Elapsed time since the MAGNETIZATION SNAPSHOT, not since the
       # trajectory's own origin. `mri_signal` applies exp(-t/T2*) and
       # exp(-i*phi*t) continuing from the instant the magnetization was
-      # captured, and on a CartesianStack that instant is `t_start` -- the
+      # captured, and on a CartesianStack that instant is `t_start`, the
       # timeline runs from the RF centre and the readout begins where the
       # imaging block ends. Feeding absolute times applies a spurious
       # exp(-t_start/T2*) and, worse, a SPATIALLY VARYING phi*t_start:

@@ -14,14 +14,14 @@ from feelmri.MPIUtilities import MPI_comm, MPI_print, MPI_rank
 from feelmri.MRObjects import RF, Scanner
 from feelmri.Phantom import FEMPhantom
 
-# Sub-voxel T2' -- everything BlochSolver(t2_prime=...) does, in four panels.
+# Sub-voxel T2': everything BlochSolver(t2_prime=...) does, in four panels.
 #
 # Transverse decay has two parts. T2 is irreversible and gone for good. The rest
 # comes from static field variation INSIDE a voxel: spins fan out because they
 # sit at slightly different frequencies. A refocusing pulse turns them around
 # and brings that part back. Together they give T2*.
 #
-# A single exponential cannot express the second part -- exp(-t/T2*) falls
+# A single exponential cannot express the second part: exp(-t/T2*) falls
 # monotonically straight through the echo, the one place the signal is supposed
 # to return. `t2_prime` instead gives every node K sub-spins at slightly
 # different frequencies, weighted by a quadrature rule for the intra-voxel
@@ -31,7 +31,7 @@ from feelmri.Phantom import FEMPhantom
 # What this does NOT do: the ensemble is collapsed before the k-space assembler,
 # so decay DURING a readout is still the assembler's own exp(-t/T2). This buys
 # correct echo formation between blocks, not intra-readout lineshape. Pass T2 --
-# not T2* -- to Phantom.set_static_fields when the solver models T2', or the two
+# not T2*, to Phantom.set_static_fields when the solver models T2', or the two
 # double-count.
 
 FAST_MODE = os.getenv("FEELMRI_FAST_TEST", "0") == "1"
@@ -67,7 +67,7 @@ if __name__ == '__main__':
   # GLOBAL, not per-rank. `local_nodes` is this rank's slice, so a rank-local
   # maximum makes the T2' map a function of how the mesh was cut. At 8 ranks a
   # rank holding only the outer annulus has a small local max, `u` exceeds 1,
-  # and T2' comes out NEGATIVE -- measured -1.266 ms, which the solver refuses.
+  # and T2' comes out NEGATIVE. Measured -1.266 ms, which the solver refuses.
   r_max = MPI_comm.allreduce(float(np.abs(nodes[:, :2]).max()), op=MPI.MAX)
   u = (radius / r_max)**2
   t2_prime = T2_PRIME_CENTRE + (T2_PRIME_RIM - T2_PRIME_CENTRE) * u
@@ -89,7 +89,7 @@ if __name__ == '__main__':
 
   centre, rim = _extreme(radius, False), _extreme(radius, True)
 
-  # 2. 90 -- tau -- [180] -- tau, storing all the way through so the whole
+  # 2. 90, tau, [180], tau, storing all the way through so the whole
   # envelope is visible and not just its endpoints.
   def build(refocus, n_halves=2):
     def rf_block(flip_deg):
@@ -195,8 +195,8 @@ if __name__ == '__main__':
   for s_name, f in SHAPES.items():
     want = f(t_fid / t2c) * np.exp(-t_fid / T2_MS)
     worst = float(np.abs(fids_c[s_name] - want).max())
-    # The lorentzian rule cannot reach the exponential it targets -- that is
-    # the point of showing it -- so it gets the bound its own rule predicts.
+    # The lorentzian rule cannot reach the exponential it targets. That is
+    # the point of showing it, so it gets the bound its own rule predicts.
     limit = 0.25 if s_name == 'lorentzian' else 2e-3
     assert worst < limit, f'{s_name} FID departs from its closed form by {worst:.3f}'
   for label in ('gaussian', 'lorentzian'):

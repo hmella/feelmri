@@ -98,14 +98,14 @@ if __name__ == '__main__':
 
   # Main-field inhomogeneity, written in SCANNER coordinates: it belongs to the
   # bore, so a spin that moves samples it wherever it has moved to rather than
-  # keeping the value it had where it started. That matters here -- the phantom
+  # keeping the value it had where it started. That matters here, the phantom
   # carries cardiac AND respiratory motion, 32 mm of it.
   def spatial(x):
       return x[:,0] + x[:,1] + x[:,2]
   lab_nodes = phantom.global_nodes @ planning.MPS.T + planning.LOC.m_as('m')
   peak = np.abs(spatial(lab_nodes).flatten()).max()
   # 1.0 ppm of the main field. The normalisation leaves the peak at exactly
-  # 1.0, so this factor IS the peak offset -- and it is written against
+  # 1.0, so this factor IS the peak offset, and it is written against
   # `field_strength` rather than as a bare number so it tracks the scanner. A
   # literal `1.5 * 1e-6` is a FIXED field that happens to equal this at
   # 1.5 T and diverges from it at any other, which is how the comment here came
@@ -190,7 +190,7 @@ if __name__ == '__main__':
   phantom.set_assembler(voxel_size=vxsz[0], lorder=1, horder=6, nodal_approximation=False)
 
   # Set static fields. Only the uniform part of the scanner field rides on the
-  # off-resonance channel -- it is spatially constant, so no k-space offset can
+  # off-resonance channel. It is spatially constant, so no k-space offset can
   # carry it; the rest of it becomes the shift below.
   phantom.set_static_fields(
       T2=T2star.m_as('ms'),

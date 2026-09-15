@@ -37,7 +37,7 @@ def test_the_fit_lands_on_the_degree_the_field_actually_has(name, expr, order):
     polynomial rather than being approximated by it. Every shim is one.
 
     Both directions matter. Auto truncation must not spend a linear term on a
-    constant -- order 0 rides `delta_B` and costs nothing at all -- and must
+    constant, order 0 rides `delta_B` and costs nothing at all, and must
     not stop at order 1 on a field that has a quadratic part, which would
     silently drop it.
 
@@ -61,14 +61,14 @@ def test_the_fit_lands_on_the_degree_the_field_actually_has(name, expr, order):
 
 def test_a_degree_above_the_channels_is_refused_rather_than_truncated():
     """Degree 3 is above what the solver and the readout can carry, so it is
-    not detected by default -- detecting it would only let it be truncated to
+    not detected by default. Detecting it would only let it be truncated to
     a quadratic. Asked for explicitly, the frame adapter refuses it by name
     rather than dropping the cubic monomials: measured on a Z3 shim that is
     100% of the field.
 
     A field no polynomial can represent at all takes the same exit. A step is
-    not a smooth scanner field -- a static field in a current-free bore is a
-    solid-harmonic series -- so such a map is tissue structure and belongs on
+    not a smooth scanner field, a static field in a current-free bore is a
+    solid-harmonic series, so such a map is tissue structure and belongs on
     the per-node channel.
     """
     Z3 = lambda p: 1e-3 * p[:, 2] * (2 * p[:, 2] ** 2 - 3 * p[:, 0] ** 2)
@@ -109,7 +109,7 @@ def test_the_frame_adapter_moves_the_offset_into_the_constant():
 def test_a_polynomial_field_refuses_the_linear_only_channels():
     """`in_frame` carries the constant and the gradient, which for a degree-2
     field is not the field. Returning them would silently truncate it, so it
-    raises instead -- the quadratic part has its own channel."""
+    raises instead, the quadratic part has its own channel."""
     quad = B0Field.fit(lambda p: 1e-3 * (p[:, 0] ** 2 - p[:, 2] ** 2),
                        _points(), collective=False)
     with pytest.raises(NotImplementedError, match='silently truncate'):
@@ -157,7 +157,7 @@ def test_a_field_no_polynomial_can_carry_falls_back_to_the_nodes(tmp_path):
     field is. `on_phantom` therefore falls back instead of raising.
 
     The expression here is a 30 mm sine, which a degree-3 polynomial misses by
-    82% of the field RMS -- the fallback is not a convenience, it is the only
+    82% of the field RMS, the fallback is not a convenience, it is the only
     representation that works.
     """
     pytest.importorskip('meshio')
@@ -243,8 +243,8 @@ def test_a_per_node_field_refuses_the_coefficient_accessors(tmp_path):
     """A per-node field has no constant, gradient or quadratic form.
 
     It is built with a zero coefficient vector, so `in_frame_full` and
-    everything downstream of it would happily return those zeros -- dropping
-    the entire field with no symptom, which is exactly what `spamm.py` would
+    everything downstream of it would happily return those zeros, dropping
+    the entire field with no symptom, which is what `spamm.py` would
     have done through `phi_offset`. Each one names `readout_terms` /
     `solver_terms` instead.
     """
@@ -264,7 +264,7 @@ def test_a_per_node_field_refuses_the_coefficient_accessors(tmp_path):
     rough = lambda p: 1e-3 * np.sin(2 * np.pi * p[:, 0] / 0.03)
     field = B0Field.on_phantom(rough, phantom, collective=False)
     assert field.kind == 'nodal'
-    # The zeros are really there -- this is what would have been returned.
+    # The zeros are really there. This is what would have been returned.
     assert field.offset_mT == 0.0 and not np.any(field.gradient_mT_per_m)
     assert not field.is_zero, 'the field itself is not zero, only its coefficients'
 
@@ -284,7 +284,7 @@ def test_the_expansion_evaluates_every_monomial_it_carries():
 
     Reading `offset + g . x` off an object that also carries a quadratic form
     returns a number that is not the field anywhere: measured on this fixture,
-    **-4.8e-20 mT where the field is 2.5e-06** -- indistinguishable from zero,
+    **-4.8e-20 mT where the field is 2.5e-06**, indistinguishable from zero,
     silently, from the accessor a caller reaches for first. Every other
     accessor on the class refuses rather than truncating.
     """
@@ -313,8 +313,8 @@ def test_the_expansion_evaluates_every_monomial_it_carries():
 def test_a_uniform_offset_does_not_hide_the_spatial_term():
     """`rtol` is measured against the VARIATION, not against the values.
 
-    A B0 map is written the way the scanner reports it -- a large uniform
-    offset plus a small spatial term -- and scoring the residual against the
+    A B0 map is written the way the scanner reports it, a large uniform
+    offset plus a small spatial term, and scoring the residual against the
     absolute RMS then measures it against the offset. Measured before the fix:
     `1.0 + 1e-3 z` over +-0.1 m fitted at **order 0 with gradient [0, 0, 0]**,
     discarding the entire linear term, because 5.99e-05 / 1.0 is under the
@@ -340,14 +340,14 @@ def test_a_uniform_offset_does_not_hide_the_spatial_term():
 
 
 def test_a_degenerate_point_set_is_refused_rather_than_fitted_exactly():
-    """Counting points is not enough -- the monomials have to be independent
+    """Counting points is not enough, the monomials have to be independent
     ON those points.
 
     On a coplanar cloud the degree-2 design is rank deficient, `lstsq` returns
     the minimum-norm solution, and the residual is zero because the fit
     reproduces every sampled value. Measured before the fix: **order 2,
     residual 0.000e+00, and a zz coefficient of 0.0 against a truth of
-    1.0e-03** -- exact on the plane and wrong everywhere the spins can move to.
+    1.0e-03**, exact on the plane and wrong everywhere the spins can move to.
     """
     rng = np.random.default_rng(11)
     flat = rng.uniform(-0.1, 0.1, size=(400, 3))
@@ -368,15 +368,15 @@ def test_the_node_stamp_sees_a_translation_and_a_reordering(tmp_path):
     """A per-node array paired with a mesh that has MOVED, or whose nodes have
     been RENUMBERED, is the failure the stamp exists to refuse.
 
-    The original stamp recorded `nodes[0, 0]` and `nodes[-1, -1]` -- the x of
-    the first node and the z of the last -- so a pure translation ALONG Y left
+    The original stamp recorded `nodes[0, 0]` and `nodes[-1, -1]`, the x of
+    the first node and the z of the last, so a pure translation ALONG Y left
     it bit-identical while every node had moved. It also raised `IndexError` on
     a rank that owns no nodes, from inside every per-node accessor.
 
     Replacing those with two MOMENTS fixed the translation and silently gave
     up the reordering: `nodes.sum(axis=0).sum()` and `flat @ flat` are both
     symmetric functions of the rows, so a permuted node set produced a
-    BIT-IDENTICAL stamp. That is the worse half of the two -- under a
+    BIT-IDENTICAL stamp. That is the worse half of the two, under a
     translation the values are at least wrong everywhere, while under a
     renumbering every value is still valid and merely belongs to a different
     node. The assertion that was supposed to catch it read
@@ -416,15 +416,15 @@ def test_a_fit_that_only_interpolates_the_nodes_falls_back_to_the_nodes(tmp_path
     nodes: 27 nodes on a 3x3x3 lattice have three distinct values per axis, and
     a degree-2 polynomial passes through any three points exactly. Measured,
     `sin(x / 0.02)` over 10 radians fitted at **order 2 with a residual of
-    0.0** -- exact at every node, wrong everywhere between them.
+    0.0**, exact at every node, wrong everywhere between them.
 
     Counting points cannot catch it (10 monomials through 27 points) and nor
     can the rank of the design, which is full. What catches it is evaluating
     the fit where it was NOT fitted: the element centroids, which cost one
     expression call and are exactly the places a lattice hides.
 
-    It costs nothing while the phantom is still -- the solver only ever asks
-    for the field at the nodes -- and it is the whole answer once the spins
+    It costs nothing while the phantom is still, the solver only ever asks
+    for the field at the nodes, and it is the whole answer once the spins
     move, because the polynomial is then evaluated off the lattice.
     """
     pytest.importorskip('meshio')
@@ -455,9 +455,9 @@ def test_a_fit_that_only_interpolates_the_nodes_falls_back_to_the_nodes(tmp_path
 
     # The guard has to be able to RUN before its verdict means anything. It
     # seeded the field's lo/hi at 0.0 on a rank owning no elements and reduced
-    # with MIN/MAX, so on a field that does not straddle zero -- a shim written
+    # with MIN/MAX, so on a field that does not straddle zero, a shim written
     # as a large uniform offset plus a small spatial term, which is how this
-    # class documents them -- the span picked up the whole offset and the
+    # class documents them, the span picked up the whole offset and the
     # threshold could not fire. Measured: 1.8e-04 mT of real variation
     # reported as 5.0 mT, a factor of 2.8e+04.
     lat = np.stack(np.meshgrid(*[np.linspace(-0.1, 0.1, 4)] * 3,
@@ -477,7 +477,7 @@ def test_a_fit_that_only_interpolates_the_nodes_falls_back_to_the_nodes(tmp_path
         f'it is measuring the DC offset, so the guard cannot fire')
 
     # And no connectivity ANYWHERE is "could not check", not "checked and
-    # clean" -- the one input class the guard cannot inspect was the one it
+    # clean", the one input class the guard cannot inspect was the one it
     # waved through.
     _gap0, span0 = B0Field._holdout_residual(
         shim, _Mesh(lat, np.zeros((0, 4), dtype=int)), lat, fitted, False)
@@ -485,7 +485,7 @@ def test_a_fit_that_only_interpolates_the_nodes_falls_back_to_the_nodes(tmp_path
 
     # `_mesh_residual` has the same distinction to draw and is the more
     # dangerous of the two, because 0.0 there reads as "the per-node
-    # representation loses nothing between the nodes" -- the most reassuring
+    # representation loses nothing between the nodes", the most reassuring
     # answer it can give, for a check that could not run.
     measured = B0Field._mesh_residual(shim, _Mesh(lat, elems), lat,
                                       collective=False)
@@ -496,7 +496,7 @@ def test_a_fit_that_only_interpolates_the_nodes_falls_back_to_the_nodes(tmp_path
 
     # A fit ABOVE the class cap is not a usable field: `quadratic_mT_per_m2`
     # and `in_frame_full` both refuse degree 3, so it used to be handed back
-    # and raise from inside `BlochSolver` -- the outcome the docstring's
+    # and raise from inside `BlochSolver`, the outcome the docstring's
     # promised fallback exists to prevent.
     cubic = B0Field.on_phantom(lambda q: 1.0e-3 * q[:, 2] ** 3,
                                _Mesh(lat, elems), collective=False,
@@ -508,7 +508,7 @@ def test_a_fit_that_only_interpolates_the_nodes_falls_back_to_the_nodes(tmp_path
 
 def test_the_degenerate_node_sets_a_rank_can_own_are_carried_not_crashed():
     """Under MPI a rank can own no nodes at all, and an audit-6 guard turned
-    two of those into hard failures on exactly those ranks -- which is the
+    two of those into hard failures on exactly those ranks, which is the
     worst place for one, because the surviving ranks then block in the next
     collective rather than reporting anything.
 
@@ -555,11 +555,11 @@ def test_the_fit_is_a_property_of_the_field_not_of_the_geometry_it_is_sampled_on
 
     * the rank was read off the normal matrix, whose condition number is the
       square of the design's, so the effective refusal threshold was
-      `cond(design) ~ 1.5e7` -- about half the decades a rank test on the
+      `cond(design) ~ 1.5e7`, about half the decades a rank test on the
       design allows. An exact degree-2 field over a 0.1 mm box was reported as
       "linearly dependent on these points", which is a false diagnosis: the
       points are fine, the normal equations are not.
-    * with that corrected the fit still failed, now honestly -- it came back
+    * with that corrected the fit still failed, now honestly. It came back
       with a residual of 4.388e-12 mT against a variation of 4.403e-12, i.e.
       99.7%, for a field it represents exactly.
 
@@ -597,7 +597,7 @@ def test_the_accessors_of_one_field_cannot_describe_two_different_fields():
 
     The constructor checked only that the vector had the right LENGTH for its
     order, so a hand-built field could answer 0 at a point while reporting a
-    5 mT offset -- two fields in one object, each self-consistent on its own
+    5 mT offset, two fields in one object, each self-consistent on its own
     accessors, and which one the solver sees depends on which path it takes.
     `fit` builds both halves together so its fields were always consistent;
     this bites exactly the hand-built spelling the tests use.

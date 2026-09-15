@@ -1,12 +1,12 @@
-"""Unit tests for :mod:`feelmri.Filters` — Tukey and Riesz apodisation
+"""Unit tests for :mod:`feelmri.Filters`: Tukey and Riesz apodisation
 windows used by Cartesian reconstruction. Pure-Python; sub-second.
 
-These were 75 cases over a ``2 x 4 x 3 x 3`` grid of factory, size, width and
-lift, all asserting shape, symmetry and ``lift <= h <= 1``. None of the three
+These were a grid over factory, size, width and lift, all asserting shape,
+symmetry and ``lift <= h <= 1``. None of the three
 can fail: ``Tukey`` is ``tukey(size, alpha=1-width) * (1-lift) + lift``, an
 affine map of a scipy window, so the bounds are algebraic in ``lift`` whatever
 scipy returns, and both windows are mirrored by construction. Some cells were
-vacuous outright -- ``Riesz(16, width=0.9)`` has ``s20 = 1`` and comes back all
+vacuous outright. ``Riesz(16, width=0.9)`` has ``s20 = 1`` and comes back all
 ones, on which symmetry and bounds hold trivially.
 
 What the grid never asserted is that ``width`` and ``lift`` do anything at all:

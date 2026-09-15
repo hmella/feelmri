@@ -2,7 +2,7 @@
 Functional tests that verify FEelMRI examples run successfully.
 
 These tests ensure that example scripts (e.g., 4dflow.py, phase_contrast.py)
-execute without errors — a form of regression testing for the full workflow.
+execute without errors: a form of regression testing for the full workflow.
 """
 import os
 import subprocess
@@ -14,9 +14,9 @@ import pytest
 EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "examples"
 
 # Each script runs a full pipeline in a subprocess with a 180 s budget,
-# well past the global 30 s pytest-timeout default. Measured, the 19 of
-# them are ~115 s -- half the suite's wall clock -- so they carry `slow`
-# and leave `-m "not slow"` a fast suite. CI does not deselect them.
+# well past the global 30 s pytest-timeout default. Together they take about
+# half the suite's wall clock, so they carry `slow` and leave `-m "not slow"`
+# a fast suite. CI does not deselect them.
 pytestmark = [
     pytest.mark.slow,
     pytest.mark.timeout(240),

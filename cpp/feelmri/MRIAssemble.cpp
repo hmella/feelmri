@@ -127,7 +127,7 @@ public:
         // Against the NODE COUNT as well, not only against each other. The
         // interpolation loop below reads `inv_T2(elems_(e, a))` with no bound
         // of its own, so a consistent pair of the wrong length is an
-        // out-of-bounds read inside this function -- before
+        // out-of-bounds read inside this function, before
         // `require_static_fields` can ever see it.
         if (T2.size() != static_cast<Eigen::Index>(nb_nodes_))
             throw std::invalid_argument(
@@ -194,7 +194,7 @@ public:
     /// The Eulerian counterpart of `phi_dB0`: that one is frozen onto the node
     /// and travels with the tissue, this one says how the field changes as the
     /// node MOVES, so the phase becomes `-(phi + g . u) * t` with `u` the
-    /// displacement. Empty clears it -- leaving a stale gradient behind would
+    /// displacement. Empty clears it. Leaving a stale gradient behind would
     /// be a wrong image with no symptom.
     void set_b0_gradient(const Eigen::Array<T, Eigen::Dynamic, 3>& g)
     {
@@ -243,7 +243,7 @@ public:
     //
     // The quadrature signal path needs the displacement AT quadrature points,
     // which it used to obtain per k-space sample as
-    //     S_global_ * (modes * w)      -- a dense GEMV plus a sparse projection
+    //     S_global_ * (modes * w)     , a dense GEMV plus a sparse projection
     // Folding the projection into the modes once turns that into a single dense
     // GEMV per sample, and makes the data layout identical to the nodal path so
     // the same cache blocking applies. Rebuilt only when the caller passes a
@@ -276,7 +276,7 @@ public:
         // One row per node, checked. Without this an over-long array is
         // silently accepted: every read below is a middleRows(q_start,
         // q_count) with q_start < nb_nodes_, so it stays in bounds and pairs
-        // the WRONG rows against the node positions -- plausible-looking and
+        // the WRONG rows against the node positions, plausible-looking and
         // completely wrong k-space, with no exception anywhere.
         if (Mxy.rows() != nb_nodes_) {
             throw std::invalid_argument(
@@ -328,12 +328,12 @@ public:
     /// Every loop reads `f_nodes_phi_.segment(q_start, q_count)` and
     /// `f_invT2_.segment(...)` with `q_start` bounded by the NODE count, so an
     /// assembler whose static fields were never set indexes a zero-length
-    /// array out of bounds -- and under `-DEIGEN_NO_DEBUG` that is not an
+    /// array out of bounds, and under `-DEIGEN_NO_DEBUG` that is not an
     /// assertion, it is a segmentation fault. Reproduced on every one of the
     /// three paths by calling `signal_*` straight after `set_assembler`.
     /// Note the guard is inert when the partition is EMPTY: a zero-length
     /// array then matches a zero node count and nothing is thrown. That is
-    /// harmless -- the loops it protects run zero iterations -- but it means a
+    /// harmless, the loops it protects run zero iterations, but it means a
     /// rank owning no nodes does not enforce what its peers do, so this cannot
     /// be the only check. `Phantom.set_static_fields` validates collectively
     /// upstream, which is what makes a rank-local throw here safe.
@@ -529,7 +529,7 @@ public:
             auto invT2b = f_nodes_invT2_.segment(q_start, q_count);
             auto phib   = f_nodes_phi_.segment(q_start, q_count);
             // Empty when no B0 gradient was set, so the segment is taken at
-            // (0, 0) there -- the views are never read on that path.
+            // (0, 0) there, the views are never read on that path.
             const int gq = has_b0_grad_ ? q_start : 0;
             const int gc = has_b0_grad_ ? q_count : 0;
             auto g0b    = f_nodes_g0_.segment(gq, gc);
@@ -581,8 +581,8 @@ public:
                     //
                     // The DISPLACEMENT is what makes this work on the
                     // quadrature path. Written against the absolute position
-                    // instead -- phib carrying dB0(x0) - g.x0 and the kernel
-                    // adding g.x(t) -- the shape functions interpolate a
+                    // instead, with phib carrying dB0(x0) - g.x0 and the kernel
+                    // adding g.x(t), the shape functions interpolate a
                     // PRODUCT of two nodal fields, leaving
                     // (sum N_a g_a).x_q - sum N_a (g_a . x_a), which has
                     // nothing to do with the motion. That is why the readout
@@ -756,7 +756,7 @@ public:
 
         kspace_mat.setZero();
 
-        // Node blocks outermost, k-points innermost -- see signal_sum. Identical
+        // Node blocks outermost, k-points innermost. See signal_sum. Identical
         // to that routine except the accumulation is against the mass-matrix
         // weighted magnetisation f_M_Mxy_nodes_.
         for (int q_start = 0; q_start < nb_nodes_; q_start += BLOCK_SIZE)
@@ -769,7 +769,7 @@ public:
             auto invT2b = f_nodes_invT2_.segment(q_start, q_count);
             auto phib   = f_nodes_phi_.segment(q_start, q_count);
             // Empty when no B0 gradient was set, so the segment is taken at
-            // (0, 0) there -- the views are never read on that path.
+            // (0, 0) there, the views are never read on that path.
             const int gq = has_b0_grad_ ? q_start : 0;
             const int gc = has_b0_grad_ ? q_count : 0;
             auto g0b    = f_nodes_g0_.segment(gq, gc);
@@ -818,8 +818,8 @@ public:
                     //
                     // The DISPLACEMENT is what makes this work on the
                     // quadrature path. Written against the absolute position
-                    // instead -- phib carrying dB0(x0) - g.x0 and the kernel
-                    // adding g.x(t) -- the shape functions interpolate a
+                    // instead, with phib carrying dB0(x0) - g.x0 and the kernel
+                    // adding g.x(t), the shape functions interpolate a
                     // PRODUCT of two nodal fields, leaving
                     // (sum N_a g_a).x_q - sum N_a (g_a . x_a), which has
                     // nothing to do with the motion. That is why the readout
@@ -1006,7 +1006,7 @@ public:
 
         kspace_mat.setZero();
 
-        // Quadrature blocks outermost, k-points innermost -- see signal_sum for
+        // Quadrature blocks outermost, k-points innermost. See signal_sum for
         // the rationale. Here the win is larger because the per-sample work the
         // old order repeated was a dense GEMV *and* a sparse (Q x N) projection.
         for (int q_start = 0; q_start < total_q_; q_start += BLOCK_SIZE)
@@ -1068,8 +1068,8 @@ public:
                     //
                     // The DISPLACEMENT is what makes this work on the
                     // quadrature path. Written against the absolute position
-                    // instead -- phib carrying dB0(x0) - g.x0 and the kernel
-                    // adding g.x(t) -- the shape functions interpolate a
+                    // instead, with phib carrying dB0(x0) - g.x0 and the kernel
+                    // adding g.x(t), the shape functions interpolate a
                     // PRODUCT of two nodal fields, leaving
                     // (sum N_a g_a).x_q - sum N_a (g_a . x_a), which has
                     // nothing to do with the motion. That is why the readout

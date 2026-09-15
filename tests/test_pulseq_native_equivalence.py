@@ -6,7 +6,7 @@ from pint import Quantity as Q_
 # One physical specification, written twice: once with feelmri's own sequence
 # primitives, once with pypulseq and then round-tripped through a .seq file.
 # The two must simulate the same. That is the claim the whole adapter rests on,
-# and nothing else in the suite tests it -- tests/test_pulseq_timing.py checks
+# and nothing else in the suite tests it: tests/test_pulseq_timing.py checks
 # the imported sequence against pypulseq's own reading of the same file, which
 # cannot catch an error the two share.
 

@@ -2,7 +2,7 @@
 
 `distribute_mesh` balances the nodal graph (or the element graph on request). That
 suits the Bloch solve, which costs O(local nodes), but not the quadrature signal
-path, which costs O(local quadrature points) -- and `set_assembler` gives large
+path, which costs O(local quadrature points), and `set_assembler` gives large
 elements a far more expensive rule (24 points at order 6 against 1 at order 1).
 
 `enable_dual_partition` therefore keeps **two** layouts: node-balanced for the solve,
@@ -308,14 +308,14 @@ def test_layout_bound_state_is_dropped_when_the_layout_changes(tmp_path):
 
   The gradient is the one with teeth. `simulate_pulseq` reads it back in a
   `finally` to restore a caller's own, so a copy left over from a dead layout
-  is either reinstalled against nodes that no longer exist -- silently, whenever
-  the row count happens to match -- or raises from inside that `finally`,
+  is either reinstalled against nodes that no longer exist, silently, whenever
+  the row count happens to match, or raises from inside that `finally`,
   replacing a good result with a row-count complaint.
 
   The mode caches are keyed on `(id(pod), partition, LOCAL node count)`, so a
   stale entry survives on exactly the ranks whose count did not change. Those
   ranks then hit the cache and skip `_signal_modes`, which is COLLECTIVE, while
-  the others miss and enter it -- a strict subset of ranks inside an Alltoallv,
+  the others miss and enter it, a strict subset of ranks inside an Alltoallv,
   the hang this module is written to avoid.
 
   `set_assembler` counts too: it builds fresh assemblers, which carry no

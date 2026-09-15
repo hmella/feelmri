@@ -62,7 +62,7 @@ def test_the_two_directional_encoders_match_their_closed_forms():
 def test_the_analytic_density_compensations_follow_their_own_rule():
   """The radial one is the polar Jacobian; the speed one is the arc length.
 
-  Both normalise to a mean of one, so a constant factor is invisible -- the
+  Both normalise to a mean of one, so a constant factor is invisible, the
   SHAPE along the readout is the content, and each is compared against the
   rule its docstring states.
   """
@@ -94,7 +94,7 @@ def test_the_analytic_density_compensations_follow_their_own_rule():
   assert np.abs(sp - 1.0).max() < 1e-5, 'a uniform sweep is not flat'
 
   # A spoke whose second half is sampled five times as densely must weight
-  # that half five times less -- that is the whole point of the compensation.
+  # that half five times less. That is the whole point of the compensation.
   # The step is 0.25 over the first five samples and 0.05 over the last four.
   t = np.concatenate([np.arange(5) * 0.25, 1.0 + np.arange(1, 5) * 0.05])
   kx2 = np.tile(t[:, None, None], (1, L, S))

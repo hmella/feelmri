@@ -62,7 +62,7 @@ def _forward_reference_applies(ref, t_anchor_s):
 
     * **A refocusing pulse at or before the anchor.** ``calculate_kspace``
       negates the accumulated k at a 180, so a plain integral overshoots by
-      twice whatever was accumulated before it -- exactly the 920 = 2 x 460 1/m
+      twice whatever was accumulated before it, exactly the 920 = 2 x 460 1/m
       seen on ``se_v15``.
     * **A shaped (non-trapezoid) gradient.** ``waveforms_and_times``
       concatenates shape pieces with no padding between them, so interpolating
@@ -71,7 +71,7 @@ def _forward_reference_applies(ref, t_anchor_s):
     The adapter is unaffected by both: it works backwards from the first ADC
     sample of the file's own trajectory, inheriting ``calculate_kspace``'s
     handling for free. Where this reference does not apply, the invariant is
-    covered end-to-end instead by ``test_pulseq_analytical.py`` -- the cube
+    covered end-to-end instead by ``test_pulseq_analytical.py``, the cube
     box-transform for the encoding and the spin echo for the refocusing path.
     """
     t_ref = np.atleast_1d(np.asarray(t_refocusing_of(ref))).ravel()
@@ -99,7 +99,7 @@ def _readout_anchor_invariant(seq_path, pulseq_import, pypulseq_ref):
     ``kspace_file`` as the file wrote it, ``k_at_anchor`` the moment removed,
     and ``kspace`` what a caller hands to ``mri_signal``. The identity is
     asserted on every fixture; the independent forward-integral reference only
-    where it is valid -- see ``_forward_reference_applies``.
+    where it is valid. See ``_forward_reference_applies``.
     """
     ref = pypulseq_ref(seq_path)
     imp = pulseq_import(seq_path)
@@ -152,7 +152,7 @@ def _raster_spans_every_block(seq_path, pulseq_import):
     A half-open arange used to drop each block's final interval, leaving
     25-39% of sequence time unintegrated. The fix appends the block end, which
     can introduce a duplicate of a timing already contributed by a gradient
-    corner -- the same instant computed two ways, differing by an ulp until a
+    corner, the same instant computed two ways, differing by an ulp until a
     later shift collapses them.
 
     The `t.size >= 2` leg is the one that matters most on its own: a block with
@@ -201,7 +201,7 @@ def _no_rf_plays_inside_a_readout_window(seq_path, pulseq_import):
     the equivalence rests on `2*pi k.r = gamma integral(G.r dt)`, which is a
     statement about precession under a longitudinal field alone.
 
-    An RF pulse inside a window would break it silently -- the assembler has no
+    An RF pulse inside a window would break it silently, the assembler has no
     B1 channel at all, so the signal would simply be computed as though the
     pulse had not happened. Nothing checked this, on any fixture.
 
@@ -239,7 +239,7 @@ def test_the_import_invariants_hold_on_every_fixture(seq_path, pulseq_import, py
   which property they read off it, so sweeping fifteen files three times
   re-imported nothing and asserted three unrelated things separately. Each
   helper keeps its own assertions and messages, so a failure still names which
-  invariant broke -- only the test COUNT changes.
+  invariant broke, only the test COUNT changes.
   """
   checks = (
       (_readout_anchor_invariant, (seq_path, pulseq_import, pypulseq_ref,)),
@@ -253,7 +253,7 @@ def test_the_import_invariants_hold_on_every_fixture(seq_path, pulseq_import, py
     except pytest.skip.Exception as exc:
       # Per CHECK, not per test. A skip inside one helper would otherwise
       # abort the others, so a fixture with no ADC would silently stop being
-      # checked for everything else -- a coverage loss disguised as a skip.
+      # checked for everything else, a coverage loss disguised as a skip.
       skipped.append(f'{fn.__name__}: {exc}')
   if len(skipped) == len(checks):
     pytest.skip('; '.join(skipped))

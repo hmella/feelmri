@@ -64,7 +64,7 @@ def _measured_volume(elems, nodes, cell_type, degree):
 
 
 # --------------------------------------------------------------------------
-# 1. Single reference element -- needs no mesh file and no external geometry
+# 1. Single reference element, which needs no mesh file and no external geometry
 # --------------------------------------------------------------------------
 
 @pytest.mark.parametrize('cell_type', CELL_TYPES)
@@ -85,12 +85,12 @@ def test_reference_element_has_reference_volume(cell_type):
 
 
 # Every vertex permutation of a simplex only flips the sign of det J, and the
-# assembler takes its absolute value -- so a P1 tetrahedron cannot detect an
+# assembler takes its absolute value, so a P1 tetrahedron cannot detect an
 # ordering error by volume. That is exactly why the meshio/Basix mismatch was
 # invisible on ``tetra`` meshes, and why the rest of the suite never caught it.
 # Only `tetra` is permutation-blind: a permutation of a SIMPLEX's vertices
 # changes the sign of det J and nothing else, and the code takes abs. That
-# argument does not extend to a prism -- swapping two wedge vertices gives a
+# argument does not extend to a prism: swapping two wedge vertices gives a
 # twisted cell whose det J changes sign inside it, and the measured volume
 # drops from 0.5 to 0.2887. So wedge belongs here even though its meshio ->
 # Basix permutation is the identity today: this is the test that keeps

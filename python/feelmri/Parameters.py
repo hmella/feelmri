@@ -152,8 +152,8 @@ class PVSMParser:
         dict
             Dictionary with keys:
 
-            * ``'Position'`` — ``(x, y, z)`` tuple of floats.
-            * ``'Rotation'`` — ``(theta_x, theta_y, theta_z)`` tuple of floats.
+            * ``'Position'``: ``(x, y, z)`` tuple of floats.
+            * ``'Rotation'``: ``(theta_x, theta_y, theta_z)`` tuple of floats.
 
         Raises
         ------

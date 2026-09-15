@@ -7,7 +7,7 @@ subset that supports it under ``mpirun -n 2``, so a rank-dependent failure
 The physics equivalence between rank counts is a different question and is
 tested directly in ``test_mpi_equivalence.py``.
 
-These are subprocess tests: 15 scripts, ~110 s, a third of the suite's wall
+These are subprocess tests and take a large share of the suite's wall
 clock. They are marked ``slow`` so ``-m "not slow"`` is a fast suite, and
 ``requires_mpi`` because they need ``mpirun`` on PATH.
 """

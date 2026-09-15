@@ -192,13 +192,13 @@ def _accumulated_phase(gradient, dur_ms, method, dt_gr, tmp_path):
 
 @pytest.mark.parametrize('rise,fall', [
     (0.10, 0.10),      # symmetric: every quadrature gets this one right
-    (0.0123, 0.0456),  # neither a multiple -- the case that discriminates
+    (0.0123, 0.0456),  # neither a multiple, the case that discriminates
     (0.002, 0.05),     # rise shorter than a gradient raster step
 ])
 def test_trapezoid_phase_is_exact_under_the_default_solver(rise, fall, tmp_path):
   """A trapezoid must deliver its analytic moment whatever its ramps.
 
-  The default `magnus2` integrates a piecewise-linear gradient EXACTLY -- the
+  The default `magnus2` integrates a piecewise-linear gradient EXACTLY, the
   trapezoidal rule is exact on a straight segment, from the four corners alone,
   with no sub-sampling.
 
@@ -260,7 +260,7 @@ def test_add_block_dt_is_rejected_for_an_existing_block():
 
 def test_nested_sequence_carries_explicit_spoiling():
     """`explicit_spoiling` lives on the Sequence, so appending one to another
-    used to drop it -- and `BlochSolver(perfect_spoiling=None)` then resolves
+    used to drop it, and `BlochSolver(perfect_spoiling=None)` then resolves
     back to True and zeroes Mxy at every block boundary, destroying exactly the
     coherence pathways a .seq spells its own spoilers out to preserve."""
     child = Sequence()
@@ -298,7 +298,7 @@ def test_block_raster_never_leaves_its_block():
   `adc.times` are block-local (per the ADC docstring and the timing gate), a
   user-defined `Gradient` keeps its own `timings` without applying `time`, and
   the `dt` arange runs over the extent. Concatenating the first of those raw
-  agrees with the rest only while `time_extent[0] == 0` -- true for every
+  agrees with the rest only while `time_extent[0] == 0`, true for every
   IMPORTED block, because `_convert_*` puts every event at t = 0, and false for
   a natively built one.
 
@@ -333,7 +333,7 @@ def test_check_hardware_catches_an_over_spec_sequence():
 
   `Gradient` copies the scanner's limits onto every instance as `Gr_max` /
   `Gr_sr`, but the user-defined branch of its constructor returns before
-  comparing them -- and the Pulseq adapter only ever builds user-defined
+  comparing them, and the Pulseq adapter only ever builds user-defined
   gradients. The only comparisons live in `calculate()` / `match_area()`, which
   the adapter never calls, so a `.seq` written for a stronger scanner imported
   and simulated silently. Peak B1 was not checkable at all.
@@ -365,8 +365,8 @@ def test_adc_demodulation_is_reachable_without_simulate_pulseq():
   """A caller assembling signal by hand must be able to demodulate.
 
   `simulate_pulseq` applies the ADC frequency/phase offsets for its own readout
-  windows, but the manual `update_magnetization` + `mri_signal` path -- which
-  `examples/pulseq_run_epi_tagging.py` uses -- reached nothing, and the offsets
+  windows, but the manual `update_magnetization` + `mri_signal` path, which
+  `examples/pulseq_run_epi_tagging.py` uses, reached nothing, and the offsets
   carried on `feelmri.Bloch.ADC` were dead duplicates of the ReadoutWindow
   fields.
   """
@@ -381,7 +381,7 @@ def test_adc_demodulation_is_reachable_without_simulate_pulseq():
   # 500 Hz over 1 ms is half a cycle, and the ramp runs NEGATIVE: applied as
   # exp(-i*phase) that is exp(+i 2 pi f t), which is what tunes the receiver
   # to +f rather than away from it. This assertion used to read +pi and was
-  # part of why the sign went unnoticed -- the direction is the whole content.
+  # part of why the sign went unnoticed, the direction is the whole content.
   # The position measurement is
   # test_signal_analytical.py::test_adc_frequency_offset_tunes_the_receiver.
   assert abs((phase[-1] - phase[0]) + np.pi) < 1e-9

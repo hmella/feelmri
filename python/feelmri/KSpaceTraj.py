@@ -38,7 +38,7 @@ class Trajectory:
     scanner : Scanner, optional
         Scanner hardware definition. Default is a standard 1.5 T scanner.
     t_start : Quantity, optional
-        Echo time offset — the absolute start time of the readout window
+        Echo time offset: the absolute start time of the readout window
         relative to the RF pulse (ms). Default is 0 ms.
     receiver_bw : Quantity, optional
         Receiver bandwidth (Hz). Default is 128 kHz.
@@ -51,7 +51,7 @@ class Trajectory:
         3-element slice location. A ``Quantity`` is converted; a bare array is
         taken to be METRES. Default is ``[0, 0, 0]``.
 
-        **Recorded for provenance -- the trajectory does not apply it.** No
+        **Recorded for provenance, the trajectory does not apply it.** No
         code path in ``feelmri`` reads ``self.LOC`` back. The slice offset
         reaches the physics through the PHANTOM instead,
         ``FEMPhantom.orient(MPS_ori, LOC)``, which moves the object into the
@@ -76,7 +76,7 @@ class Trajectory:
     ):
         # Evaluated-once defaults in the signature would be ONE shared array
         # and ONE shared Scanner for every trajectory built without explicit
-        # arguments -- and this class passes that scanner straight into every
+        # arguments, and this class passes that scanner straight into every
         # Gradient it constructs, so mutating one trajectory's hardware limits
         # would change them for all of them.
         self.scanner = Scanner() if scanner is None else scanner
@@ -111,7 +111,7 @@ class Trajectory:
         MPS_ori = np.eye(3) if MPS_ori is None else np.asarray(MPS_ori)
         # Converted rather than coerced: `np.asarray` on a Quantity DISCARDS
         # the unit (with a warning nobody reads), so a location written in cm
-        # -- which several PVSM files are -- would have been stored as though
+        #, which several PVSM files are, would have been stored as though
         # it were metres. It is the only unit-stripping site the example suite
         # had, and it was invisible because nothing reads the value back.
         if isinstance(LOC, Quantity):
@@ -129,7 +129,7 @@ class Trajectory:
         Returns ``(N, 6)`` in rad/m^2 laid out like :attr:`times` flattened.
         Integrated forward from ``t0`` (default 0 ms, the instant this
         trajectory's own timings are measured from), so everything between the
-        magnetization snapshot and each sample is counted -- the PREPHASERS
+        magnetization snapshot and each sample is counted, the PREPHASERS
         included, which is the point. Measured on the geometry
         ``examples/phase_contrast.py`` uses (120 x 60 mm, 60 x 30, x2
         oversampling, oblique): the readout prephaser and the phase encode
@@ -143,7 +143,7 @@ class Trajectory:
         Maxwell products are B0-aligned, and the node coordinates the assembler
         works in are the imaging ones that ``FEMPhantom.orient`` leaves behind.
         Getting either wrong evaluates the expression as though the slice
-        normal were B0 -- and since ``Bc`` singles out z, there is no rotation
+        normal were B0, and since ``Bc`` singles out z, there is no rotation
         under which an oblique acquisition reduces to an axial one.
 
         **``t0`` must be the snapshot instant, and a trajectory built without
@@ -211,7 +211,7 @@ class Trajectory:
 
         :meth:`maxwell_coefficients` carries the quadratic form only, and the
         assembler evaluates it at nodes ``orient`` measured from the SLICE
-        centre. This is the rest of the expansion about :attr:`LOC` -- a linear
+        centre. This is the rest of the expansion about :attr:`LOC`, a linear
         term, which is a k-space shift, and a uniform one. Returns
         ``(dk, phase)`` shaped like :attr:`times` flattened; add ``dk`` to the
         samples and pass ``phase`` to ``feelmri.Bloch.apply_demodulation``.
@@ -234,7 +234,7 @@ class Trajectory:
         A field ``dB0 = b + g.x`` advances a spin at ``x`` by
         ``-gamma (b + g.x) t``. The position-dependent half is
         ``-2 pi (gammabar t g).x``, which is what moving the sample's k by
-        ``gammabar t g`` does -- so it costs one array add and no assembler
+        ``gammabar t g`` does, so it costs one array add and no assembler
         support, and because the deformed position is what the assembler
         already encodes against, the field is sampled where the spin has moved
         to rather than where it started.
@@ -246,7 +246,7 @@ class Trajectory:
         **Prefer :meth:`b0_terms`, which returns every channel at once.** This
         method hands back only the k-space shift: the uniform half ``b`` is
         spatially constant, so it belongs on the phantom's off-resonance
-        instead -- ``phi_dB0 + field.uniform_phi_rate(scanner, location=self.LOC)`` --
+        instead, as ``phi_dB0 + field.uniform_phi_rate(scanner, location=self.LOC)``,
         and a caller who forgets it has half-applied the field, which is the
         hazard :meth:`b0_terms` exists to close. It also cannot carry a
         quadratic part at all, and refuses one.
@@ -267,7 +267,7 @@ class Trajectory:
                 "b0_shifted_points: this field is a per-node expansion, and a "
                 "k-space shift can only carry a field that is linear in "
                 "position. Returning the nominal points would be a wrong image "
-                "with no symptom. The per-node part rides `phi_dB0` instead -- "
+                "with no symptom. The per-node part rides `phi_dB0` instead, "
                 "see `B0Field.readout_terms`.")
         t0 = (float(self.t_start.m_as('ms')) if t_snapshot is None
               else float(t_snapshot))
@@ -286,11 +286,11 @@ class Trajectory:
 
         Returns ``(points, phi_uniform, maxwell)``:
 
-        * ``points`` -- :attr:`points` displaced by the field's LINEAR part, the
+        * ``points``: :attr:`points` displaced by the field's LINEAR part, the
           k-space offset :meth:`b0_shifted_points` computes;
-        * ``phi_uniform`` -- the uniform part as an off-resonance rate in
+        * ``phi_uniform``, the uniform part as an off-resonance rate in
           rad/ms, to add to whatever `phi_dB0` the caller already has;
-        * ``maxwell`` -- ``(N, 6)`` quadratic phase coefficients to ADD to any
+        * ``maxwell``: ``(N, 6)`` quadratic phase coefficients to ADD to any
           the concomitant term already contributes, or ``None`` below degree 2.
 
         One call rather than three, because a field split across three channels
@@ -307,7 +307,7 @@ class Trajectory:
         if field.kind == 'nodal':
             raise TypeError(
                 "b0_terms: this field needs a per-node expansion, and none of "
-                "the three channels here can carry one -- a k-space shift is "
+                "the three channels here can carry one, a k-space shift is "
                 "linear in position and the six maxwell coefficients are "
                 "quadratic. It rides the phantom instead: add "
                 "`field.readout_terms(...).phi_nodal` to `phi_dB0` and pass "
@@ -350,7 +350,7 @@ class Trajectory:
     def check_ph_enc_lines(self, ph_samples):
         """Deprecated alias for :meth:`_round_down_to_shot_multiple`."""
         warnings.warn(
-            "Trajectory.check_ph_enc_lines checks nothing -- it rounds the "
+            "Trajectory.check_ph_enc_lines checks nothing. It rounds the "
             "line count down to a multiple of lines_per_shot. It is now "
             "_round_down_to_shot_multiple.",
             DeprecationWarning, stacklevel=2)
@@ -390,7 +390,7 @@ class Trajectory:
     def _sample_grid(self, enc_time, ro_grad0, ro_grad, dt, kz):
         """Allocate the k-space arrays and fill the sample times and kz.
 
-        The two in-plane components are the subclass's business -- a
+        The two in-plane components are the subclass's business, a
         phase-encode ladder and a rotated spoke are different geometries --
         but everything else is shared. Alternate lines are traversed in the
         opposite direction, so an odd line reads its dwell reversed and
@@ -619,7 +619,7 @@ class CartesianStack(Trajectory):
         # Retained for callers that need the WAVEFORM rather than the sampled
         # k. The concomitant moments are the case in point: they depend on
         # integral(G^2), which cannot be recovered from k once the prephaser
-        # has been played -- on a 300 mm / 128 geometry that prephaser carries
+        # has been played, on a 300 mm / 128 geometry that prephaser carries
         # 1.49x the readout's own second moment, so a k-derived estimate would
         # miss the larger share. Setting `axis` here costs nothing: it is only
         # read by consumers, never by the gradient's own arithmetic.

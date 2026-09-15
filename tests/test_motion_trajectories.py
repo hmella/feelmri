@@ -1,7 +1,7 @@
 """Trajectory behaviour of feelmri.Motion: the fold, the wrap and the sum.
 
 `PODSum` and `RespiratoryMotion` had no tests at all, and `POD`'s periodic
-fold had none either -- `is_periodic=True` is also the setting that disables
+fold had none either. `is_periodic=True` is also the setting that disables
 the out-of-range guard, so a wrong period could not announce itself. All
 fixtures are synthetic and tiny: no mesh, no MPI, no file I/O.
 """
@@ -39,7 +39,7 @@ def _cine_pod(**kwargs):
 def test_the_period_is_n_times_dt_not_the_last_timestamp():
     """A cine of N frames covers one cycle, so its period is `N*dt`.
 
-    Taking `times[-1] = (N-1)*dt` replays the cycle 1/N short -- 3.3% here --
+    Taking `times[-1] = (N-1)*dt` replays the cycle 1/N short, 3.3% here,
     which is a JUMP at every wrap and a cumulative drift: ten cycles of this
     30-frame record land ten full frames away from where they belong.
     """
@@ -71,8 +71,8 @@ def test_the_period_is_exposed_for_cycle_synchronisation():
 def test_the_weights_are_continuous_across_the_wrap():
     """Frame N and frame 0 are the same instant, so the fold must not jump.
 
-    Measured with the period at `times[-1]`, this probe reads 0.208 -- 21% of
-    the weight range -- because folding arrives at frame 0 while the motion is
+    Measured with the period at `times[-1]`, this probe reads 0.208, 21% of
+    the weight range, because folding arrives at frame 0 while the motion is
     still one frame short of completing its turn.
     """
     pod = _cine_pod()
@@ -98,11 +98,11 @@ def test_folding_reproduces_the_same_cycle_phase(t_ms):
 @pytest.mark.parametrize('method', ['Pchip', 'CubicSpline', 'AkimaSpline'])
 def test_respiratory_motion_refuses_a_time_it_has_no_data_for(method):
     """It is not a `POD` subclass, so the guard written for `POD` never
-    reached it -- and the three interpolators fail three different ways.
+    reached it, and the three interpolators fail three different ways.
 
     Measured on the unguarded code at t = 2000 ms against a record ending at
     1160 ms, on a signal bounded by +-1: Pchip extrapolates to **-52.6** and
-    CubicSpline to **+82.0** -- silently, and with opposite signs -- while
+    CubicSpline to **+82.0**, silently and with opposite signs, while
     Akima answers NaN, which multiplies into every node and every k-space
     sample rather than into that one time point.
     """
@@ -131,7 +131,7 @@ def test_podsum_shifts_its_children_without_destroying_their_own():
     """`PODSum.timeshift` is an OFFSET on top of each child's shift.
 
     Cardiac and respiratory phases are independent, so the two children
-    legitimately carry different shifts -- and `PODSum.timeshift` starts at
+    legitimately carry different shifts, and `PODSum.timeshift` starts at
     0.0 knowing nothing about them. Assigning the argument to both children
     therefore wiped that out on the FIRST block: `BlochSolver.solve` reads
     0.0, writes `0.0 + block_start` into both, then restores 0.0.
@@ -152,8 +152,8 @@ def test_podsum_shifts_its_children_without_destroying_their_own():
 
 
 def test_podsum_modes_times_weights_is_the_sum_of_its_parts():
-    """The kernel only ever sees `modes @ weights`, so that product -- not the
-    concatenation -- is what has to equal the sum of the two displacements.
+    """The kernel only ever sees `modes @ weights`, so that product, not the
+    concatenation, is what has to equal the sum of the two displacements.
 
     Checked on children whose mode counts DIFFER (2 and 1), so a mis-sliced
     concatenation cannot line up by accident.
@@ -186,7 +186,7 @@ def test_pod_velocity_separates_the_cardiac_phase_from_the_taylor_time():
     after `get_weights` was corrected.
 
     The check: two calls one full period apart are at the same cardiac phase,
-    so with the same `t_ro` they must give the same displacement -- which the
+    so with the same `t_ro` they must give the same displacement, which the
     `t_ro = t` spelling cannot do, since its displacement grows with absolute
     time (here by a factor of 4.1).
     """
