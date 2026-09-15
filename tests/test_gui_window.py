@@ -119,3 +119,46 @@ def test_any_orientation_round_trips_through_the_widget_transform(tx, ty, tz):
   rot = euler_to_mps(tx, ty, tz)
   box = decompose(homogeneous(rot), CENTRE0, EXTENT0, rot)
   np.testing.assert_allclose(box.mps, rot, atol=1e-9)
+
+
+class _FakePlotter:
+  """Just enough of a plotter for the liveness check, with no window."""
+
+  def __init__(self, closed=False, has_window=True):
+    self._closed = closed
+    self.render_window = object() if has_window else None
+
+
+def _is_open(plotter):
+  """The check `Window3D._is_open` performs, isolated from the class.
+
+  Stated here rather than imported because `Window3D` needs PyVista to import
+  and this needs nothing.
+  """
+  if plotter is None:
+    return False
+  if getattr(plotter, '_closed', False):
+    return False
+  return getattr(plotter, 'render_window', None) is not None
+
+
+@pytest.mark.parametrize('plotter, expected', [
+  (None, False),
+  (_FakePlotter(), True),
+  (_FakePlotter(closed=True), False),
+  (_FakePlotter(has_window=False), False),
+  (_FakePlotter(closed=True, has_window=False), False),
+])
+def test_a_closed_render_window_is_detected(plotter, expected):
+  """Closing the 3D window must be noticed, and `update()` will not tell you.
+
+  The first version of this backend caught exceptions around
+  `plotter.update()` and assumed a closed window would raise. **It does not.**
+  Measured: after `plotter.close()`, three successive `update()` calls returned
+  normally and the viewport still believed it was alive, so the next plan
+  change reached PyVista with no render window and died with
+  `AttributeError: 'NoneType' object has no attribute 'interactor'`.
+
+  The render window itself going to None is the signal that works.
+  """
+  assert _is_open(plotter) is expected

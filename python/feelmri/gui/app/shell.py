@@ -31,6 +31,7 @@ class Shell:
     self.root.geometry('1180x760')
 
     self._status = tk.StringVar(value='ready')
+    self._updating_plan = False
 
     body = ttk.Frame(self.root)
     body.pack(fill='both', expand=True)
@@ -49,6 +50,10 @@ class Shell:
     self._build_menu()
     self._build_controls()
     self.session.mesh_changed.connect(lambda *_: self._on_mesh())
+    # The plan travels BOTH ways. Without this the entries write to the
+    # session and never read back, so dragging the box in the 3D window
+    # changed the plan while the numbers beside it went stale.
+    self.session.plan_changed.connect(lambda *_: self._on_plan())
     self.root.protocol('WM_DELETE_WINDOW', self.close)
 
   # -- construction ---------------------------------------------------------
@@ -224,6 +229,29 @@ class Shell:
     lo, hi = s.points.min(axis=0), s.points.max(axis=0)
     self._plan_vars['loc'].set(' '.join(f'{v:.4g}' for v in 0.5 * (lo + hi)))
     self.viewport.rebuild()
+
+  def _on_plan(self) -> None:
+    """Show the current plan in the entries, whoever changed it.
+
+    Guarded against its own echo: writing a `StringVar` does not fire
+    `apply_plan`, but a future binding might, and a plan panel that rewrites
+    the session on every repaint would loop.
+    """
+    box = self.session.box
+    if box is None or self._updating_plan:
+      return
+    self._updating_plan = True
+    try:
+      self._plan_vars['fov'].set(' '.join(f'{v:.6g}' for v in box.fov))
+      self._plan_vars['loc'].set(' '.join(f'{v:.6g}' for v in box.loc))
+      self._plan_vars['rot'].set(' '.join(f'{v:.6g}'
+                                          for v in np.degrees(box.angles)))
+      if self.session.has_mesh:
+        markers = self.session.submesh_markers()
+        self._submesh_label.config(
+          text=f'{int(markers.sum())} of {markers.size} elements in the slab')
+    finally:
+      self._updating_plan = False
 
   def _set_frame(self) -> None:
     try:

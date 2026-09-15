@@ -90,8 +90,9 @@ class Window3D:
     self.alive = True
 
   def reopen(self) -> None:
-    if self.alive:
+    if self.alive and self._is_open():
       return
+    self.alive = False
     self._actor = None
     self._overlay = []
     self._box_widget = None
@@ -99,16 +100,43 @@ class Window3D:
     self.rebuild()
     self.on_status('3D window reopened')
 
+  def _is_open(self) -> bool:
+    """Whether the render window still exists.
+
+    **`update()` does not raise once the window is gone**, so catching around
+    it detects nothing: `alive` stayed True after a close and the next plan
+    change died with `AttributeError: 'NoneType' object has no attribute
+    'interactor'` from inside PyVista. The render window itself becomes None,
+    which is the signal to use.
+    """
+    if self._plotter is None:
+      return False
+    if getattr(self._plotter, '_closed', False):
+      return False
+    return getattr(self._plotter, 'render_window', None) is not None
+
+  def _went_away(self) -> None:
+    """Record that the user closed the window, once."""
+    if not self.alive:
+      return
+    self.alive = False
+    self._box_widget = None
+    self._actor = None
+    self._overlay = []
+    self._note.config(text='The 3D window was closed. Reopen it below.')
+    self.on_status('3D window closed')
+
   def pump(self) -> None:
     """Service VTK from the Tk timer. Never raises; a closed window is normal."""
-    if not self.alive or self._plotter is None:
+    if not self.alive:
+      return
+    if not self._is_open():
+      self._went_away()
       return
     try:
       self._plotter.update()
     except Exception:
-      self.alive = False
-      self._note.config(text='The 3D window was closed. Reopen it below.')
-      self.on_status('3D window closed')
+      self._went_away()
 
   def close(self) -> None:
     self.alive = False
@@ -122,6 +150,9 @@ class Window3D:
 
   def rebuild(self, keep_camera: bool = False) -> None:
     if not self.alive or not self.session.has_mesh:
+      return
+    if not self._is_open():
+      self._went_away()
       return
     pv = self._pv
 
@@ -175,6 +206,9 @@ class Window3D:
     """The M/P/S arrows. The box itself is the widget, not an actor."""
     if not self.alive:
       return
+    if not self._is_open():
+      self._went_away()
+      return
     pv = self._pv
     for actor in self._overlay:
       self._plotter.remove_actor(actor, render=False)
@@ -207,7 +241,7 @@ class Window3D:
     moving it means replacing it and resetting the reference. That is cheap and
     it is the only way to keep the numeric entries and the handle agreeing.
     """
-    if self.session.box is None:
+    if self.session.box is None or not self._is_open():
       return
     if self._box_widget is not None:
       try:
@@ -322,7 +356,7 @@ class Window3D:
   # -- camera ---------------------------------------------------------------
 
   def look(self, name: str) -> None:
-    if not self.alive:
+    if not (self.alive and self._is_open()):
       return
     if name not in STANDARD_VIEWS:
       raise ValueError(f'look: unknown view {name!r}, '
@@ -336,11 +370,11 @@ class Window3D:
     self._plotter.render()
 
   def reset_view(self) -> None:
-    if self.alive:
+    if self.alive and self._is_open():
       self._plotter.reset_camera()
       self._plotter.render()
 
   def draw(self, scale: float = 1.0) -> None:
     """Present for interface parity with the blit backend; VTK draws itself."""
-    if self.alive:
+    if self.alive and self._is_open():
       self._plotter.render()
