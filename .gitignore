@@ -4,7 +4,7 @@ python/feelmri/__pycache__/
 build/
 tmp/
 MRImages/
-*/__pycache__/
+**/__pycache__/
 *.xdmf
 *.h5
 meshes/xdmf/
