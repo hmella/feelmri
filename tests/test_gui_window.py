@@ -14,13 +14,14 @@ import numpy as np
 import pytest
 
 from feelmri.gui.model.planning import FOVBox, euler_to_mps, mps_to_euler
+from feelmri.gui.view.window3d import Window3D
 
 
 def decompose(matrix, centre0, extent0, rotation0):
   """The arithmetic `Window3D._on_box` performs, isolated.
 
-  Kept here rather than imported so the test states the contract it is
-  checking. `Window3D` needs PyVista to import, and this needs nothing.
+  Kept here rather than imported because `_on_box` is an instance method
+  wired into a live session and a widget; this is the arithmetic inside it.
   """
   linear = np.asarray(matrix, dtype=float)[:3, :3]
   translation = np.asarray(matrix, dtype=float)[:3, 3]
@@ -139,22 +140,17 @@ class _FakePlotter:
 
 
 def _is_open(plotter, user_closed=False):
-  """The check `Window3D._is_open` performs, isolated from the class.
+  """Drive the REAL `Window3D._is_open` against a stub holding no window.
 
-  Stated here rather than imported because `Window3D` needs PyVista to import
-  and this needs nothing.
+  A copy of a liveness check cannot fail when the real one is wrong, which is
+  exactly the defect class this test exists for -- and the check has already
+  been wrong twice. `Window3D` imports with pyvista, vtk and tkinter all
+  blocked, because the window is built lazily, so no display is involved.
   """
-  if plotter is None or user_closed:
-    return False
-  if getattr(plotter, '_closed', False):
-    return False
-  window = getattr(plotter, 'render_window', None)
-  if window is None:
-    return False
-  try:
-    return window.GetGenericWindowId() is not None
-  except Exception:
-    return False
+  stub = Window3D.__new__(Window3D)
+  stub._plotter = plotter
+  stub._user_closed = user_closed
+  return stub._is_open()
 
 
 @pytest.mark.parametrize('plotter, user_closed, expected, why', [
@@ -187,3 +183,100 @@ def test_every_way_the_3d_window_can_close_is_detected(plotter, user_closed,
   was not.
   """
   assert _is_open(plotter, user_closed) is expected, why
+
+
+class _Note:
+  def __init__(self):
+    self.text = ''
+
+  def config(self, text):
+    self.text = text
+
+
+class _ClosablePlotter:
+  """Records whether the window was actually torn down."""
+
+  def __init__(self, raises=False):
+    self.closed = 0
+    self._raises = raises
+
+  def close(self):
+    self.closed += 1
+    if self._raises:
+      raise RuntimeError('already gone')
+
+
+def _viewport(plotter):
+  """A `Window3D` with only the attributes `_went_away` touches.
+
+  The real method is driven, not a copy of it, so this fails if the teardown
+  is removed. `Window3D` imports with pyvista, vtk and tkinter all blocked --
+  the window is built lazily -- so no display is involved.
+  """
+  stub = Window3D.__new__(Window3D)
+  stub.alive = True
+  stub._plotter = plotter
+  stub._box_widget = object()
+  stub._actor = object()
+  stub._overlay = [object()]
+  stub._note = _Note()
+  stub.on_status = lambda _msg: None
+  return stub
+
+
+def test_a_closed_window_is_destroyed_and_not_merely_flagged():
+  """Marking it closed is not enough; the window has to go.
+
+  `ExitEvent` signals intent and nothing more. With `interactive_update=True`
+  there is no interactor loop for it to terminate, so a title-bar click used
+  to leave a window that was still mapped while the pump had stopped
+  servicing it -- a frozen window, which is worse than either a live one or
+  none at all.
+
+  Measured through the real shell with the `close()` call removed: after the
+  title-bar path the render window still reported a live native handle, so
+  the window stayed on screen unserviced. With it, the handle is gone.
+  """
+  plotter = _ClosablePlotter()
+  stub = _viewport(plotter)
+  stub._went_away()
+
+  assert plotter.closed == 1, 'the window must actually be destroyed'
+  assert stub.alive is False
+  assert stub._box_widget is None and stub._actor is None
+  assert stub._overlay == []
+  assert 'closed' in stub._note.text.lower()
+
+
+def test_the_teardown_runs_once_however_many_signals_arrive():
+  """Three paths watch for a close and any of them can fire first.
+
+  The poll, the `ExitEvent` observer and an explicit close all funnel here, so
+  without the guard a title-bar click would call `close()` again on every
+  subsequent pump.
+  """
+  plotter = _ClosablePlotter()
+  stub = _viewport(plotter)
+  for _ in range(5):
+    stub._went_away()
+  assert plotter.closed == 1
+
+
+def test_a_plotter_that_refuses_to_close_still_leaves_the_viewport_closed():
+  """`close()` raising is the normal case when VTK got there first.
+
+  It must not propagate: `_went_away` is called from a Tk timer callback, and
+  an exception there kills the pump, which is the failure it exists to
+  prevent.
+  """
+  stub = _viewport(_ClosablePlotter(raises=True))
+  stub._went_away()
+  assert stub.alive is False
+  assert 'closed' in stub._note.text.lower()
+
+
+def test_a_viewport_with_no_plotter_closes_cleanly():
+  """`reopen` can fail before a plotter exists, and the poll still runs."""
+  stub = _viewport(None)
+  stub._went_away()
+  assert stub.alive is False

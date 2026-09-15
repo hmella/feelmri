@@ -140,13 +140,26 @@ class Window3D:
       return False
 
   def _went_away(self) -> None:
-    """Record that the user closed the window, once."""
+    """Tear the window down, once, and record that it is gone.
+
+    **Marking it closed is not enough: the window has to be destroyed.**
+    `ExitEvent` only signals intent, and with `interactive_update=True` there
+    is no interactor loop for it to terminate, so a title-bar click left a
+    window that was still mapped while the pump had stopped servicing it. That
+    is a frozen window, which is worse than either a live one or none at all.
+    `close()` is what actually removes it.
+    """
     if not self.alive:
       return
     self.alive = False
     self._box_widget = None
     self._actor = None
     self._overlay = []
+    try:
+      if self._plotter is not None:
+        self._plotter.close()
+    except Exception:
+      pass                        # already gone, which is the normal case
     self._note.config(text='The 3D window was closed. Reopen it below.')
     self.on_status('3D window closed')
 
