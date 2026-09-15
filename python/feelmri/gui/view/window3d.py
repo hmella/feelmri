@@ -31,6 +31,9 @@ from ..model.camera import STANDARD_VIEWS, Camera
 from ..model.planning import FOVBox, mps_to_euler
 from .theme import PALETTE
 
+#: M, P and S, in the order `FOVBox.axis_arrows` returns them.
+AXIS_COLOURS = ('#ff6b6b', '#3fd07a', '#5b9cf8')
+
 #: Tk timer interval for pumping VTK, in ms. 16 is about 60 Hz.
 PUMP_MS = 16
 
@@ -114,7 +117,9 @@ class Window3D:
     self._plotter = self._pv.Plotter(window_size=size,
                                      title='feelmri  3D view')
     self._plotter.set_background(PALETTE['window'])
-    self._plotter.add_axes()
+    # `color` here is the LABEL colour, and its default is black -- invisible
+    # on a dark background, which is what it looked like.
+    self._plotter.add_axes(color=PALETTE['text'])
 
     if self._host is not None:
       try:
@@ -383,12 +388,29 @@ class Window3D:
     box = self.session.box
     if box is None:
       return
-    for (origin, direction, _name), colour in zip(
-        box.axis_arrows(), ('#ff4d4d', '#4dff88', '#4d9cff')):
+    tips, names, colours = [], [], AXIS_COLOURS
+    for (origin, direction, name), colour in zip(box.axis_arrows(), colours):
       arrow = pv.Arrow(start=origin, direction=direction,
                        scale=float(np.linalg.norm(direction)))
       self._overlay.append(self._plotter.add_mesh(arrow, color=colour,
                                                   render=False))
+      # A little past the tip, so the text clears the cone rather than
+      # sitting inside it.
+      tips.append(np.asarray(origin) + np.asarray(direction) * 1.12)
+      names.append(name)
+
+    if tips:
+      # `always_visible` keeps a label readable when its arrow points away
+      # from the camera; without it the depth test hides exactly the one the
+      # user turned the volume to read.
+      self._overlay.append(self._plotter.add_point_labels(
+        np.asarray(tips), names, text_color=PALETTE['text'], font_size=13,
+        bold=True, show_points=False, always_visible=True, render=False,
+        # A dark backing, because a label lands wherever its arrow points --
+        # the slice arrow is short on a thin slab and its text sits on the
+        # bright phantom, where unbacked light text is unreadable.
+        shape='rect', shape_color=PALETTE['window'], shape_opacity=0.55,
+        fill_shape=True, margin=3))
 
     # A plan can appear or move without the widget knowing: the first
     # `apply_plan` creates it, and a later numeric edit must drag it. Skip
