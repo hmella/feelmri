@@ -370,3 +370,21 @@ def test_a_flush_that_raises_does_not_kill_the_pump():
   stub = _viewport(plotter)
   stub._went_away()                     # must not raise
   assert stub.alive is False
+
+
+def test_quitting_destroys_the_window_too():
+  """`close()` is the quit path and needs the same flush as a user close.
+
+  Without it the render window outlives the shell whenever the process does
+  not exit immediately afterwards -- measured: after `Shell.close()` the X
+  window was still on screen. Both paths go through one destroy so they
+  cannot drift apart again.
+  """
+  plotter = _ClosablePlotter()
+  interactor = plotter.iren.interactor
+  stub = _viewport(plotter)
+  Window3D.close(stub)
+
+  assert plotter.closed == 1
+  assert interactor.processed == 1, 'the quit path skipped the flush'
+  assert stub.alive is False

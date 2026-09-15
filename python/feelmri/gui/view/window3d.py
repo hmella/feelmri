@@ -139,6 +139,33 @@ class Window3D:
     except Exception:
       return False
 
+  def _destroy_plotter(self) -> None:
+    """Actually remove the render window. Never raises.
+
+    `close()` alone does not remove it: VTK queues an `XDestroyWindow` on its
+    own Xlib connection, and that request reaches the server only when
+    something services that connection. `ProcessEvents()` is what does.
+
+    The interactor is captured FIRST, because `close()` sets `plotter.iren` to
+    None and reaching for it afterwards raises on a NoneType, leaving the flush
+    silently undone.
+    """
+    interactor = None
+    try:
+      interactor = self._plotter.iren.interactor
+    except Exception:
+      pass                        # already torn down, which is the normal case
+    try:
+      if self._plotter is not None:
+        self._plotter.close()
+    except Exception:
+      pass
+    try:
+      if interactor is not None:
+        interactor.ProcessEvents()   # flush the queued XDestroyWindow
+    except Exception:
+      pass
+
   def _went_away(self) -> None:
     """Tear the window down, once, and record that it is gone.
 
@@ -172,21 +199,7 @@ class Window3D:
     self._box_widget = None
     self._actor = None
     self._overlay = []
-    interactor = None
-    try:
-      interactor = self._plotter.iren.interactor
-    except Exception:
-      pass                        # already torn down, which is the normal case
-    try:
-      if self._plotter is not None:
-        self._plotter.close()
-    except Exception:
-      pass
-    try:
-      if interactor is not None:
-        interactor.ProcessEvents()   # flush the queued XDestroyWindow
-    except Exception:
-      pass
+    self._destroy_plotter()
     self._note.config(text='The 3D window was closed. Reopen it below.')
     self.on_status('3D window closed')
 
@@ -203,12 +216,14 @@ class Window3D:
       self._went_away()
 
   def close(self) -> None:
+    """Tear the window down on quit.
+
+    Goes through the same destroy as a user close: `plotter.close()` alone
+    leaves the window mapped, which outlives the shell whenever the process
+    does not exit immediately afterwards.
+    """
     self.alive = False
-    try:
-      if self._plotter is not None:
-        self._plotter.close()
-    except Exception:
-      pass
+    self._destroy_plotter()
 
   # -- scene ----------------------------------------------------------------
 
