@@ -154,6 +154,30 @@ class LabelStore:
         merged[block].setdefault(name, value)
     return merged
 
+  def to_running_labels(self) -> List[Dict[str, LabelValue]]:
+    """The merged labels as a RUNNING state, each value carried forward.
+
+    **This is the shape a `.seq` file can hold, and it is not the same thing
+    as `to_block_labels`.** `LABELSET` is sticky: it sets a value that
+    persists until something sets it again, and the format has no way to
+    unset one. So a label put on a single block -- which is what labelling one
+    block or one MR object in a viewer naturally means -- is simply not
+    expressible as written, and carrying it forward is the only faithful
+    reading of what the file would do.
+
+    The two agree exactly for a store seeded by `from_import`, because that
+    state was already read as a running one. They differ for a sparse edit,
+    and the difference is the file format's, not a loss of information here:
+    `to_block_labels` stays the per-block view that `select` and
+    `filter_blocks` compare.
+    """
+    running: Dict[str, LabelValue] = {}
+    out = []
+    for labels in self.to_block_labels():
+      running.update(labels)
+      out.append(dict(running))
+    return out
+
   def labels_on(self, block: int) -> Dict[str, LabelValue]:
     self._check_block(block)
     return dict(self.block_labels[self._wrap(block)])
@@ -269,3 +293,138 @@ class LabelStore:
 
   def _wrap(self, block: int) -> int:
     return int(block) % self.n_blocks
+
+
+# -- writing labels back into a .seq ----------------------------------------
+
+
+def seq_format_version(path) -> Tuple[int, int, int]:
+  """The `[VERSION]` triple a `.seq` declares, read textually.
+
+  Read from the header rather than through a parser because it decides whether
+  the file can be written at all, and that has to be answerable before
+  anything tries.
+  """
+  major = minor = revision = 0
+  in_version = False
+  with open(path, 'r') as handle:
+    for line in handle:
+      token = line.strip()
+      if token.startswith('['):
+        if in_version:
+          break
+        in_version = token.upper() == '[VERSION]'
+        continue
+      if not in_version or not token:
+        continue
+      parts = token.split()
+      if len(parts) >= 2 and parts[0] in ('major', 'minor', 'revision'):
+        value = int(float(parts[1]))
+        if parts[0] == 'major':
+          major = value
+        elif parts[0] == 'minor':
+          minor = value
+        else:
+          revision = value
+  return major, minor, revision
+
+
+def write_labelled_seq(src, dst, block_labels) -> Path:
+  """Copy `src` to `dst` with its LABELSET extensions replaced.
+
+  `block_labels` is the RUNNING state, one dict per block -- what
+  `PulseqImport.block_labels` and `LabelStore.to_block_labels()` both hold. A
+  `.seq` file does not store that: it stores LABELSET *events*, and a value
+  persists until something sets it again. **So a set is emitted only where the
+  value CHANGES**, which is the inverse of how the state is computed on read,
+  and which is how a Pulseq file is conventionally authored.
+
+  It is not a size argument, though. Writing a set on every block instead
+  leaves the extension LIBRARY exactly as it is -- `find_or_insert`
+  deduplicates both the label events and the extension triples, so
+  `epi_pypulseq.seq`'s 232 blocks give 6 entries either way, and the file is
+  the same length. What changes is `[BLOCKS]`: ~225 of the 232 rows acquire a
+  redundant extension id where they had none. Both spellings round-trip. An
+  earlier version of this note claimed the library grows with the block count;
+  that is measured false and withdrawn.
+
+  Everything except the labels is pypulseq's own round trip, which is
+  byte-exact: measured on `gre_v15.seq` and `epi_pypulseq.seq`, reading and
+  writing changes nothing at all. After this rewrite only `[BLOCKS]`, whose
+  extension ids are renumbered, and `[SIGNATURE]`, which is recomputed, differ
+  -- `[RF]`, `[TRAP]`, `[ADC]`, `[SHAPES]` and `[EXTENSIONS]` are identical
+  and k-space matches to 0.0.
+
+  Extensions that are not labels are preserved per block, since a file may
+  carry TRIGGERS alongside its labels.
+  """
+  src, dst = Path(src), Path(dst)
+  version = seq_format_version(src)
+  if version < (1, 5, 0):
+    raise NotImplementedError(
+      f'write_labelled_seq: {src.name} declares Pulseq v'
+      f'{".".join(str(v) for v in version)}, and pypulseq can only WRITE '
+      f'v1.5 files -- it fails with a bare KeyError on an older one. Read is '
+      f'unaffected; save the labels to a sidecar instead.')
+
+  import numpy as _np
+  import pypulseq as pp
+
+  supported = set(pp.get_supported_labels())
+  unknown = {name for labels in block_labels for name in labels} - supported
+  if unknown:
+    raise ValueError(
+      f'write_labelled_seq: {sorted(unknown)} are not Pulseq labels. '
+      f'Supported: {", ".join(sorted(supported))}')
+
+  sequence = pp.Sequence()
+  sequence.read(str(src), detect_rf_use=False)
+  block_ids = sorted(sequence.block_events)
+  if len(block_ids) != len(block_labels):
+    raise ValueError(
+      f'write_labelled_seq: {len(block_labels)} label dicts for '
+      f'{len(block_ids)} blocks in {src.name}')
+
+  labelset = sequence.get_extension_type_ID('LABELSET')
+
+  # Keep whatever is NOT a label: a file may carry TRIGGERS beside them.
+  kept = {}
+  for block_id in block_ids:
+    chain, extension = [], int(sequence.block_events[block_id][6])
+    while extension:
+      type_id, reference, following = sequence.extensions_library.data[extension]
+      if int(type_id) != labelset:
+        chain.append((int(type_id), int(reference)))
+      extension = int(following)
+    kept[block_id] = chain
+
+  # Running state to events: emit a set only where the value changes.
+  previous: Dict[str, LabelValue] = {}
+  changes = {}
+  for index, block_id in enumerate(block_ids):
+    wanted = dict(block_labels[index])
+    dropped = set(previous) - set(wanted)
+    if dropped:
+      raise ValueError(
+        f'write_labelled_seq: block {index} drops {sorted(dropped)}, and '
+        f'LABELSET can only set a value, never unset one. Pass a RUNNING '
+        f'state -- `LabelStore.to_running_labels()` carries each value '
+        f'forward, which is what the file would mean -- rather than the '
+        f'per-block view from `to_block_labels()`.')
+    changes[block_id] = [(name, int(value)) for name, value in wanted.items()
+                         if previous.get(name) != value]
+    previous = wanted
+
+  for block_id in block_ids:
+    entries = [(labelset,
+                sequence.register_label_event(
+                  pp.make_label(label=name, type='SET', value=value)))
+               for name, value in changes[block_id]] + kept[block_id]
+    head = 0
+    for type_id, reference in reversed(entries):   # build the chain backwards
+      head, _ = sequence.extensions_library.find_or_insert(
+        _np.array([type_id, reference, head]))
+    sequence.block_events[block_id][6] = head
+
+  sequence.write(str(dst))
+  return dst

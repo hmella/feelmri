@@ -224,6 +224,23 @@ class Session:
     self.sequence_changed.emit(self)
     self.labels_changed.emit(self)
 
+  def load_sequence(self, path, scanner=None) -> None:
+    """Read a Pulseq `.seq` and attach it WITH the labels it already carries.
+
+    Seeding the store from the import is the whole point: `set_sequence` takes
+    a `Sequence`, which no longer knows its `LABELSET` state, so a caller that
+    imports and then calls it directly gets a blank slate and silently loses
+    the file's own convention -- which is what a user opens a labelled
+    sequence to see. Doing it here rather than in the shell keeps that out of
+    view code, where it cannot be tested.
+    """
+    from ...PulseqAdapter import import_pulseq   # pypulseq lives behind this
+    imported = import_pulseq(str(path), scanner=scanner) if scanner is not None \
+      else import_pulseq(str(path))
+    self.set_sequence(imported.feelmri_seq, path=path,
+                      labels=LabelStore.from_import(imported, path))
+    return imported
+
   def notify_labels(self) -> None:
     """Announce a label edit. The store is mutable, so this is explicit."""
     self.labels_changed.emit(self)

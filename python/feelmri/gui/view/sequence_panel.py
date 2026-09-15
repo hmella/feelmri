@@ -117,6 +117,22 @@ def draw_boundaries(axes, model: SequenceModel) -> int:
   return int(edges.size)
 
 
+def row_target(row: int):
+  """`(kind, axis)` for a row index, or `(None, None)` for an unknown one.
+
+  The row a user clicked already fixes what kind of object they meant, and
+  for a gradient which axis. Passing that to `SequenceModel.object_at` is
+  what makes a click unambiguous where an RF, a gradient and an ADC overlap.
+  """
+  if row == 0:
+    return 'rf', None
+  if 1 <= row <= 3:
+    return 'gradient', row - 1
+  if row == len(ROWS) - 1:
+    return 'adc', None
+  return None, None
+
+
 def draw_sequence(axes, model: SequenceModel) -> None:
   """Fill all five rows. The one entry point a panel or a script needs."""
   draw_rf(axes[0], model)
@@ -150,8 +166,9 @@ class SequencePanel:
 
     self.session = session
     self.on_status = on_status or (lambda _: None)
-    self.on_pick = on_pick or (lambda _: None)
+    self.on_pick = on_pick or (lambda *_: None)
     self.selected: Optional[int] = None
+    self.selected_object = None
     self._highlight = []
 
     self.widget = ttk.Frame(parent)
@@ -225,6 +242,7 @@ class SequencePanel:
         artist.remove()
     self._highlight = []
     self.selected = None
+    self.selected_object = None
 
     model = self.model
     if model is None or not model.spans:
@@ -273,18 +291,30 @@ class SequencePanel:
     model = self.model
     if model is None:
       return
-    index = model.block_at(float(event.xdata))
+    t = float(event.xdata)
+    index = model.block_at(t)
     if index is None:
       return
-    self.select_block(index)
+    try:
+      row = list(self._axes).index(event.inaxes)
+    except ValueError:
+      row = -1
+    kind, axis = row_target(row)
+    found = None if kind is None else model.object_at(t, kind=kind, axis=axis)
+    self.select_block(index, obj=found)
 
-  def select_block(self, index: int) -> None:
-    """Highlight one block and show what it contains."""
+  def select_block(self, index: int, obj=None) -> None:
+    """Highlight one block, and one object within it when there is one.
+
+    The object is what a label can attach to beyond the block, so it is
+    carried rather than derived again by whoever handles `on_pick`.
+    """
     model = self.model
     if model is None or not model.spans:
       return
     index = int(index) % len(model.spans)
     self.selected = index
+    self.selected_object = obj
     span = model.spans[index]
 
     for patch in self._highlight:
@@ -292,11 +322,18 @@ class SequencePanel:
     self._highlight = [
       ax.axvspan(span.t0, span.t1, color='tab:orange', alpha=0.18, zorder=0)
       for ax in self._axes]
+    if obj is not None:
+      row = {'rf': 0, 'adc': len(ROWS) - 1}.get(
+        obj.kind, 1 + (obj.axis or 0))
+      self._highlight.append(
+        self._axes[row].axvspan(obj.t0, obj.t1, color='tab:orange',
+                                alpha=0.45, zorder=0))
 
     self._refresh_details()
     self._canvas.draw_idle()
-    self.on_status(f'block {index}: {span.t0:.3f} to {span.t1:.3f} ms')
-    self.on_pick(index)
+    where = obj.label if obj is not None else f'block {index}'
+    self.on_status(f'{where}: {span.t0:.3f} to {span.t1:.3f} ms')
+    self.on_pick(index, obj)
 
   def _refresh_details(self) -> None:
     model = self.model
@@ -304,7 +341,13 @@ class SequencePanel:
       return
     rows = model.describe_block(self.selected)
     rows += self._label_rows(self.selected)
-    self._set_details(f'Block {self.selected}', rows)
+    obj = self.selected_object
+    if obj is not None:
+      rows = ([('selected', obj.label),
+               ('span', f'{obj.t0:.4f} to {obj.t1:.4f} ms')]
+              + rows + self._object_label_rows(obj))
+    title = obj.label if obj is not None else f'Block {self.selected}'
+    self._set_details(title, rows)
 
   def _label_rows(self, index: int) -> List:
     """Whatever the label store says about this block, if there is one."""
@@ -318,6 +361,19 @@ class SequencePanel:
     if not labels:
       return [('labels', 'none')]
     return [('labels', ', '.join(f'{k}={v}' for k, v in sorted(labels.items())))]
+
+  def _object_label_rows(self, obj) -> List:
+    store = getattr(self.session, 'labels', None)
+    if store is None:
+      return []
+    try:
+      labels = store.labels_on_object(obj.block, obj.kind, obj.ordinal)
+    except Exception:
+      return []
+    if not labels:
+      return [('object labels', 'none')]
+    return [('object labels',
+             ', '.join(f'{k}={v}' for k, v in sorted(labels.items())))]
 
   def _set_details(self, title: str, rows) -> None:
     self._details_title.config(text=title)

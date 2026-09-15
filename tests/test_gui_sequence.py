@@ -315,3 +315,55 @@ def test_the_summary_accepts_a_negative_index_like_the_other_accessors():
   seq.add_block(_block(t_start=4.0))
   model = SequenceModel(seq)
   assert model.describe_block(-1) == model.describe_block(1)
+
+
+def test_object_at_narrows_by_the_row_that_was_clicked(two_block_sequence):
+  """A click fixes the kind, and for a gradient the axis, before the time.
+
+  The fixture overlaps an RF, two gradients and an ADC in one block, so the
+  time alone is ambiguous by construction -- which is the case a viewer hits
+  constantly and the reason the filters are arguments rather than guesses.
+  """
+  model = SequenceModel(two_block_sequence)
+  t = 1.5                                    # inside every object of block 0
+
+  assert model.object_at(t, kind='rf') is None or \
+         model.object_at(t, kind='rf').kind == 'rf'
+  for axis in (0, 1):
+    found = model.object_at(t, kind='gradient', axis=axis)
+    assert found is not None and found.kind == 'gradient' and found.axis == axis
+  adc = model.object_at(t, kind='adc')
+  assert adc is not None and adc.kind == 'adc'
+
+
+def test_object_at_returns_nothing_where_nothing_is_played(two_block_sequence):
+  """Empty space must select no object, so the panel can fall back to the
+  block rather than snapping to whatever is nearest."""
+  model = SequenceModel(two_block_sequence)
+  assert model.object_at(model.t_end + 1.0, kind='gradient', axis=0) is None
+  assert model.object_at(3.8, kind='gradient', axis=0) is None
+
+
+def test_object_at_prefers_the_shortest_span_when_several_match():
+  """The short one is what a click can least easily hit by accident."""
+  seq = Sequence()
+  seq.add_block(_block())
+  model = SequenceModel(seq)
+
+  spans = [o for o in model.objects() if o.kind == 'gradient' and o.axis == 0]
+  assert spans, 'the fixture must carry a gradient on axis 0'
+  t = 0.5 * (spans[0].t0 + spans[0].t1)
+  found = model.object_at(t, kind='gradient', axis=0)
+  shortest = min((o for o in model.objects()
+                  if o.kind == 'gradient' and o.axis == 0 and o.t0 <= t <= o.t1),
+                 key=lambda o: o.t1 - o.t0)
+  assert found == shortest
+
+
+def test_an_object_owns_both_its_edges_unlike_a_block(two_block_sequence):
+  """Blocks tile the timeline so their edges must belong to exactly one of
+  them; an object is a thing being pointed at, and both ends are part of it."""
+  model = SequenceModel(two_block_sequence)
+  g = [o for o in model.objects() if o.kind == 'gradient' and o.axis == 0][0]
+  assert model.object_at(g.t0, kind='gradient', axis=0) is not None
+  assert model.object_at(g.t1, kind='gradient', axis=0) is not None

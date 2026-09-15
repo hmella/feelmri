@@ -204,3 +204,384 @@ def test_a_real_import_seeds_and_agrees_with_filter_blocks(pulseq_import):
     assert store.select(SET=v) == imp.filter_blocks(SET=v), (
       f'adding an object label changed the SET={v} selection')
   assert 'ROLE' in store.names()
+
+
+# -- writing labels back into a .seq ----------------------------------------
+
+def test_the_declared_format_version_is_read_from_the_header():
+  """It decides whether the file can be written at all, so it has to be
+  answerable before anything tries."""
+  from feelmri.gui.model.labels import seq_format_version
+  assert seq_format_version('examples/pulseq/epi_pypulseq.seq') == (1, 5, 0)
+  assert seq_format_version('tests/data/epi_v142.seq') == (1, 4, 2)
+
+
+def test_a_v14_file_is_refused_by_name_rather_than_failing_obscurely(tmp_path):
+  """pypulseq can READ v1.4 and cannot WRITE it: `seq.write` raises a bare
+  `KeyError: 1`, which says nothing about the cause. Refuse up front."""
+  from feelmri.gui.model.labels import write_labelled_seq
+  imp_labels = [{} for _ in range(231)]
+  with pytest.raises(NotImplementedError, match=r'v1\.4\.2'):
+    write_labelled_seq('tests/data/epi_v142.seq', tmp_path / 'out.seq',
+                       imp_labels)
+
+
+@pytest.mark.pulseq
+def test_writing_the_labels_a_file_already_has_reproduces_them(pulseq_import,
+                                                               tmp_path):
+  """The identity case, which anything that writes must satisfy first."""
+  from feelmri.gui.model.labels import write_labelled_seq
+  from conftest import EXAMPLES_SEQ_DIR, skip_if_pypulseq_too_old
+  path = EXAMPLES_SEQ_DIR / 'epi_pypulseq.seq'
+  if not path.exists():
+    pytest.skip('epi_pypulseq.seq not present')
+  skip_if_pypulseq_too_old(path)
+
+  from feelmri.PulseqAdapter import import_pulseq
+  original = [dict(d) for d in pulseq_import(path).block_labels]
+  out = write_labelled_seq(path, tmp_path / 'same.seq', original)
+  assert [dict(d) for d in import_pulseq(out).block_labels] == original
+
+
+@pytest.mark.pulseq
+def test_everything_except_the_labels_survives_the_rewrite(pulseq_import,
+                                                           tmp_path):
+  """A label editor that quietly altered the physics would be far worse than
+  one that refused to write at all.
+
+  Only `[BLOCKS]`, whose extension ids are renumbered, and `[SIGNATURE]`,
+  which is a recomputed hash the library never verifies, may differ.
+  """
+  import numpy as np
+
+  from feelmri.PulseqAdapter import import_pulseq
+  from feelmri.gui.model.labels import write_labelled_seq
+  from conftest import EXAMPLES_SEQ_DIR, skip_if_pypulseq_too_old
+  path = EXAMPLES_SEQ_DIR / 'epi_pypulseq.seq'
+  if not path.exists():
+    pytest.skip('epi_pypulseq.seq not present')
+  skip_if_pypulseq_too_old(path)
+
+  original = [dict(d) for d in pulseq_import(path).block_labels]
+  out = write_labelled_seq(path, tmp_path / 'same.seq', original)
+
+  def sections(p):
+    found, name = {}, None
+    for line in open(p):
+      token = line.strip()
+      if token.startswith('[') and token.endswith(']'):
+        name = token
+        found[name] = []
+      elif name and token:
+        found[name].append(token)
+    return found
+
+  before, after = sections(path), sections(out)
+  assert set(before) == set(after)
+  for name in before:
+    if name in ('[BLOCKS]', '[SIGNATURE]'):
+      continue
+    assert before[name] == after[name], f'{name} changed'
+
+  a, b = import_pulseq(path), import_pulseq(out)
+  assert len(a.feelmri_seq.blocks) == len(b.feelmri_seq.blocks)
+  assert len(a.readouts) == len(b.readouts)
+  for ra, rb in zip(a.readouts, b.readouts):
+    np.testing.assert_allclose(ra.kspace, rb.kspace, atol=0.0)
+
+
+@pytest.mark.pulseq
+def test_an_edited_label_reaches_the_file_and_comes_back(pulseq_import,
+                                                         tmp_path):
+  """The point of the writer, and the case a sidecar cannot serve."""
+  from feelmri.PulseqAdapter import import_pulseq
+  from feelmri.gui.model.labels import write_labelled_seq
+  from conftest import EXAMPLES_SEQ_DIR, skip_if_pypulseq_too_old
+  path = EXAMPLES_SEQ_DIR / 'epi_pypulseq.seq'
+  if not path.exists():
+    pytest.skip('epi_pypulseq.seq not present')
+  skip_if_pypulseq_too_old(path)
+
+  imp = pulseq_import(path)
+  store = LabelStore.from_import(imp, path)
+  # A label the file does not use, so it cannot pass by coincidence.
+  half = store.n_blocks // 2
+  store.set_blocks(range(0, half), 'SLC', 0)
+  store.set_blocks(range(half, store.n_blocks), 'SLC', 1)
+
+  out = write_labelled_seq(path, tmp_path / 'edited.seq',
+                           store.to_block_labels())
+  back = import_pulseq(out)
+  assert [d.get('SLC') for d in back.block_labels] == \
+         [0] * half + [1] * (store.n_blocks - half)
+
+  # The file's own SET convention must be untouched by the addition.
+  for value in sorted({d['SET'] for d in imp.block_labels if 'SET' in d}):
+    assert back.filter_blocks(SET=value) == imp.filter_blocks(SET=value)
+
+
+@pytest.mark.pulseq
+def test_the_written_file_selects_the_same_blocks_the_gui_did(pulseq_import,
+                                                              tmp_path):
+  """M4's acceptance: a SET map made in the GUI must mean the same thing to
+  `filter_blocks` after a round trip through the file.
+
+  Built by hand rather than seeded from the import, so it is the GUI's map
+  being checked and not the file's own.
+  """
+  from feelmri.PulseqAdapter import import_pulseq
+  from feelmri.gui.model.labels import write_labelled_seq
+  from conftest import EXAMPLES_SEQ_DIR, skip_if_pypulseq_too_old
+  path = EXAMPLES_SEQ_DIR / 'epi_pypulseq.seq'
+  if not path.exists():
+    pytest.skip('epi_pypulseq.seq not present')
+  skip_if_pypulseq_too_old(path)
+
+  imp = pulseq_import(path)
+  store = LabelStore(n_blocks=len(imp.block_labels))
+  groups = {0: range(0, 10), 1: range(10, 40), 2: range(40, 41)}
+  groups[3] = range(41, store.n_blocks)
+  for value, blocks in groups.items():
+    store.set_blocks(blocks, 'SET', value)
+
+  out = write_labelled_seq(path, tmp_path / 'byhand.seq',
+                           store.to_block_labels())
+  back = import_pulseq(out)
+  for value, blocks in groups.items():
+    assert back.filter_blocks(SET=value) == list(blocks), (
+      f'SET={value} did not survive the round trip')
+    assert store.select(SET=value) == back.filter_blocks(SET=value)
+
+
+@pytest.mark.pulseq
+def test_a_label_that_disappears_mid_sequence_is_refused(tmp_path):
+  """LABELSET can only SET a value, never unset one, so a running state that
+  drops a label is not expressible and must say so rather than write a file
+  that means something else."""
+  from feelmri.gui.model.labels import write_labelled_seq
+  from conftest import EXAMPLES_SEQ_DIR, skip_if_pypulseq_too_old
+  path = EXAMPLES_SEQ_DIR / 'epi_pypulseq.seq'
+  if not path.exists():
+    pytest.skip('epi_pypulseq.seq not present')
+  skip_if_pypulseq_too_old(path)
+
+  from feelmri.PulseqAdapter import import_pulseq
+  n = len(import_pulseq(path).block_labels)
+  labels = [{'SET': 1} for _ in range(n)]
+  labels[n // 2] = {}                       # SET vanishes here
+  with pytest.raises(ValueError, match='never unset'):
+    write_labelled_seq(path, tmp_path / 'bad.seq', labels)
+
+
+@pytest.mark.pulseq
+def test_a_name_pulseq_does_not_know_is_refused_with_the_supported_list(
+    tmp_path):
+  """A made-up label would be dropped silently by the writer otherwise."""
+  from feelmri.gui.model.labels import write_labelled_seq
+  from conftest import EXAMPLES_SEQ_DIR, skip_if_pypulseq_too_old
+  path = EXAMPLES_SEQ_DIR / 'epi_pypulseq.seq'
+  if not path.exists():
+    pytest.skip('epi_pypulseq.seq not present')
+  skip_if_pypulseq_too_old(path)
+
+  from feelmri.PulseqAdapter import import_pulseq
+  n = len(import_pulseq(path).block_labels)
+  with pytest.raises(ValueError, match='not Pulseq labels'):
+    write_labelled_seq(path, tmp_path / 'bad.seq',
+                       [{'MYTAG': 1} for _ in range(n)])
+
+
+@pytest.mark.pulseq
+def test_a_wrong_block_count_is_refused(tmp_path):
+  from feelmri.gui.model.labels import write_labelled_seq
+  from conftest import EXAMPLES_SEQ_DIR, skip_if_pypulseq_too_old
+  path = EXAMPLES_SEQ_DIR / 'epi_pypulseq.seq'
+  if not path.exists():
+    pytest.skip('epi_pypulseq.seq not present')
+  skip_if_pypulseq_too_old(path)
+  with pytest.raises(ValueError, match='label dicts for'):
+    write_labelled_seq(path, tmp_path / 'bad.seq', [{'SET': 0}])
+
+
+@pytest.mark.pulseq
+def test_extensions_that_are_not_labels_survive_the_rewrite(tmp_path):
+  """A file may carry TRIGGERS beside its labels, and rewriting the labels
+  must not drop them.
+
+  No bundled fixture has a non-label extension, so one is built here. That
+  gap is the reason this test exists: discarding the non-label chain passed
+  the whole suite before it.
+  """
+  import numpy as np
+  pp = pytest.importorskip('pypulseq')
+
+  from feelmri.gui.model.labels import write_labelled_seq
+
+  system = pp.Opts()
+  seq = pp.Sequence(system=system)
+  rf = pp.make_block_pulse(flip_angle=np.pi / 2, duration=0.4e-3,
+                           system=system)
+  trigger = pp.make_trigger(channel='physio1', duration=100e-6, system=system)
+  seq.add_block(rf, pp.make_label(label='SET', type='SET', value=1), trigger)
+  seq.add_block(pp.make_delay(1e-3),
+                pp.make_label(label='SET', type='SET', value=2))
+  seq.add_block(pp.make_delay(1e-3))
+  source = tmp_path / 'trigger.seq'
+  seq.write(str(source))
+
+  def extension_lines(path):
+    lines, section = [], None
+    for raw in open(path):
+      token = raw.strip()
+      if token.startswith('[') and token.endswith(']'):
+        section = token
+      elif section == '[EXTENSIONS]' and token and not token.startswith('#'):
+        lines.append(token)
+    return lines
+
+  assert any(line.startswith('extension TRIGGERS')
+             for line in extension_lines(source))
+
+  def triggered_blocks(path):
+    """Blocks whose extension chain actually REACHES a TRIGGERS entry.
+
+    Reading the `[EXTENSIONS]` text is not enough: pypulseq writes the whole
+    library whether or not any block references it, so the declaration and
+    the trigger row survive even when every link to them has been dropped.
+    Discarding the non-label chain passed a text-based version of this test.
+    """
+    reread = pp.Sequence()
+    reread.read(str(path), detect_rf_use=False)
+    trigger_type = None
+    for numeric, name in zip(reread.extension_numeric_idx,
+                             reread.extension_string_idx):
+      if name == 'TRIGGERS':
+        trigger_type = numeric
+    assert trigger_type is not None, 'no TRIGGERS type in the file'
+    found = []
+    for block_id, events in reread.block_events.items():
+      extension = int(events[6])
+      while extension:
+        type_id, _ref, following = reread.extensions_library.data[extension]
+        if int(type_id) == trigger_type:
+          found.append(block_id)
+          break
+        extension = int(following)
+    return sorted(found)
+
+  linked_before = triggered_blocks(source)
+  assert linked_before, 'the fixture must link a block to the trigger'
+
+  out = write_labelled_seq(source, tmp_path / 'relabelled.seq',
+                           [{'SET': 7}, {'SET': 8}, {'SET': 8}])
+
+  assert triggered_blocks(out) == linked_before, (
+    'the block lost its link to the trigger')
+
+  from feelmri.PulseqAdapter import import_pulseq
+  assert [dict(d) for d in import_pulseq(out).block_labels] == \
+         [{'SET': 7}, {'SET': 8}, {'SET': 8}]
+
+
+@pytest.mark.pulseq
+def test_loading_a_sequence_keeps_the_labels_the_file_already_has():
+  """Opening a labelled `.seq` must not show a blank slate.
+
+  `Session.set_sequence` takes a `Sequence`, which no longer knows its
+  LABELSET state, so a caller that imports and then calls it directly loses
+  the file's own convention silently. `load_sequence` is what keeps the two
+  together, and it lives in the model precisely so this is testable.
+  """
+  from feelmri.gui.model.session import Session
+  from conftest import EXAMPLES_SEQ_DIR, skip_if_pypulseq_too_old
+  path = EXAMPLES_SEQ_DIR / 'epi_pypulseq.seq'
+  if not path.exists():
+    pytest.skip('epi_pypulseq.seq not present')
+  skip_if_pypulseq_too_old(path)
+
+  session = Session()
+  imported = session.load_sequence(path)
+
+  assert session.labels is not None
+  assert session.labels.to_block_labels() == [dict(d)
+                                              for d in imported.block_labels]
+  values = sorted({d['SET'] for d in imported.block_labels if 'SET' in d})
+  assert values, 'the fixture carries no SET labels, so this proves nothing'
+  for value in values:
+    assert session.labels.select(SET=value) == imported.filter_blocks(SET=value)
+
+  # And the control: the blank path really would lose them, which is what
+  # makes this more than a restatement of from_import.
+  blank = Session()
+  blank.set_sequence(imported.feelmri_seq, path=path)
+  assert blank.labels.to_block_labels() != session.labels.to_block_labels()
+
+
+# -- the per-block view and the running view are different things -----------
+
+def test_a_running_state_carries_each_value_forward():
+  """`LABELSET` is sticky and the format cannot unset a value, so the running
+  view is the only faithful reading of what a written file would mean."""
+  store = LabelStore(n_blocks=5)
+  store.set_block(1, 'SET', 3)
+  store.set_block(3, 'SET', 7)
+
+  assert store.to_block_labels() == [{}, {'SET': 3}, {}, {'SET': 7}, {}]
+  assert store.to_running_labels() == [
+    {}, {'SET': 3}, {'SET': 3}, {'SET': 7}, {'SET': 7}]
+
+
+def test_the_two_views_agree_for_a_store_seeded_from_a_file():
+  """A file's own state was already read as a running one, so nothing moves.
+
+  This is what makes the distinction safe to introduce: it changes the
+  meaning of nothing that came from a `.seq`.
+  """
+  store = LabelStore(n_blocks=4,
+                     block_labels=[{'SET': 1}, {'SET': 1}, {'SET': 2},
+                                   {'SET': 2}])
+  assert store.to_running_labels() == store.to_block_labels()
+
+
+def test_an_object_label_carries_forward_in_the_running_view():
+  """An object label merges down onto its block, and then behaves like any
+  other block label -- which for a file means from that block onward."""
+  store = LabelStore(n_blocks=4)
+  store.set_object(1, 'gradient', 0, 'SEG', 5)
+  assert store.to_block_labels() == [{}, {'SEG': 5}, {}, {}]
+  assert store.to_running_labels() == [{}, {'SEG': 5}, {'SEG': 5}, {'SEG': 5}]
+
+
+@pytest.mark.pulseq
+def test_a_sparse_edit_exports_and_means_what_the_running_view_said(tmp_path):
+  """End to end: label a range and one object, export, read it back.
+
+  The numbers asserted are `to_running_labels`' own, so the file and the
+  view of it that the panel shows before exporting cannot disagree.
+  """
+  from feelmri.PulseqAdapter import import_pulseq
+  from feelmri.gui.model.labels import write_labelled_seq
+  from feelmri.gui.model.session import Session
+  from conftest import EXAMPLES_SEQ_DIR, skip_if_pypulseq_too_old
+  path = EXAMPLES_SEQ_DIR / 'epi_pypulseq.seq'
+  if not path.exists():
+    pytest.skip('epi_pypulseq.seq not present')
+  skip_if_pypulseq_too_old(path)
+
+  session = Session()
+  original = session.load_sequence(path)
+  store = session.labels
+  store.set_blocks(range(0, 10), 'SLC', 1)
+  store.set_object(1, 'gradient', 0, 'SEG', 5)
+
+  running = store.to_running_labels()
+  out = write_labelled_seq(path, tmp_path / 'sparse.seq', running)
+  back = import_pulseq(out)
+
+  assert [dict(d) for d in back.block_labels] == running
+  # Sticky, and the test says so rather than asserting the range naively.
+  assert back.filter_blocks(SLC=1) == list(range(store.n_blocks))
+  assert back.filter_blocks(SEG=5) == list(range(1, store.n_blocks))
+  # The file's own SET convention is untouched by either addition.
+  for value in sorted({d['SET'] for d in original.block_labels if 'SET' in d}):
+    assert back.filter_blocks(SET=value) == original.filter_blocks(SET=value)

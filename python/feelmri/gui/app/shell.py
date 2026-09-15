@@ -42,9 +42,11 @@ class Shell:
     body = ttk.Frame(self.root)
     body.pack(fill='both', expand=True)
 
-    self.controls = ttk.Frame(body, padding=10, width=300)
-    self.controls.pack(side='left', fill='y')
-    self.controls.pack_propagate(False)
+    self._tabs = ttk.Notebook(body, width=320)
+    self._tabs.pack(side='left', fill='y')
+    self._tabs.pack_propagate(False)
+    self.controls = ttk.Frame(self._tabs, padding=10)
+    self._tabs.add(self.controls, text='Plan')
 
     # A draggable split rather than a fixed layout: with the native 3D window
     # the top panel is only a note and the sequence wants the room, while the
@@ -58,6 +60,10 @@ class Shell:
     self.sequence_panel = self._make_sequence_panel(self._split)
     if self.sequence_panel is not None:
       self._split.add(self.sequence_panel.widget, weight=1)
+
+    self.label_panel = self._make_label_panel(self._tabs)
+    if self.label_panel is not None:
+      self._tabs.add(self.label_panel.widget, text='Labels')
 
     # After the viewport: the View menu binds straight to its methods.
     self._build_menu()
@@ -101,6 +107,25 @@ class Shell:
       return Fallback3D(parent, self.session, reason=str(exc),
                         on_status=self.status)
 
+  def _make_label_panel(self, parent):
+    """The labels tab, or nothing if it cannot be built."""
+    try:
+      from ..view.label_panel import LabelPanel
+      return LabelPanel(parent, self.session, on_status=self.status)
+    except Exception as exc:
+      self.status(f'label panel unavailable: {exc}')
+      return None
+
+  def _on_pick(self, block, obj=None) -> None:
+    """Route a pick from the sequence panel to the labels tab.
+
+    Looked up rather than bound, because the sequence panel is built first --
+    it is what the labels tab listens to.
+    """
+    panel = getattr(self, 'label_panel', None)
+    if panel is not None:
+      panel.set_target(block, obj)
+
   def _make_sequence_panel(self, parent):
     """The sequence rows, or nothing if matplotlib is missing.
 
@@ -110,7 +135,8 @@ class Shell:
     """
     try:
       from ..view.sequence_panel import SequencePanel
-      return SequencePanel(parent, self.session, on_status=self.status)
+      return SequencePanel(parent, self.session, on_status=self.status,
+                           on_pick=self._on_pick)
     except Exception as exc:
       self.status(f'sequence panel unavailable: {exc}')
       return None
@@ -255,9 +281,7 @@ class Shell:
       return
     self.status(f'reading {path}...')
     try:
-      from ...PulseqAdapter import import_pulseq
-      imported = import_pulseq(path)
-      self.session.set_sequence(imported.feelmri_seq, path=path)
+      self.session.load_sequence(path)
     except Exception as exc:
       self.status('sequence load failed')
       messagebox.showerror('Could not open the sequence', str(exc))

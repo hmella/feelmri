@@ -290,6 +290,29 @@ class SequenceModel:
                                t0 + float(local.min()), t0 + float(local.max())))
     return out
 
+  def object_at(self, t: float, kind: Optional[str] = None,
+                axis: Optional[int] = None) -> Optional[MRObjectRef]:
+    """The MR object at absolute time `t`, narrowed by kind and axis.
+
+    A panel knows which ROW was clicked, and that already fixes the kind --
+    and for a gradient the axis -- so those arrive as filters rather than
+    being guessed from the time alone. Without them a click at an instant
+    where an RF, a gradient and an ADC all overlap is ambiguous.
+
+    Spans are closed here, unlike `block_at`'s half-open blocks: an object is
+    a thing with an extent that a user is pointing AT, not a tile in a
+    partition, so both of its edges belong to it. Where several still match,
+    the SHORTEST wins, which is the one a click can least easily hit by
+    accident.
+    """
+    candidates = [o for o in self.objects()
+                  if o.t0 <= t <= o.t1
+                  and (kind is None or o.kind == kind)
+                  and (axis is None or o.axis == axis)]
+    if not candidates:
+      return None
+    return min(candidates, key=lambda o: (o.t1 - o.t0, o.block, o.ordinal))
+
   # -- internals ------------------------------------------------------------
 
   def _selected(self, blocks: Optional[Seq[int]]) -> List[int]:
