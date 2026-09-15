@@ -211,6 +211,54 @@ class SequenceModel:
       return np.empty(0)
     return np.sort(np.concatenate(chunks))
 
+  # -- what one block contains ----------------------------------------------
+
+  def describe_block(self, index: int) -> List[Tuple[str, str]]:
+    """`(label, value)` rows describing one block, ready to display.
+
+    **Every number is derived from the SAME arrays the panel draws**, through
+    `gradient_traces` / `rf_traces` / `adc_times`, so the reading beside the
+    picture cannot disagree with the picture. Deriving it from the block
+    separately is how a summary drifts from the trace it describes.
+
+    Units follow what the panel puts on its axes: RF in microtesla, gradients
+    in mT/m, their areas in mT/m*ms, times in ms.
+    """
+    i = self._selected([index])[0]
+    span = self.spans[i]
+    rows: List[Tuple[str, str]] = [
+      ('block', str(i)),
+      ('start', f'{span.t0:.4f} ms'),
+      ('end', f'{span.t1:.4f} ms'),
+      ('duration', f'{span.duration:.4f} ms'),
+    ]
+    flags = [n for n, on in (('empty', span.empty), ('spoiler', span.spoiler),
+                             ('stores magnetization', span.store_magnetization))
+             if on]
+    rows.append(('flags', ', '.join(flags) if flags else 'none'))
+
+    for k, (t, w) in enumerate(self.rf_traces(blocks=[i])):
+      peak = float(np.abs(w).max()) * 1e3 if np.size(w) else 0.0
+      rows.append((f'RF[{k}]',
+                   f'{peak:.4f} uT peak over '
+                   f'{_extent(t):.4f} ms'))
+
+    for axis in (0, 1, 2):
+      for k, (t, a) in enumerate(self.gradient_traces(axis, blocks=[i])):
+        peak = float(np.abs(a).max()) if np.size(a) else 0.0
+        area = float(np.trapezoid(a, t)) if np.size(a) > 1 else 0.0
+        rows.append((f'G{AXIS_LABELS[axis]}[{k}]',
+                     f'{peak:.4f} mT/m peak, area {area:.5f} mT/m*ms'))
+
+    adc = self.adc_times(blocks=[i])
+    if adc.size:
+      dwell = float(np.diff(adc).mean()) if adc.size > 1 else 0.0
+      rows.append(('ADC', f'{adc.size} samples, {adc[0]:.4f} to '
+                          f'{adc[-1]:.4f} ms, dwell {dwell * 1e3:.3f} us'))
+    else:
+      rows.append(('ADC', 'none'))
+    return rows
+
   # -- objects, for selection and labelling ---------------------------------
 
   def objects(self, blocks: Optional[Seq[int]] = None) -> List[MRObjectRef]:
@@ -274,6 +322,12 @@ def _magnitude(value, unit: str):
   """
   m_as = getattr(value, 'm_as', None)
   return m_as(unit) if m_as is not None else value
+
+
+def _extent(t) -> float:
+  """Span of a time array in ms, zero when it carries fewer than two points."""
+  t = np.asarray(t, dtype=float)
+  return float(t.max() - t.min()) if t.size > 1 else 0.0
 
 
 def _support(rf, t0: float, t1: float) -> Tuple[float, float]:

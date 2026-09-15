@@ -241,3 +241,77 @@ def test_an_imported_seq_flattens_consistently(pulseq_import):
           == sum(s.n_gradients for s in model.spans))
   assert (sum(1 for o in objs if o.kind == 'adc')
           == sum(1 for s in model.spans if s.has_adc))
+
+
+def test_the_block_summary_reports_the_numbers_that_are_drawn(
+    two_block_sequence):
+  """The reading beside the picture must come from the picture's own arrays.
+
+  `describe_block` goes through `gradient_traces` / `rf_traces` / `adc_times`
+  rather than reaching into the block itself, so a summary cannot claim one
+  amplitude while the trace shows another. Asserted here by recomputing each
+  quoted number from those same accessors.
+  """
+  model = SequenceModel(two_block_sequence)
+  rows = dict(model.describe_block(0))
+
+  span = model.spans[0]
+  assert rows['block'] == '0'
+  assert rows['duration'].startswith(f'{span.duration:.4f}')
+
+  peak_uT = float(np.abs(model.rf_traces(blocks=[0])[0][1]).max()) * 1e3
+  assert f'{peak_uT:.4f} uT' in rows['RF[0]']
+
+  t, a = model.gradient_traces(0, blocks=[0])[0]
+  assert f'{float(np.abs(a).max()):.4f} mT/m' in rows['GM[0]']
+  assert f'{float(np.trapezoid(a, t)):.5f}' in rows['GM[0]']
+
+  adc = model.adc_times(blocks=[0])
+  assert f'{adc.size} samples' in rows['ADC']
+  assert f'{adc[0]:.4f} to {adc[-1]:.4f} ms' in rows['ADC']
+
+
+def test_the_summary_quotes_ABSOLUTE_adc_times_like_the_axis_does():
+  """A block-local ADC time would read plausibly and sit under the wrong block.
+
+  The second block starts at 4 ms, so its samples cannot begin before that.
+  This is the same origin trap the module docstring names, checked where a
+  user actually reads the number.
+  """
+  seq = Sequence()
+  seq.add_block(_block(t_start=0.0))
+  seq.add_block(_block(t_start=4.0))
+  model = SequenceModel(seq)
+
+  rows = dict(model.describe_block(1))
+  first = float(rows['ADC'].split('samples,')[1].split('to')[0])
+  assert first >= model.spans[1].t0, 'the ADC was quoted block-local'
+  assert np.isclose(first, model.adc_times(blocks=[1])[0], atol=1e-4)
+
+
+def test_the_summary_names_the_flags_a_block_carries():
+  """`spoiler` and `store_magnetization` change what a run does, so a user
+  picking a block needs to see them without opening the file."""
+  seq = Sequence()
+  block = _block()
+  block.store_magnetization = True
+  block.spoiler = True
+  seq.add_block(block)
+  rows = dict(SequenceModel(seq).describe_block(0))
+  assert 'spoiler' in rows['flags']
+  assert 'stores magnetization' in rows['flags']
+
+
+def test_a_block_with_no_adc_says_so_rather_than_omitting_the_row():
+  """An absent row reads as 'I forgot to look', which is the wrong answer."""
+  seq = Sequence()
+  seq.add_block(_block(with_adc=False))
+  assert dict(SequenceModel(seq).describe_block(0))['ADC'] == 'none'
+
+
+def test_the_summary_accepts_a_negative_index_like_the_other_accessors():
+  seq = Sequence()
+  seq.add_block(_block(t_start=0.0))
+  seq.add_block(_block(t_start=4.0))
+  model = SequenceModel(seq)
+  assert model.describe_block(-1) == model.describe_block(1)

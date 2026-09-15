@@ -33,6 +33,12 @@ class Shell:
     self._status = tk.StringVar(value='ready')
     self._updating_plan = False
 
+    # The status bar is packed BEFORE the body: Tk allocates in pack order, so
+    # an expanding body packed first takes the whole window and squeezes the
+    # bar off the bottom entirely.
+    ttk.Label(self.root, textvariable=self._status, anchor='w',
+              relief='sunken', padding=(6, 2)).pack(fill='x', side='bottom')
+
     body = ttk.Frame(self.root)
     body.pack(fill='both', expand=True)
 
@@ -40,11 +46,18 @@ class Shell:
     self.controls.pack(side='left', fill='y')
     self.controls.pack_propagate(False)
 
-    self.viewport = self._make_viewport(body)
-    self.viewport.widget.pack(side='right', fill='both', expand=True)
+    # A draggable split rather than a fixed layout: with the native 3D window
+    # the top panel is only a note and the sequence wants the room, while the
+    # blit backend needs the opposite. The user decides.
+    self._split = ttk.PanedWindow(body, orient='vertical')
+    self._split.pack(side='right', fill='both', expand=True)
 
-    ttk.Label(self.root, textvariable=self._status, anchor='w',
-              relief='sunken', padding=(6, 2)).pack(fill='x', side='bottom')
+    self.viewport = self._make_viewport(self._split)
+    self._split.add(self.viewport.widget, weight=0)
+
+    self.sequence_panel = self._make_sequence_panel(self._split)
+    if self.sequence_panel is not None:
+      self._split.add(self.sequence_panel.widget, weight=1)
 
     # After the viewport: the View menu binds straight to its methods.
     self._build_menu()
@@ -88,6 +101,20 @@ class Shell:
       return Fallback3D(parent, self.session, reason=str(exc),
                         on_status=self.status)
 
+  def _make_sequence_panel(self, parent):
+    """The sequence rows, or nothing if matplotlib is missing.
+
+    Optional the same way the 3D view is: the shell is still useful for
+    planning without it, so a missing dependency costs a panel rather than
+    the application.
+    """
+    try:
+      from ..view.sequence_panel import SequencePanel
+      return SequencePanel(parent, self.session, on_status=self.status)
+    except Exception as exc:
+      self.status(f'sequence panel unavailable: {exc}')
+      return None
+
   def _start_pump(self, viewport) -> None:
     """Service VTK from the Tk timer, so the two event loops coexist.
 
@@ -110,6 +137,9 @@ class Shell:
 
     file_menu = tk.Menu(bar, tearoff=0)
     file_menu.add_command(label='Open phantom...', command=self.open_phantom)
+    file_menu.add_command(label='Open sequence (.seq)...',
+                          command=self.open_sequence)
+    file_menu.add_separator()
     file_menu.add_command(label='Import plan (.pvsm)...', command=self.import_plan)
     file_menu.add_command(label='Export plan (.pvsm)...', command=self.export_plan)
     file_menu.add_separator()
@@ -208,6 +238,32 @@ class Shell:
       messagebox.showerror('Could not open the phantom', str(exc))
       return
     self.status(f'loaded {path}')
+
+  def open_sequence(self) -> None:
+    """Load a Pulseq `.seq` into the sequence panel.
+
+    Import is the adapter's, not a second reader: `import_pulseq` is what the
+    rest of the library uses, so what the panel draws is what a run would
+    play. It needs pypulseq, which is reported rather than raised.
+    """
+    from tkinter import filedialog, messagebox
+
+    path = filedialog.askopenfilename(
+      title='Open sequence',
+      filetypes=[('Pulseq', '*.seq'), ('All files', '*')])
+    if not path:
+      return
+    self.status(f'reading {path}...')
+    try:
+      from ...PulseqAdapter import import_pulseq
+      imported = import_pulseq(path)
+      self.session.set_sequence(imported.feelmri_seq, path=path)
+    except Exception as exc:
+      self.status('sequence load failed')
+      messagebox.showerror('Could not open the sequence', str(exc))
+      return
+    blocks = len(self.session.sequence.spans)
+    self.status(f'loaded {path} -- {blocks} blocks')
 
   def _on_mesh(self) -> None:
     s = self.session
