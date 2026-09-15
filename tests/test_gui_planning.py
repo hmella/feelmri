@@ -12,8 +12,10 @@ import numpy as np
 import pytest
 
 from feelmri.Math import Rx, Ry, Rz
-from feelmri.gui.model.planning import (AXIS_NAMES, FOVBox, euler_to_mps,
-                                        is_rotation, mps_to_euler)
+from feelmri.gui.model.planning import (AXIS_NAMES, FOVBox,
+                                         euler_to_mps, format_triplet,
+                                         is_rotation, mps_to_euler,
+                                         parse_triplet)
 
 PLANNING = __import__('pathlib').Path(__file__).resolve().parent.parent / 'examples' / 'planning'
 PVSM_FILES = ['4dflow', 'abdomen', 'beating_heart', 'phase_contrast', 'water_and_fat']
@@ -191,3 +193,39 @@ def test_fov_box_refuses_impossible_input():
     FOVBox(fov=[1, 1, 1], loc=[0, np.inf, 0], angles=[0, 0, 0])
   with pytest.raises(ValueError, match='not a proper rotation'):
     FOVBox.from_mps([1, 1, 1], [0, 0, 0], np.diag([1.0, 1.0, -1.0]))
+
+
+# -- the entry fields' text, which is where a typo becomes a message --------
+
+def test_a_triplet_round_trips_through_the_text_it_is_shown_as():
+  """Six significant digits must not move the plan.
+
+  The entries are the only place a user edits the numbers, so a format that
+  loses precision silently changes the field of view every time the panel
+  repaints.
+  """
+  values = np.array([0.3, 0.22, 0.008])
+  np.testing.assert_allclose(parse_triplet(format_triplet(values)), values,
+                             rtol=1e-9)
+
+
+def test_commas_and_extra_spaces_are_accepted():
+  np.testing.assert_allclose(parse_triplet('0.3, 0.22 , 0.008'),
+                             [0.3, 0.22, 0.008], rtol=1e-12)
+
+
+@pytest.mark.parametrize('text', ['0.3 0.22', '0.3 0.22 0.008 0.1', ''])
+def test_the_wrong_count_is_refused_rather_than_padded(text):
+  """Two numbers and a default is a plausible plan and the wrong one."""
+  with pytest.raises(ValueError, match='three numbers'):
+    parse_triplet(text, name='fov')
+
+
+def test_a_non_number_names_the_field_it_came_from():
+  with pytest.raises(ValueError, match='fov'):
+    parse_triplet('0.3 wide 0.008', name='fov')
+
+
+def test_formatting_does_not_print_floating_point_noise():
+  """`str(0.1 + 0.2)` in an entry field is what this exists to prevent."""
+  assert format_triplet([0.1 + 0.2, 1 / 3, 2.0]) == '0.3 0.333333 2'

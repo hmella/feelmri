@@ -250,6 +250,47 @@ def warp(points: np.ndarray,
   return points + scale * displacement
 
 
+#: Plausible extent of an MRI FIELD OF VIEW, in metres -- not of a body.
+#:
+#: The upper bound is the load-bearing one and it is deliberately tight. With
+#: 3.0 m, `abdomen_P1_tetra` (extent 158.8) reads as centimetres, giving a
+#: plausible-looking 1.588 m whole body -- and the example that uses it passes
+#: 0.001, i.e. 15.9 cm. At 0.6 m the centimetre reading is rejected and the
+#: millimetre one is chosen, which is what the example means. A genuinely
+#: body-sized mesh now matches nothing and is reported as such, which is the
+#: right answer for a viewer that must not guess.
+PLAUSIBLE_EXTENT_M = (0.02, 0.6)
+
+#: The scales the shipped phantoms actually need, and what each means.
+KNOWN_SCALES = ((1.0, 'metres'), (1e-2, 'centimetres'), (1e-3, 'millimetres'))
+
+
+def suggest_scale_factor(points: np.ndarray) -> Tuple[float, str]:
+  """`(factor, why)` -- the scale that puts this mesh at a human size.
+
+  **The shipped phantoms are not in one unit.** `heart_P1_hex` and
+  `heart_P2_tetra` are metres, `aorta_P1_tetra` and `water_fat_P1_prism` are
+  centimetres, `abdomen_P1_tetra` is millimetres -- three scales among five
+  files, each spelled out as a `scale_factor` in the example that uses it. A
+  viewer that assumes metres draws a field of view a hundred times too small
+  against the phantom and reports an empty submesh, which is what happened.
+
+  This SUGGESTS and never applies: guessing units silently is how a plausible
+  wrong answer gets published. The caller shows the number and the reason.
+  """
+  extent = float(np.max(points.max(axis=0) - points.min(axis=0)))
+  low, high = PLAUSIBLE_EXTENT_M
+  if extent <= 0:
+    return 1.0, 'the mesh has no extent'
+  for factor, unit in KNOWN_SCALES:
+    if low <= extent * factor <= high:
+      scaled = extent * factor
+      return factor, (f'extent {extent:.4g} reads as {unit} '
+                      f'({scaled:.4g} m across)')
+  return 1.0, (f'extent {extent:.4g} matches no usual unit; '
+               f'set the scale by hand')
+
+
 def bounds(points: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
   """`(min, max)` corner of the axis-aligned bounding box."""
   return points.min(axis=0), points.max(axis=0)

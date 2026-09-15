@@ -196,3 +196,29 @@ class FOVBox:
     local = self.to_imaging(x)
     half = 0.5 * self.fov
     return np.all(np.abs(local) <= half + rtol * np.maximum(half, 1.0), axis=1)
+
+
+def parse_triplet(text: str, name: str = 'value') -> np.ndarray:
+  """Three numbers from a line of text, separated by spaces or commas.
+
+  The entry fields of a planning panel are free text, so this is where a
+  typo becomes a message rather than a traceback or, worse, a plan quietly
+  built from two numbers and a default.
+  """
+  parts = str(text).replace(',', ' ').split()
+  if len(parts) != 3:
+    raise ValueError(f'{name}: expected three numbers, got {len(parts)}')
+  try:
+    return np.array([float(p) for p in parts], dtype=float)
+  except ValueError as exc:
+    raise ValueError(f'{name}: {exc}') from exc
+
+
+def format_triplet(values) -> str:
+  """Three numbers as a line of text, the inverse of `parse_triplet`.
+
+  `%g` with six significant digits: enough that a round trip through the
+  entry does not move the plan, short enough to read. A plain `str` would put
+  `0.30000000000000004` in front of the user.
+  """
+  return ' '.join(f'{float(v):.6g}' for v in np.asarray(values).ravel())

@@ -31,7 +31,6 @@ class Shell:
     self.root.geometry('1180x760')
 
     self._status = tk.StringVar(value='ready')
-    self._updating_plan = False
 
     # The status bar is packed BEFORE the body: Tk allocates in pack order, so
     # an expanding body packed first takes the whole window and squeezes the
@@ -69,10 +68,6 @@ class Shell:
     self._build_menu()
     self._build_controls()
     self.session.mesh_changed.connect(lambda *_: self._on_mesh())
-    # The plan travels BOTH ways. Without this the entries write to the
-    # session and never read back, so dragging the box in the 3D window
-    # changed the plan while the numbers beside it went stale.
-    self.session.plan_changed.connect(lambda *_: self._on_plan())
     self.root.protocol('WM_DELETE_WINDOW', self.close)
 
   # -- construction ---------------------------------------------------------
@@ -225,22 +220,14 @@ class Shell:
     self._frame_scale.pack(fill='x')
 
     ttk.Separator(self.controls).pack(fill='x', pady=12)
-    ttk.Label(self.controls, text='Field of view',
-              font=('TkDefaultFont', 10, 'bold')).pack(anchor='w')
 
-    self._plan_vars = {}
-    for label, key, default in (('FOV (m), M P S', 'fov', '0.3 0.22 0.008'),
-                                ('Centre (m)', 'loc', '0 0 0'),
-                                ('Rotation (deg)', 'rot', '0 0 0')):
-      ttk.Label(self.controls, text=label).pack(anchor='w', pady=(6, 0))
-      var = tk.StringVar(value=default)
-      ttk.Entry(self.controls, textvariable=var).pack(fill='x')
-      self._plan_vars[key] = var
-
-    ttk.Button(self.controls, text='Apply plan',
-               command=self.apply_plan).pack(fill='x', pady=(10, 0))
-    self._submesh_label = ttk.Label(self.controls, text='', wraplength=270)
-    self._submesh_label.pack(anchor='w', pady=(6, 0))
+    from ..view.planning_panel import PlanningPanel
+    self.planning_panel = PlanningPanel(self.controls, self.session,
+                                        on_status=self.status)
+    self.planning_panel.widget.pack(fill='x')
+    # Kept as the panel's own, so a caller reaching for the entries finds one
+    # set rather than two that can disagree.
+    self._plan_vars = self.planning_panel.vars
 
   # -- actions --------------------------------------------------------------
 
@@ -258,12 +245,18 @@ class Shell:
       return
     self.status(f'loading {path}...')
     try:
-      self.session.load_mesh(path)
+      # The shipped phantoms are in three different units, and the plan is in
+      # metres, so the scale is read off the mesh and APPLIED -- then shown in
+      # the Plan tab, where it can be corrected. Loading at 1.0 and leaving
+      # the user to notice an empty submesh is the worse failure.
+      from ..model.mesh import load_mesh as read_mesh, suggest_scale_factor
+      factor, why = suggest_scale_factor(read_mesh(path)[0])
+      self.session.load_mesh(path, scale_factor=factor)
     except Exception as exc:
       self.status('load failed')
       messagebox.showerror('Could not open the phantom', str(exc))
       return
-    self.status(f'loaded {path}')
+    self.status(f'loaded {path} -- scale {factor:g}, {why}')
 
   def open_sequence(self) -> None:
     """Load a Pulseq `.seq` into the sequence panel.
@@ -310,28 +303,6 @@ class Shell:
     self._plan_vars['loc'].set(' '.join(f'{v:.4g}' for v in 0.5 * (lo + hi)))
     self.viewport.rebuild()
 
-  def _on_plan(self) -> None:
-    """Show the current plan in the entries, whoever changed it.
-
-    Guarded against its own echo: writing a `StringVar` does not fire
-    `apply_plan`, but a future binding might, and a plan panel that rewrites
-    the session on every repaint would loop.
-    """
-    box = self.session.box
-    if box is None or self._updating_plan:
-      return
-    self._updating_plan = True
-    try:
-      self._plan_vars['fov'].set(' '.join(f'{v:.6g}' for v in box.fov))
-      self._plan_vars['loc'].set(' '.join(f'{v:.6g}' for v in box.loc))
-      self._plan_vars['rot'].set(' '.join(f'{v:.6g}'
-                                          for v in np.degrees(box.angles)))
-      if self.session.has_mesh:
-        markers = self.session.submesh_markers()
-        self._submesh_label.config(
-          text=f'{int(markers.sum())} of {markers.size} elements in the slab')
-    finally:
-      self._updating_plan = False
 
   def _set_frame(self) -> None:
     try:
@@ -339,74 +310,19 @@ class Shell:
     except IndexError:
       pass
 
+
+
+
+
   def apply_plan(self) -> None:
-    from tkinter import messagebox
-
-    try:
-      fov = self._numbers('fov')
-      loc = self._numbers('loc')
-      rot = np.radians(self._numbers('rot'))
-    except ValueError as exc:
-      messagebox.showerror('Plan', str(exc))
-      return
-
-    self.session.box = FOVBox(fov=fov, loc=loc, angles=rot)
-    if self.session.has_mesh:
-      markers = self.session.submesh_markers()
-      self._submesh_label.config(
-        text=f'{int(markers.sum())} of {markers.size} elements in the slab')
-    self.status('plan applied')
-
-  def _numbers(self, key: str) -> np.ndarray:
-    parts = self._plan_vars[key].get().replace(',', ' ').split()
-    if len(parts) != 3:
-      raise ValueError(f'{key}: expected three numbers, got {len(parts)}')
-    try:
-      return np.array([float(p) for p in parts])
-    except ValueError as exc:
-      raise ValueError(f'{key}: {exc}') from exc
+    """Kept so the menu, the tests and any caller still have one entry point."""
+    self.planning_panel.apply()
 
   def import_plan(self) -> None:
-    from tkinter import filedialog, messagebox
-
-    path = filedialog.askopenfilename(title='Import plan',
-                                      filetypes=[('ParaView state', '*.pvsm')])
-    if not path:
-      return
-    try:
-      from feelmri.Parameters import PVSMParser
-      parser = PVSMParser(path)
-      self._plan_vars['fov'].set(' '.join(f'{v:.6g}'
-                                          for v in parser.FOV.m_as('m')))
-      self._plan_vars['loc'].set(' '.join(f'{v:.6g}'
-                                          for v in parser.LOC.m_as('m')))
-      self._plan_vars['rot'].set(' '.join(f'{v:.6g}'
-                                          for v in parser.Rotation.m_as('deg')))
-    except Exception as exc:
-      messagebox.showerror('Could not read the plan', str(exc))
-      return
-    self.apply_plan()
-    self.status(f'imported {path}')
+    self.planning_panel.import_plan()
 
   def export_plan(self) -> None:
-    from tkinter import filedialog, messagebox
-
-    if self.session.box is None:
-      messagebox.showinfo('Nothing to export', 'Apply a plan first.')
-      return
-    path = filedialog.asksaveasfilename(
-      title='Export plan', defaultextension='.pvsm',
-      filetypes=[('ParaView state', '*.pvsm')])
-    if not path:
-      return
-    try:
-      from ..model.pvsm import write_pvsm
-      box = self.session.box
-      write_pvsm(path, box.fov, box.loc, np.degrees(box.angles))
-    except Exception as exc:
-      messagebox.showerror('Export failed', str(exc))
-      return
-    self.status(f'wrote {path}')
+    self.planning_panel.export_plan()
 
   def close(self) -> None:
     pump = getattr(self, '_pump_id', None)

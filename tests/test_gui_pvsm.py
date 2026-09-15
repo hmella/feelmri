@@ -10,6 +10,8 @@ with itself and tell us nothing.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -134,3 +136,86 @@ def test_patch_refuses_a_template_without_the_named_proxies(tmp_path):
   bogus.write_text('<ParaView><ServerManagerState version="6.0.0"/></ParaView>')
   with pytest.raises(KeyError, match='Box1'):
     patch_pvsm(bogus, tmp_path / 'out.pvsm', [1, 1, 1])
+
+
+# -- the parameter file that points at the state file -----------------------
+
+def test_the_exported_yaml_is_readable_by_the_librarys_own_handler(tmp_path):
+  """The `.pvsm` holds the plan; this is the file an example opens.
+
+  Checked through `ParameterHandler` rather than by reading the text, because
+  what matters is that the library accepts it and converts the units.
+  """
+  from feelmri.Parameters import ParameterHandler
+  from feelmri.gui.model.pvsm import write_plan_yaml
+
+  path = tmp_path / 'plan.yaml'
+  write_plan_yaml(path, 'plan.pvsm')
+
+  handler = ParameterHandler(str(path))
+  assert handler.Formatting.planning == 'plan.pvsm'
+  assert handler.Formatting.units == 'm'
+  assert handler.Imaging.FlipAngle.m_as('deg') == 15
+  assert handler.Hardware.G_max.m_as('mT/m') == 33.0
+  assert handler.Phantom.T1.m_as('ms') == 800
+
+
+def test_the_yaml_matches_the_shape_the_shipped_examples_read(tmp_path):
+  """Same four sections and the same keys as an example's own parameter file.
+
+  A file the GUI writes has to be a drop-in for one a user already has, or
+  `parameters.Imaging.RES` fails at the call site rather than here.
+  """
+  import yaml
+
+  from feelmri.gui.model.pvsm import write_plan_yaml
+
+  shipped = Path('examples/parameters/trajectories.yaml')
+  if not shipped.exists():
+    pytest.skip('trajectories.yaml not present')
+
+  path = tmp_path / 'plan.yaml'
+  write_plan_yaml(path, 'plan.pvsm')
+  written = yaml.safe_load(path.read_text())
+  reference = yaml.safe_load(shipped.read_text())
+
+  assert set(written) == set(reference)
+  for section in ('Imaging', 'Hardware', 'Formatting', 'Phantom'):
+    assert set(written[section]) == set(reference[section]), section
+
+
+def test_the_planning_path_is_written_verbatim(tmp_path):
+  """It is resolved against the SCRIPT directory, not against the yaml, so
+  the caller decides the spelling and this must not rewrite it."""
+  import yaml
+
+  from feelmri.gui.model.pvsm import write_plan_yaml
+
+  path = tmp_path / 'plan.yaml'
+  write_plan_yaml(path, 'planning/beating_heart.pvsm')
+  assert yaml.safe_load(path.read_text())['Formatting']['planning'] == \
+         'planning/beating_heart.pvsm'
+
+
+def test_the_exported_pair_round_trips_through_the_real_parsers(tmp_path):
+  """Export both, then read the plan back the way an example does.
+
+  `ParameterHandler` for the parameters, `PVSMParser` for the geometry it
+  names -- the two halves the GUI writes have to agree with each other.
+  """
+  import numpy as np
+
+  from feelmri.Parameters import ParameterHandler, PVSMParser
+  from feelmri.gui.model.pvsm import write_plan_yaml, write_pvsm
+
+  fov = [0.30, 0.22, 0.008]
+  loc = [0.021, -0.034, 0.047]
+  rotation = [0.0, 0.0, 25.0]
+  write_pvsm(tmp_path / 'plan.pvsm', fov, loc, rotation)
+  write_plan_yaml(tmp_path / 'plan.yaml', 'plan.pvsm')
+
+  handler = ParameterHandler(str(tmp_path / 'plan.yaml'))
+  planning = PVSMParser(tmp_path / handler.Formatting.planning)
+
+  np.testing.assert_allclose(planning.FOV.m_as('m'), fov, atol=1e-9)
+  np.testing.assert_allclose(planning.LOC.m_as('m'), loc, atol=1e-9)

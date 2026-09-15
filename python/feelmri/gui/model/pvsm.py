@@ -35,6 +35,7 @@ and the reader have to agree; several shipped files are in centimetres.
 from __future__ import annotations
 
 import xml.etree.ElementTree as ET
+from pathlib import Path
 from typing import Optional, Sequence
 
 import numpy as np
@@ -220,3 +221,84 @@ def patch_pvsm(template,
 
   tree.write(str(path), encoding='utf-8', xml_declaration=False)
   return str(path)
+
+
+#: What an exported parameter file carries when the GUI has no opinion.
+#: Matched to `examples/parameters/trajectories.yaml`, so a file written here
+#: is the same shape the shipped examples already read.
+DEFAULT_IMAGING = {
+  'RES': [70, 25, 1],
+  'TimeSpacing': {'value': 40, 'unit': 'ms'},
+  'Oversampling': 2,
+  'Sequence': 'FFE',
+  'LinesPerShot': 1,
+  'FlipAngle': {'value': 15, 'unit': 'deg'},
+}
+
+DEFAULT_HARDWARE = {
+  'G_sr': {'value': 180.0, 'unit': 'mT/m/ms'},
+  'G_max': {'value': 33.0, 'unit': 'mT/m'},
+  'r_BW': {'value': 120.0e+3, 'unit': 'Hz'},
+}
+
+DEFAULT_PHANTOM = {
+  'T2star': {'value': 50, 'unit': 'ms'},
+  'T1': {'value': 800, 'unit': 'ms'},
+}
+
+
+def write_plan_yaml(path, planning, *, imaging=None, hardware=None,
+                    phantom=None, units: str = 'm') -> str:
+  """Write the parameter file that POINTS AT a `.pvsm`, for `ParameterHandler`.
+
+  The plan itself lives in the `.pvsm`; this is the file an example opens,
+  and `Formatting.planning` is the only field that has to be right. The other
+  three sections are the geometry-independent settings the GUI does not
+  collect, written with the shipped defaults and marked as such, so the file
+  is valid for `ParameterHandler` and obvious to edit.
+
+  **`planning` is written verbatim and is resolved against the SCRIPT
+  directory, not against this file.** Every shipped example does
+  `script_path / parameters.Formatting.planning`, so `"planning/x.pvsm"` works
+  from `examples/` and a path relative to the yaml would not. Passing a bare
+  filename is what the GUI does, having written the two side by side.
+  """
+  imaging = DEFAULT_IMAGING if imaging is None else imaging
+  hardware = DEFAULT_HARDWARE if hardware is None else hardware
+  phantom = DEFAULT_PHANTOM if phantom is None else phantom
+
+  def block(mapping, indent='  '):
+    lines = []
+    for key, value in mapping.items():
+      if isinstance(value, dict):
+        inner = ', '.join(f'{k}: {_scalar(v)}' for k, v in value.items())
+        lines.append(f'{indent}{key}: {{{inner}}}')
+      elif isinstance(value, (list, tuple)):
+        lines.append(f'{indent}{key}: [{", ".join(str(v) for v in value)}]')
+      else:
+        lines.append(f'{indent}{key}: {_scalar(value)}')
+    return '\n'.join(lines)
+
+  text = (
+    '# Imaging parameters. Written by the feelmri GUI, which plans the\n'
+    '# geometry only -- the three sections below are defaults to edit.\n'
+    'Imaging:\n' + block(imaging) + '\n\n'
+    '# Hardware parameters\n'
+    'Hardware:\n' + block(hardware) + '\n\n'
+    '# Imaging orientation. `planning` is resolved against the SCRIPT\n'
+    '# directory, the way every shipped example reads it.\n'
+    'Formatting:\n'
+    f'  planning: "{planning}"\n'
+    f'  units: "{units}"\n\n'
+    'Phantom:\n' + block(phantom) + '\n')
+
+  path = Path(path)
+  path.write_text(text)
+  return text
+
+
+def _scalar(value) -> str:
+  """A YAML scalar, quoting a string and leaving a number alone."""
+  if isinstance(value, str):
+    return f'"{value}"'
+  return str(value)

@@ -102,14 +102,28 @@ class Session:
 
   # -- the mesh -------------------------------------------------------------
 
-  def load_mesh(self, path) -> None:
+  def load_mesh(self, path, scale_factor: float = 1.0) -> None:
     """Read a mesh and drop every derived cache.
 
     No `FEMPhantom` is constructed. That keeps the viewer clear of the
     partitioning a phantom runs at construction, and of the
     `local_to_global_nodes` property whose mere read binds the partition.
+
+    `scale_factor` multiplies the coordinates, exactly as `FEMPhantom`'s own
+    argument does, and for the same reason: **the shipped phantoms are not in
+    one unit** -- metres, centimetres and millimetres across five files. The
+    plan is in metres, so without it the field of view is drawn a hundred or a
+    thousand times too small and the submesh comes out empty.
+    `mesh.suggest_scale_factor` proposes one; it is never applied silently.
     """
     points, cells, n_frames, reader = load_mesh(path)
+    scale_factor = float(scale_factor)
+    if not np.isfinite(scale_factor) or scale_factor <= 0:
+      raise ValueError(
+        f'Session.load_mesh: scale_factor must be positive, got {scale_factor}')
+    if scale_factor != 1.0:
+      points = points * scale_factor
+    self.scale_factor = scale_factor
     self.mesh_path = str(path)
     self.points, self.cells, self.n_frames, self._reader = (
       points, cells, n_frames, reader)

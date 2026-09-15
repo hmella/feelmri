@@ -11,6 +11,8 @@ implementations agreeing is worth more than either alone.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -272,3 +274,92 @@ def test_the_model_layer_imports_with_no_display_and_no_vtk():
                         text=True, timeout=120)
   assert 'OK' in proc.stdout, (
     f'the model layer pulled in a blocked view dependency:\n{proc.stderr[-2000:]}')
+
+
+# -- the unit the file is in, which is not the unit the plan is in ----------
+
+PHANTOMS = Path('examples/phantoms')
+
+#: The `scale_factor` each shipped example passes to `FEMPhantom` for this
+#: file. This is the ground truth: the suggestion is only worth anything if it
+#: reproduces what the library is already told by hand.
+EXAMPLE_SCALES = {
+  'water_fat_P1_prism': 0.01,     # examples/water_and_fat.py
+  'abdomen_P1_tetra': 0.001,      # examples/water_and_fat_abdomen.py
+  'aorta_P1_tetra': 0.01,         # examples/phase_contrast.py, 4dflow.py
+  'heart_P2_tetra': 1.0,          # examples/spamm.py
+  'heart_P1_hex': 1.0,            # examples/free_running.py
+}
+
+
+@pytest.mark.parametrize('name,expected', sorted(EXAMPLE_SCALES.items()))
+def test_the_suggested_scale_matches_what_the_examples_pass(name, expected):
+  """Five shipped phantoms, THREE different units, and the viewer must agree
+  with the library about which is which.
+
+  Without this the plan is in metres while the mesh is not, so the field of
+  view is drawn a hundred or a thousand times too small and the submesh reads
+  zero elements -- which is exactly what it did.
+  """
+  from feelmri.gui.model.mesh import suggest_scale_factor
+  path = PHANTOMS / f'{name}.xdmf'
+  if not path.exists():
+    pytest.skip(f'{name} not present')
+  points = load_mesh(path)[0]
+  factor, why = suggest_scale_factor(points)
+  assert factor == expected, f'{name}: {why}'
+
+
+def test_a_mesh_matching_no_usual_unit_says_so_instead_of_guessing():
+  """A viewer that guesses units publishes a plausible wrong answer.
+
+  An extent of 5000 is 5000 m, 50 m or 5 m depending on the unit read, and
+  none of those is a field of view, so the honest reply is the identity plus
+  a reason rather than the nearest match. (40 would NOT do: 40 cm is 0.4 m
+  and perfectly plausible, which is how a first version of this test failed.)
+  """
+  from feelmri.gui.model.mesh import suggest_scale_factor
+  points = np.array([[0.0, 0.0, 0.0], [5000.0, 5000.0, 5000.0]])
+  factor, why = suggest_scale_factor(points)
+  assert factor == 1.0
+  assert 'by hand' in why
+
+
+def test_a_degenerate_mesh_does_not_divide_by_its_own_extent():
+  from feelmri.gui.model.mesh import suggest_scale_factor
+  points = np.zeros((4, 3))
+  assert suggest_scale_factor(points)[0] == 1.0
+
+
+def test_loading_at_a_scale_puts_the_mesh_where_the_plan_is():
+  """The end the user sees: a slab that keeps elements rather than none."""
+  from feelmri.gui.model.planning import FOVBox
+  from feelmri.gui.model.session import Session
+
+  path = PHANTOMS / 'water_fat_P1_prism.xdmf'
+  if not path.exists():
+    pytest.skip('water_fat_P1_prism not present')
+
+  plan = FOVBox(fov=np.array([0.3, 0.22, 0.008]), loc=np.zeros(3),
+                angles=np.zeros(3))
+
+  unscaled = Session()
+  unscaled.load_mesh(path)
+  unscaled.box = plan
+  assert unscaled.submesh_markers().sum() == 0, (
+    'the unscaled control must keep nothing, or this proves nothing')
+
+  scaled = Session()
+  scaled.load_mesh(path, scale_factor=0.01)
+  scaled.box = plan
+  assert scaled.submesh_markers().sum() > 0
+
+
+@pytest.mark.parametrize('bad', [0.0, -1.0, float('nan')])
+def test_a_nonsense_scale_is_refused(bad):
+  from feelmri.gui.model.session import Session
+  path = PHANTOMS / 'water_fat_P1_prism.xdmf'
+  if not path.exists():
+    pytest.skip('water_fat_P1_prism not present')
+  with pytest.raises(ValueError, match='scale_factor'):
+    Session().load_mesh(path, scale_factor=bad)
