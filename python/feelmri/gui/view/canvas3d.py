@@ -208,10 +208,14 @@ class Canvas3D:
       self._plotter.window_size = (width, height)
 
     self._plotter.camera_position = self._camera.as_vtk()
-    # No explicit render(): PyVista's screenshot() renders internally, and
-    # calling both draws the scene twice. Profiled per stage at 800x600, the
-    # render is 9.5 ms against 391 ms of pixel readback, so the duplicate is
-    # cheap in isolation and still pure waste.
+    # The explicit render() is REQUIRED. `screenshot()` returns the LAST
+    # RENDERED frame; it does not render on its own. Measured directly: move
+    # the camera and screenshot without rendering and the image is unchanged
+    # (mean abs difference 0.000), with a render it moves (4.660). Removing
+    # this line as a "duplicate render" leaves a viewport whose camera
+    # responds and whose picture never updates, which looks like a fast
+    # viewer until frames are compared.
+    self._plotter.render()
     rgb = self._plotter.screenshot(return_img=True)
 
     self._photo = tk.PhotoImage(data=to_photoimage_data(rgb))
