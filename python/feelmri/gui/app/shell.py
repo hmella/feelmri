@@ -30,22 +30,29 @@ class Shell:
     self.root.title('feelmri')
     self.root.geometry('1180x760')
 
+    # Before any widget is built: a ttk Style set afterwards still reaches
+    # them, but plain Tk widgets read their options at construction.
+    from ..view.theme import apply as apply_theme
+    self.palette = apply_theme(self.root)
+
     self._status = tk.StringVar(value='ready')
 
     # The status bar is packed BEFORE the body: Tk allocates in pack order, so
     # an expanding body packed first takes the whole window and squeezes the
     # bar off the bottom entirely.
     ttk.Label(self.root, textvariable=self._status, anchor='w',
-              relief='sunken', padding=(6, 2)).pack(fill='x', side='bottom')
+              style='Status.TLabel').pack(fill='x', side='bottom')
 
     body = ttk.Frame(self.root)
     body.pack(fill='both', expand=True)
 
-    self._tabs = ttk.Notebook(body, width=320)
+    self._tabs = ttk.Notebook(body, width=340)
     self._tabs.pack(side='left', fill='y')
     self._tabs.pack_propagate(False)
-    self.controls = ttk.Frame(self._tabs, padding=10)
-    self._tabs.add(self.controls, text='Plan')
+    # Each tab scrolls: the control columns are taller than the window at any
+    # sensible size, and without this the last few widgets are simply
+    # unreachable rather than merely off screen.
+    self.controls = self._scrollable('Plan')
 
     # One window, and the right-hand side shows the view that belongs to the
     # selected tab: the 3D scene while planning, the sequence while labelling,
@@ -57,19 +64,19 @@ class Shell:
     self.viewport = self._make_viewport(self._deck)
     self.sequence_panel = self._make_sequence_panel(self._deck)
 
-    self.label_panel = self._make_label_panel(self._tabs)
+    self.label_panel = self._make_label_panel(self._scrollable('Sequence'))
     if self.label_panel is not None:
-      self._tabs.add(self.label_panel.widget, text='Sequence')
+      self.label_panel.widget.pack(fill='both', expand=True)
 
-    self.run_panel = self._make_run_panel(self._tabs)
+    self.run_panel = self._make_run_panel(self._scrollable('Run'))
     if self.run_panel is not None:
-      self._tabs.add(self.run_panel.widget, text='Run')
+      self.run_panel.widget.pack(fill='both', expand=True)
 
-    self.results_panel = self._make_results_panel(self._tabs)
+    # The CONTROLS are the tab; the figure is a deck view with its own parent,
+    # so swapping the right-hand side cannot unpack the tab.
+    self.results_panel = self._make_results_panel(self._scrollable('Results'))
     if self.results_panel is not None:
-      # The CONTROLS are the tab; the figure is a deck view with its own
-      # parent, so swapping the right-hand side cannot unpack the tab.
-      self._tabs.add(self.results_panel.controls, text='Results')
+      self.results_panel.controls.pack(fill='both', expand=True)
 
     # Which view each tab shows on the right. Run keeps the sequence up: it is
     # what a run is about to play, and the log lives in the tab itself.
@@ -90,6 +97,14 @@ class Shell:
     self.root.protocol('WM_DELETE_WINDOW', self.close)
 
   # -- construction ---------------------------------------------------------
+
+  def _scrollable(self, title: str):
+    """Add a scrolling tab and return the frame to build into."""
+    from ..view.scroll import ScrollableFrame
+
+    scroller = ScrollableFrame(self._tabs)
+    self._tabs.add(scroller.outer, text=title)
+    return scroller.inner
 
   def _make_viewport(self, parent):
     """Pick a 3D backend, via `FEELMRI_GUI_VIEWPORT`.
@@ -228,9 +243,11 @@ class Shell:
   def _build_menu(self) -> None:
     import tkinter as tk
 
-    bar = tk.Menu(self.root)
+    from ..view.theme import MENU_OPTIONS
 
-    file_menu = tk.Menu(bar, tearoff=0)
+    bar = tk.Menu(self.root, **MENU_OPTIONS)
+
+    file_menu = tk.Menu(bar, tearoff=0, **MENU_OPTIONS)
     file_menu.add_command(label='Open phantom...', command=self.open_phantom)
     file_menu.add_command(label='Open sequence (.seq)...',
                           command=self.open_sequence)
@@ -241,7 +258,7 @@ class Shell:
     file_menu.add_command(label='Quit', command=self.close)
     bar.add_cascade(label='File', menu=file_menu)
 
-    view_menu = tk.Menu(bar, tearoff=0)
+    view_menu = tk.Menu(bar, tearoff=0, **MENU_OPTIONS)
     for name in ('axial', 'coronal', 'sagittal'):
       view_menu.add_command(label=name.capitalize(),
                             command=lambda n=name: self.viewport.look(n))

@@ -29,6 +29,7 @@ import numpy as np
 
 from ..model.camera import STANDARD_VIEWS, Camera
 from ..model.planning import FOVBox, mps_to_euler
+from .theme import PALETTE
 
 #: Tk timer interval for pumping VTK, in ms. 16 is about 60 Hz.
 PUMP_MS = 16
@@ -66,7 +67,7 @@ class Window3D:
     self.widget = ttk.Frame(parent)
     self._host = None
     if embed:
-      self._host = tk.Frame(self.widget, bg='#1a1a1a',
+      self._host = tk.Frame(self.widget, bg=PALETTE['window'],
                             width=640, height=480)
       self._host.pack(fill='both', expand=True)
       self._host.bind('<Configure>', self._on_host_resize)
@@ -112,7 +113,7 @@ class Window3D:
               max(self._host.winfo_height(), 32))
     self._plotter = self._pv.Plotter(window_size=size,
                                      title='feelmri  3D view')
-    self._plotter.set_background('#1a1a1a')
+    self._plotter.set_background(PALETTE['window'])
     self._plotter.add_axes()
 
     if self._host is not None:

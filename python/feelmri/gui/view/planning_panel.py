@@ -55,7 +55,7 @@ class PlanningPanel:
     ttk.Button(row, text='Rescale', width=8,
                command=self.rescale).pack(side='left', padx=(6, 0))
     self._scale_note = ttk.Label(self.widget, text='', wraplength=270,
-                                 foreground='#555')
+                                 style='Muted.TLabel')
     self._scale_note.pack(anchor='w', pady=(2, 8))
 
     self.vars = {}

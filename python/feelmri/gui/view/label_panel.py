@@ -21,6 +21,8 @@ from __future__ import annotations
 
 from typing import Callable, List, Optional
 
+from .theme import TEXT_OPTIONS
+
 
 def supported_labels() -> List[str]:
   """Pulseq's own label names, or an empty list when pypulseq is absent.
@@ -108,8 +110,7 @@ class LabelPanel:
     ttk.Label(self.widget, text='Labels in use',
               font=('TkDefaultFont', 10, 'bold')).pack(anchor='w')
     self._summary = tk.Text(self.widget, height=7, width=34,
-                            font=('TkFixedFont', 9), relief='flat',
-                            background=self.widget.winfo_toplevel().cget('bg'))
+                            font=('TkFixedFont', 9), **TEXT_OPTIONS)
     self._summary.pack(fill='x', pady=(2, 0))
     self._summary.configure(state='disabled')
 

@@ -19,6 +19,7 @@ from typing import Callable, List, Optional
 import numpy as np
 
 from ..model import results as results_model
+from .theme import PALETTE, TEXT_OPTIONS, style_figure
 
 #: The four panes, in the order they are laid out.
 PANES = ('magnitude', 'phase', 'trajectory', 'k-space')
@@ -31,6 +32,7 @@ def make_axes(figure) -> List:
   for ax, name in zip(flat, PANES):
     ax.set_title(name, fontsize=9)
     ax.tick_params(labelsize=7)
+  style_figure(figure, flat)
   return flat
 
 
@@ -70,7 +72,7 @@ def draw_trajectory(ax, result) -> None:
   if kx.size == 0:
     ax.set_axis_off()
     return
-  ax.scatter(kx, ky, s=0.5, linewidths=0, color='tab:blue')
+  ax.scatter(kx, ky, s=0.5, linewidths=0, color=PALETTE['trace'])
   ax.set_xlabel('kx [1/m]', fontsize=8)
   ax.set_ylabel('ky [1/m]', fontsize=8)
   ax.set_aspect('equal', adjustable='datalim')
@@ -91,7 +93,7 @@ def draw_kspace(ax, result) -> None:
     ax.set_axis_off()
     return
   ax.semilogy(np.arange(magnitude.size), np.maximum(magnitude, 1e-30),
-              linewidth=0.6, color='tab:green')
+              linewidth=0.6, color=PALETTE['adc'])
   ax.set_xlabel('sample', fontsize=8)
   ax.set_ylabel('|k|', fontsize=8)
 
@@ -156,8 +158,7 @@ class ResultsPanel:
     self._caption.pack(anchor='w', pady=(6, 0))
 
     self._details = tk.Text(self.controls, height=9, width=36,
-                            font=('TkFixedFont', 8), relief='flat',
-                            background=self.controls.winfo_toplevel().cget('bg'))
+                            font=('TkFixedFont', 8), **TEXT_OPTIONS)
     self._details.pack(fill='x', pady=(6, 0))
     self._details.configure(state='disabled')
 

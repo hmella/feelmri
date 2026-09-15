@@ -21,6 +21,7 @@ import queue
 import threading
 from typing import Callable, Optional
 
+from .theme import TEXT_OPTIONS
 from ..model.runner import (RunConfig, cancel, command_line, default_output_dir,
                             launch, parse_progress, render_script,
                             stream_lines, write_script)
@@ -127,7 +128,7 @@ class RunPanel:
       variable = tk.StringVar(value=default)
       ttk.Entry(self.widget, textvariable=variable).pack(fill='x')
       self.order_vars[key] = variable
-    ttk.Label(self.widget, wraplength=280, foreground='#555', text=(
+    ttk.Label(self.widget, wraplength=280, style='Muted.TLabel', text=(
       'An element uses the large-element order only if its size reaches the '
       'voxel size above. The run log prints the split; if it reads 0 of N, '
       'that order is doing nothing.')).pack(anchor='w', pady=(4, 0))
@@ -178,7 +179,7 @@ class RunPanel:
     self._progress = ttk.Label(self.widget, text='idle', wraplength=280)
     self._progress.pack(anchor='w')
     self._log = tk.Text(self.widget, height=14, width=40,
-                        font=('TkFixedFont', 8), wrap='none')
+                        font=('TkFixedFont', 8), wrap='none', **TEXT_OPTIONS)
     self._log.pack(fill='both', expand=True, pady=(4, 0))
     self._log.configure(state='disabled')
 

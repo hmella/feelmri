@@ -31,6 +31,7 @@ from typing import Callable, List, Optional
 import numpy as np
 
 from ..model.sequence import AXIS_LABELS, SequenceModel
+from .theme import PALETTE, TEXT_OPTIONS, style_figure
 
 #: Rows, top to bottom, with their relative heights. The three gradient rows
 #: take their names from the model's own `AXIS_LABELS`, so the row a trace is
@@ -60,10 +61,12 @@ def make_axes(figure) -> List:
   for ax, (name, _) in zip(axes, ROWS):
     ax.set_ylabel(units.get(name, f'G{name}\n[mT/m]'), fontsize=8)
     ax.tick_params(labelsize=7)
-    ax.grid(True, alpha=0.25, linewidth=0.5)
+    ax.grid(True, alpha=0.18, linewidth=0.5, color=PALETTE['border'])
   axes[-1].set_xlabel('time [ms]', fontsize=8)
   axes[-1].set_yticks([])
-  return list(axes)
+  axes = list(axes)
+  style_figure(figure, axes)
+  return axes
 
 
 def draw_rf(ax, model: SequenceModel) -> None:
@@ -78,9 +81,9 @@ def draw_rf(ax, model: SequenceModel) -> None:
       continue
     w = np.asarray(w)
     magnitude = np.abs(w) * 1e3                   # mT to uT
-    ax.plot(t, np.real(w) * 1e3, linewidth=1.0, color='tab:red')
-    ax.plot(t, magnitude, linewidth=0.7, color='tab:red', alpha=0.35)
-    ax.plot(t, -magnitude, linewidth=0.7, color='tab:red', alpha=0.35)
+    ax.plot(t, np.real(w) * 1e3, linewidth=1.0, color=PALETTE['rf'])
+    ax.plot(t, magnitude, linewidth=0.7, color=PALETTE['rf'], alpha=0.35)
+    ax.plot(t, -magnitude, linewidth=0.7, color=PALETTE['rf'], alpha=0.35)
 
 
 def draw_gradients(ax, model: SequenceModel, axis: int) -> None:
@@ -91,13 +94,13 @@ def draw_gradients(ax, model: SequenceModel, axis: int) -> None:
   """
   for t, a in model.gradient_traces(axis):
     if np.size(t):
-      ax.plot(t, a, linewidth=1.0, color='tab:blue')
+      ax.plot(t, a, linewidth=1.0, color=PALETTE['trace'])
 
 
 def draw_adc(ax, model: SequenceModel) -> None:
   times = model.adc_times()
   if times.size:
-    ax.vlines(times, 0.0, 1.0, linewidth=0.5, color='tab:green')
+    ax.vlines(times, 0.0, 1.0, linewidth=0.5, color=PALETTE['adc'])
   ax.set_ylim(0.0, 1.0)
 
 
@@ -113,7 +116,7 @@ def draw_boundaries(axes, model: SequenceModel) -> int:
     return 0
   for ax in axes:
     ax.vlines(edges, 0, 1, transform=ax.get_xaxis_transform(),
-              linewidth=0.4, color='0.75', zorder=0)
+              linewidth=0.4, color=PALETTE['border'], zorder=0)
   return int(edges.size)
 
 
@@ -224,7 +227,7 @@ class SequencePanel:
       font=('TkDefaultFont', 9, 'bold'))
     self._details_title.pack(anchor='w')
     text = tk.Text(frame, height=6, width=60, font=('TkFixedFont', 9),
-                   relief='flat', background=frame.winfo_toplevel().cget('bg'))
+                   **TEXT_OPTIONS)
     text.pack(fill='x')
     text.configure(state='disabled')
     return text
@@ -320,14 +323,15 @@ class SequencePanel:
     for patch in self._highlight:
       patch.remove()
     self._highlight = [
-      ax.axvspan(span.t0, span.t1, color='tab:orange', alpha=0.18, zorder=0)
+      ax.axvspan(span.t0, span.t1, color=PALETTE['highlight'], alpha=0.22, zorder=0)
       for ax in self._axes]
     if obj is not None:
       row = {'rf': 0, 'adc': len(ROWS) - 1}.get(
         obj.kind, 1 + (obj.axis or 0))
       self._highlight.append(
-        self._axes[row].axvspan(obj.t0, obj.t1, color='tab:orange',
-                                alpha=0.45, zorder=0))
+        self._axes[row].axvspan(obj.t0, obj.t1,
+                                color=PALETTE['highlight'],
+                                alpha=0.5, zorder=0))
 
     self._refresh_details()
     self._canvas.draw_idle()
