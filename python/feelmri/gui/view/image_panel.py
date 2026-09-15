@@ -108,7 +108,19 @@ class ResultsPanel:
   """Show the session's result, and reconstruct it on demand."""
 
   def __init__(self, parent, session,
-               on_status: Optional[Callable[[str], None]] = None):
+               on_status: Optional[Callable[[str], None]] = None,
+               view_parent=None):
+    """Controls go in `parent`, the figure in `view_parent`.
+
+    **They must be separate widgets with separate parents.** The controls live
+    in a notebook tab and the figure on the shell's right-hand side, and a Tk
+    widget has exactly one parent -- calling `pack_forget` on tab content to
+    swap the right-hand view removes the whole tab from the notebook, which is
+    what happened when this was one widget.
+
+    `view_parent=None` puts both in `parent`, which is what a standalone
+    caller wants.
+    """
     import tkinter as tk
     from tkinter import ttk
 
@@ -123,13 +135,14 @@ class ResultsPanel:
     self.on_status = on_status or (lambda _: None)
     self.image = None
 
-    self.widget = ttk.Frame(parent, padding=10)
+    self.controls = ttk.Frame(parent, padding=10)
+    self.widget = ttk.Frame(view_parent if view_parent is not None else parent)
 
-    ttk.Label(self.widget, text='Image matrix').pack(anchor='w')
+    ttk.Label(self.controls, text='Image matrix').pack(anchor='w')
     self.matrix = tk.StringVar(value='')
-    ttk.Entry(self.widget, textvariable=self.matrix).pack(fill='x')
+    ttk.Entry(self.controls, textvariable=self.matrix).pack(fill='x')
     # Two rows: side by side these are clipped at this column width.
-    buttons = ttk.Frame(self.widget)
+    buttons = ttk.Frame(self.controls)
     buttons.pack(fill='x', pady=(6, 0))
     ttk.Button(buttons, text='Reconstruct',
                command=self.reconstruct).pack(side='left', expand=True,
@@ -138,20 +151,20 @@ class ResultsPanel:
                command=self.open_result).pack(side='left', expand=True,
                                               fill='x', padx=(6, 0))
 
-    self._caption = ttk.Label(self.widget, text='no result yet',
+    self._caption = ttk.Label(self.controls, text='no result yet',
                               wraplength=280)
     self._caption.pack(anchor='w', pady=(6, 0))
+
+    self._details = tk.Text(self.controls, height=9, width=36,
+                            font=('TkFixedFont', 8), relief='flat',
+                            background=self.controls.winfo_toplevel().cget('bg'))
+    self._details.pack(fill='x', pady=(6, 0))
+    self._details.configure(state='disabled')
 
     self._figure = Figure(figsize=(5.0, 4.4), dpi=100, layout='constrained')
     self._axes = make_axes(self._figure)
     self._canvas = FigureCanvasTkAgg(self._figure, master=self.widget)
-
-    self._details = tk.Text(self.widget, height=9, width=36,
-                            font=('TkFixedFont', 8), relief='flat',
-                            background=self.widget.winfo_toplevel().cget('bg'))
-    self._details.pack(side='bottom', fill='x', pady=(4, 0))
-    self._details.configure(state='disabled')
-    self._canvas.get_tk_widget().pack(side='top', fill='both', expand=True)
+    self._canvas.get_tk_widget().pack(fill='both', expand=True)
 
     session.result_changed.connect(lambda *_: self.refresh())
     self.refresh()

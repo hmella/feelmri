@@ -47,22 +47,19 @@ class Shell:
     self.controls = ttk.Frame(self._tabs, padding=10)
     self._tabs.add(self.controls, text='Plan')
 
-    # A draggable split rather than a fixed layout: with the native 3D window
-    # the top panel is only a note and the sequence wants the room, while the
-    # blit backend needs the opposite. The user decides.
-    self._split = ttk.PanedWindow(body, orient='vertical')
-    self._split.pack(side='right', fill='both', expand=True)
+    # One window, and the right-hand side shows the view that belongs to the
+    # selected tab: the 3D scene while planning, the sequence while labelling,
+    # the images once there is a result. Everything is built once and only the
+    # visible one is packed, so switching costs nothing and no state is lost.
+    self._deck = ttk.Frame(body)
+    self._deck.pack(side='right', fill='both', expand=True)
 
-    self.viewport = self._make_viewport(self._split)
-    self._split.add(self.viewport.widget, weight=0)
-
-    self.sequence_panel = self._make_sequence_panel(self._split)
-    if self.sequence_panel is not None:
-      self._split.add(self.sequence_panel.widget, weight=1)
+    self.viewport = self._make_viewport(self._deck)
+    self.sequence_panel = self._make_sequence_panel(self._deck)
 
     self.label_panel = self._make_label_panel(self._tabs)
     if self.label_panel is not None:
-      self._tabs.add(self.label_panel.widget, text='Labels')
+      self._tabs.add(self.label_panel.widget, text='Sequence')
 
     self.run_panel = self._make_run_panel(self._tabs)
     if self.run_panel is not None:
@@ -70,7 +67,21 @@ class Shell:
 
     self.results_panel = self._make_results_panel(self._tabs)
     if self.results_panel is not None:
-      self._tabs.add(self.results_panel.widget, text='Results')
+      # The CONTROLS are the tab; the figure is a deck view with its own
+      # parent, so swapping the right-hand side cannot unpack the tab.
+      self._tabs.add(self.results_panel.controls, text='Results')
+
+    # Which view each tab shows on the right. Run keeps the sequence up: it is
+    # what a run is about to play, and the log lives in the tab itself.
+    self._views = {
+      'Plan': self.viewport,
+      'Sequence': self.sequence_panel,
+      'Run': self.sequence_panel,
+      'Results': self.results_panel,
+    }
+    self._shown = None
+    self._tabs.bind('<<NotebookTabChanged>>', lambda _e: self._show_view())
+    self._show_view()
 
     # After the viewport: the View menu binds straight to its methods.
     self._build_menu()
@@ -81,34 +92,70 @@ class Shell:
   # -- construction ---------------------------------------------------------
 
   def _make_viewport(self, parent):
-    """Pick a 3D backend: native window, blit, or the no-VTK panel.
+    """Pick a 3D backend, via `FEELMRI_GUI_VIEWPORT`.
 
-    The native window is the default because the 3D widgets, and therefore the
-    draggable field of view, need a real `vtkRenderWindowInteractor`. Set
-    `FEELMRI_GUI_VIEWPORT=blit` to get the offscreen canvas embedded in this
-    window instead; it is about four times slower and has no box widget, but
-    it keeps everything in one window.
+    | value | what it does |
+    |---|---|
+    | `embedded` (default) | native VTK reparented INTO this window |
+    | `window` | native VTK as its own top-level window |
+    | `blit` | offscreen render blitted into a Tk canvas |
+
+    Embedding is the default because it is the only one that gives both: a
+    single window AND a real `vtkRenderWindowInteractor`, which is what
+    `add_box_widget` -- the draggable field of view -- needs. The blit has no
+    interactor at all, so the box would have to be typed rather than dragged.
+
+    Reparenting is X11-specific. `Window3D` falls back to its own top-level
+    window if it fails, so `window` is the explicit form of that rather than a
+    different code path.
     """
     import os
 
     from ..view.fallback3d import Fallback3D
 
-    choice = os.environ.get('FEELMRI_GUI_VIEWPORT', 'window').lower()
-    if choice not in ('window', 'blit'):
+    choice = os.environ.get('FEELMRI_GUI_VIEWPORT', 'embedded').lower()
+    if choice not in ('embedded', 'window', 'blit'):
       raise ValueError(
-        f'FEELMRI_GUI_VIEWPORT must be "window" or "blit", got {choice!r}')
+        f'FEELMRI_GUI_VIEWPORT must be "embedded", "window" or "blit", '
+        f'got {choice!r}')
     try:
       if choice == 'blit':
         from ..view.canvas3d import Canvas3D
         return Canvas3D(parent, self.session, on_status=self.status)
       from ..view.window3d import Window3D
-      viewport = Window3D(parent, self.session, on_status=self.status)
+      viewport = Window3D(parent, self.session, on_status=self.status,
+                          embed=choice == 'embedded')
       self._start_pump(viewport)
       return viewport
     except Exception as exc:
       self.status('3D view unavailable, see the panel')
       return Fallback3D(parent, self.session, reason=str(exc),
                         on_status=self.status)
+
+  def _show_view(self) -> None:
+    """Pack the view belonging to the selected tab, and unpack the last one.
+
+    Unpacking rather than rebuilding: the 3D scene, the sequence figure and a
+    reconstructed image are all expensive, and a tab switch must not throw
+    them away. An embedded render window simply unmaps with its host frame and
+    comes back when it is packed again.
+    """
+    try:
+      name = self._tabs.tab(self._tabs.select(), 'text')
+    except Exception:
+      return                          # no tab yet, during construction
+    view = self._views.get(name)
+    if view is self._shown:
+      return
+    if self._shown is not None:
+      try:
+        self._shown.widget.pack_forget()
+      except Exception:
+        pass
+    self._shown = view
+    if view is not None:
+      view.widget.pack(fill='both', expand=True)
+      self.root.update_idletasks()
 
   def _make_label_panel(self, parent):
     """The labels tab, or nothing if it cannot be built."""
@@ -132,7 +179,8 @@ class Shell:
     """The results tab, or nothing if it cannot be built."""
     try:
       from ..view.image_panel import ResultsPanel
-      return ResultsPanel(parent, self.session, on_status=self.status)
+      return ResultsPanel(parent, self.session, on_status=self.status,
+                          view_parent=self._deck)
     except Exception as exc:
       self.status(f'results panel unavailable: {exc}')
       return None

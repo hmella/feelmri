@@ -37,7 +37,9 @@ PUMP_MS = 16
 class Window3D:
   """A native PyVista window showing the session's mesh and plan."""
 
-  def __init__(self, parent, session, on_status: Optional[Callable[[str], None]] = None):
+  def __init__(self, parent, session,
+               on_status: Optional[Callable[[str], None]] = None,
+               embed: bool = True):
     import tkinter as tk
     from tkinter import ttk
 
@@ -58,21 +60,40 @@ class Window3D:
     self._user_closed = False       # set by the ExitEvent observer
     self._suppress = False          # guard against a feedback loop
 
-    # The shell still needs something to pack, so the panel is a placeholder
-    # that reports state and can bring the window back.
-    self.widget = ttk.Frame(parent, padding=16)
-    ttk.Label(self.widget, text='3D view',
-              font=('TkDefaultFont', 11, 'bold')).pack(anchor='w')
-    self._note = ttk.Label(self.widget, wraplength=420, justify='left', text=(
-      'The 3D view is a separate window. Drag the yellow box to place the '
-      'field of view; the plan and the element count follow it.'))
-    self._note.pack(anchor='w', pady=(6, 12))
-    ttk.Button(self.widget, text='Reopen 3D window',
-               command=self.reopen).pack(anchor='w')
+    # Embedded, the widget IS the 3D view: a black host frame whose X window
+    # the render window is reparented into. As a separate top-level window it
+    # is a placeholder that reports state and can bring the window back.
+    self.widget = ttk.Frame(parent)
+    self._host = None
+    if embed:
+      self._host = tk.Frame(self.widget, bg='#1a1a1a',
+                            width=640, height=480)
+      self._host.pack(fill='both', expand=True)
+      self._host.bind('<Configure>', self._on_host_resize)
+      self._note = ttk.Label(self.widget, text='')
+    else:
+      inner = ttk.Frame(self.widget, padding=16)
+      inner.pack(fill='both', expand=True)
+      ttk.Label(inner, text='3D view',
+                font=('TkDefaultFont', 11, 'bold')).pack(anchor='w')
+      self._note = ttk.Label(inner, wraplength=420, justify='left', text=(
+        'The 3D view is a separate window. Drag the yellow box to place the '
+        'field of view; the plan and the element count follow it.'))
+      self._note.pack(anchor='w', pady=(6, 12))
+      ttk.Button(inner, text='Reopen 3D window',
+                 command=self.reopen).pack(anchor='w')
 
     self._pv = pv
     self._plotter = None
-    self._open()
+    if self._host is None:
+      self._open()
+    else:
+      # **Wait for the frame to be mapped.** A Tk widget has no X window until
+      # it is, and handing VTK the id of one that does not exist yet kills the
+      # process outright: `BadWindow` on `X_CreateWindow`, not an exception.
+      # The shell packs a view only when its tab is selected, so this can be
+      # a long wait, and opening early is not an option.
+      self._host.bind('<Map>', self._open_when_mapped)
 
     session.mesh_changed.connect(lambda *_: self.rebuild())
     session.plan_changed.connect(lambda *_: self.refresh_overlay())
@@ -81,10 +102,29 @@ class Window3D:
   # -- window lifetime ------------------------------------------------------
 
   def _open(self) -> None:
-    self._plotter = self._pv.Plotter(window_size=(900, 750),
+    size = (900, 750)
+    if self._host is not None:
+      # The host must have a real X window before its id can be handed to
+      # VTK, and a freshly packed frame does not until Tk has processed the
+      # geometry.
+      self._host.update_idletasks()
+      size = (max(self._host.winfo_width(), 32),
+              max(self._host.winfo_height(), 32))
+    self._plotter = self._pv.Plotter(window_size=size,
                                      title='feelmri  3D view')
     self._plotter.set_background('#1a1a1a')
     self._plotter.add_axes()
+
+    if self._host is not None:
+      try:
+        self._reparent()
+      except Exception as exc:
+        # Not X11, or a VTK build that will not take a parent id. A separate
+        # top-level window is the documented alternative, not a failure.
+        self._host = None
+        self.on_status(f'3D view could not be embedded ({exc}); '
+                       f'opening its own window')
+
     # Returns immediately. Without interactive_update this blocks and the Tk
     # shell stops responding.
     self._plotter.show(interactive_update=True, auto_close=False)
@@ -98,6 +138,47 @@ class Window3D:
     except Exception:
       pass                      # polling alone still covers it
     self.alive = True
+
+  def _open_when_mapped(self, _event=None) -> None:
+    """Open once, the first time the host frame actually has a window."""
+    if self._plotter is not None or self._host is None:
+      return
+    if not self._host.winfo_ismapped():
+      return
+    self._open()
+    self.rebuild()
+
+  def _reparent(self) -> None:
+    """Make the render window a CHILD of the Tk frame, before it is shown.
+
+    **This is what keeps the 3D view in one window without losing anything.**
+    PyVista has no tkinter embedding, so the alternative was either a separate
+    top-level window or the blitting canvas -- and the blit has no
+    `vtkRenderWindowInteractor`, hence no `add_box_widget`, which is the
+    draggable field of view. Reparenting keeps the real interactor and puts it
+    inside the shell.
+
+    `SetParentId` takes a void pointer, and the Python binding spells one the
+    way `GetGenericWindowId` hands it back: `_<16 hex digits>_p_void`. Passing
+    the integer raises "object does not have a readable buffer".
+
+    X11 only. It is attempted and, if it fails, the window opens on its own as
+    before -- which is why every caller still treats it as a separate window
+    that can go away.
+    """
+    window = self._plotter.render_window
+    window.SetParentId(f'_{self._host.winfo_id():016x}_p_void')
+    window.SetPosition(0, 0)
+
+  def _on_host_resize(self, event) -> None:
+    """Follow the Tk frame. VTK does not learn its parent's new size."""
+    if not self.alive or self._plotter is None:
+      return
+    try:
+      self._plotter.render_window.SetSize(max(event.width, 32),
+                                          max(event.height, 32))
+    except Exception:
+      pass                      # the window went away between the two
 
   def reopen(self) -> None:
     if self.alive and self._is_open():
@@ -206,6 +287,11 @@ class Window3D:
   def pump(self) -> None:
     """Service VTK from the Tk timer. Never raises; a closed window is normal."""
     if not self.alive:
+      # Embedded, the open is deferred until the host frame is mapped, and a
+      # `<Map>` that arrived before the binding existed would otherwise never
+      # be noticed. Cheap to re-check, and it only fires once.
+      if self._plotter is None and self._host is not None:
+        self._open_when_mapped()
       return
     if not self._is_open():
       self._went_away()
