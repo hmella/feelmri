@@ -32,6 +32,7 @@ from typing import Callable, Optional
 import numpy as np
 
 from ..model.camera import STANDARD_VIEWS, Camera
+from .theme import COLOUR_MAP, PALETTE
 
 
 def _png_chunk(tag: bytes, payload: bytes) -> bytes:
@@ -146,11 +147,17 @@ class Canvas3D:
     self._actor = self._plotter.add_mesh(
       surface, scalars='field' if resolved is not None else None,
       preference='cell' if resolved and resolved[1] == 'cell' else 'point',
-      cmap='viridis', show_scalar_bar=resolved is not None,
+      cmap=COLOUR_MAP, show_scalar_bar=resolved is not None,
       # The bar carries the CHOSEN label, so a component and a magnitude of
       # the same field are told apart on the picture rather than only in the
       # combobox the user has since looked away from.
-      scalar_bar_args={'title': str(self.session.field or '')},
+      #
+      # **`color` is the TEXT colour and PyVista defaults it to black**, which
+      # on this ground is 828 pure-black pixels against (27, 27, 31) -- a
+      # title and a set of tick labels that are there and cannot be read. Same
+      # trap as `add_axes`, whose label colour defaults the same way.
+      scalar_bar_args={'title': str(self.session.field or ''),
+                       'color': PALETTE['text']},
       opacity=float(self.session.opacity),
       color=None if resolved is not None else '#c8c8c8')
 
@@ -177,7 +184,7 @@ class Canvas3D:
     glyphs = cloud.glyph(orient='vectors', scale='magnitude', factor=factor,
                          geom=pv.Arrow())
     self._glyph_actor = self._plotter.add_mesh(
-      glyphs, scalars='magnitude', cmap='plasma', show_scalar_bar=False,
+      glyphs, scalars='magnitude', cmap=COLOUR_MAP, show_scalar_bar=False,
       render=False)
 
   def refresh_overlay(self) -> None:

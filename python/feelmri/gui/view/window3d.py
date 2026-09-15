@@ -29,7 +29,7 @@ import numpy as np
 
 from ..model.camera import STANDARD_VIEWS, Camera
 from ..model.planning import FOVBox, mps_to_euler
-from .theme import PALETTE
+from .theme import COLOUR_MAP, PALETTE
 
 #: M, P and S, in the order `FOVBox.axis_arrows` returns them.
 AXIS_COLOURS = ('#ff6b6b', '#3fd07a', '#5b9cf8')
@@ -357,11 +357,17 @@ class Window3D:
     self._actor = self._plotter.add_mesh(
       surface, scalars='field' if resolved is not None else None,
       preference='cell' if resolved and resolved[1] == 'cell' else 'point',
-      cmap='viridis', show_scalar_bar=resolved is not None,
+      cmap=COLOUR_MAP, show_scalar_bar=resolved is not None,
       # The bar carries the CHOSEN label, so a component and a magnitude of
       # the same field are told apart on the picture rather than only in the
       # combobox the user has since looked away from.
-      scalar_bar_args={'title': str(self.session.field or '')},
+      #
+      # **`color` is the TEXT colour and PyVista defaults it to black**, which
+      # on this ground is 828 pure-black pixels against (27, 27, 31) -- a
+      # title and a set of tick labels that are there and cannot be read. Same
+      # trap as `add_axes`, whose label colour defaults the same way.
+      scalar_bar_args={'title': str(self.session.field or ''),
+                       'color': PALETTE['text']},
       opacity=float(self.session.opacity),
       color=None if resolved is not None else '#c8c8c8')
 
@@ -393,7 +399,7 @@ class Window3D:
     glyphs = cloud.glyph(orient='vectors', scale='magnitude', factor=factor,
                          geom=pv.Arrow())
     self._glyph_actor = self._plotter.add_mesh(
-      glyphs, scalars='magnitude', cmap='plasma', show_scalar_bar=False,
+      glyphs, scalars='magnitude', cmap=COLOUR_MAP, show_scalar_bar=False,
       render=False)
 
   def _add_plan_solid(self, box) -> None:
@@ -424,9 +430,15 @@ class Window3D:
       solid, color='#ffd24a', opacity=opacity, pickable=False,
       show_scalar_bar=False, render=False))
 
-  def refresh_overlay(self) -> None:
+  def refresh_overlay(self, box=None) -> None:
     """The M/P/S arrows and the translucent plan. The box outline is the
-    widget, not an actor."""
+    widget, not an actor.
+
+    `box` overrides the session's, which is what a drag in progress passes:
+    the widget reports its pose continuously but the plan is only written on
+    release, so without this the outline moves and the solid inside it stays
+    where it was until the mouse comes up.
+    """
     if not self.alive:
       return
     if not self._is_open():
@@ -437,7 +449,7 @@ class Window3D:
       self._plotter.remove_actor(actor, render=False)
     self._overlay = []
 
-    box = self.session.box
+    box = self.session.box if box is None else box
     if box is None:
       return
     self._add_plan_solid(box)
@@ -504,7 +516,16 @@ class Window3D:
     # DISCARDS the orientation: a plan set to 30 degrees came back as 0.
     self._suppress = True
     try:
-      self._plotter.add_box_widget(self._on_box, bounds=bounds,
+      # **`factor` must be 1.0.** PyVista defaults it to 1.25 and passes it to
+      # `SetPlaceFactor`, which inflates the placed box about its centre -- so
+      # the outline was drawn at 1.25x the plan on every axis, measured
+      # 0.225 x 0.175 x 0.0375 for a plan of 0.180 x 0.140 x 0.030. The
+      # decomposition is relative to the placement and so stayed
+      # self-consistent, which is why nothing caught it: what was wrong was
+      # only the handle the user drags. Dragging it onto an anatomical edge
+      # therefore produced a field of view 20% smaller per axis than the one
+      # drawn.
+      self._plotter.add_box_widget(self._on_box, bounds=bounds, factor=1.0,
                                    rotation_enabled=True, color='#ffd24a',
                                    pass_widget=True, interaction_event='end')
       # `PlaceWidget` takes AXIS-ALIGNED bounds only, so the handle would be
@@ -516,6 +537,16 @@ class Window3D:
         self._orient_widget(self._box_widget, box.mps, centre)
     finally:
       self._suppress = False
+
+    # `interaction_event='end'` above is what keeps a drag from writing the
+    # plan on every motion event. This second observer is the other half: it
+    # moves the drawn volume with the outline in the meantime, without
+    # touching the session.
+    if self._box_widget is not None:
+      try:
+        self._box_widget.AddObserver('InteractionEvent', self._on_box_moving)
+      except Exception:
+        pass                # the solid then follows on release, as before
 
   @staticmethod
   def _orient_widget(widget, rotation: np.ndarray, centre: np.ndarray) -> None:
@@ -535,8 +566,8 @@ class Window3D:
     transform.Update()
     widget.SetTransform(transform)
 
-  def _on_box(self, _polydata, widget) -> None:
-    """Translate the widget's transform back into a `FOVBox`.
+  def _decompose(self, widget):
+    """The widget's current pose as a `FOVBox`, or None if it is not one.
 
     `vtkBoxWidget.GetTransform` gives the transform from the box AS PLACED to
     the box as it now stands, so the reference bounds are what the scale and
@@ -544,11 +575,8 @@ class Window3D:
     scale: the column norms are the scale and the normalised columns are the
     rotation.
     """
-    # The widget arrives only through this callback, so capture it even on the
-    # suppressed placement call: `_orient_widget` needs it immediately after.
-    self._box_widget = widget
-    if self._suppress or self._box_reference is None:
-      return
+    if self._box_reference is None:
+      return None
     import vtk
 
     transform = vtk.vtkTransform()
@@ -559,7 +587,7 @@ class Window3D:
     linear = m[:3, :3]
     scale = np.linalg.norm(linear, axis=0)
     if np.any(scale <= 0):
-      return
+      return None
     rotation = linear / scale
 
     # The decomposition assumes the linear part is a rotation times a per-axis
@@ -571,21 +599,59 @@ class Window3D:
     # world-axis 1.5x on a box rotated 30 degrees came out as 40.89 degrees
     # with a skewed field of view. Refuse it instead.
     if not np.allclose(rotation.T @ rotation, np.eye(3), atol=1e-6):
-      self.on_status('the box was sheared; the plan was left unchanged')
-      return
+      return None
 
     centre0, extent0 = self._box_reference
-    centre = linear @ centre0 + m[:3, 3]
-    extent = extent0 * scale
-
     try:
-      angles = np.array(mps_to_euler(rotation))
+      return FOVBox(fov=extent0 * scale, loc=linear @ centre0 + m[:3, 3],
+                    angles=np.array(mps_to_euler(rotation)))
     except Exception:
-      return                       # a degenerate drag; keep the previous plan
+      return None                  # a degenerate drag
+
+  def _on_box_moving(self, widget, _event=None) -> None:
+    """Move the overlay WITH the outline, while the mouse is still down.
+
+    The plan itself is written on release, because each write pushes an undo
+    entry and recounts the submesh over every element. But the translucent
+    volume and the arrows are a handful of quads, so redrawing them per motion
+    event is free -- and without it the yellow outline moves while the solid
+    inside it stays where the plan last was, which reads as the two disagreeing
+    rather than as one of them lagging.
+
+    Nothing here touches the session, and `_suppress` stops the redraw
+    re-placing the widget underneath the drag.
+    """
+    box = self._decompose(widget)
+    if box is None or not self.alive:
+      return
+    self._suppress = True
+    try:
+      self.refresh_overlay(box)
+    finally:
+      self._suppress = False
+
+  def _on_box(self, _polydata, widget) -> None:
+    """Write the widget's pose into the plan, at the end of a drag."""
+    # The widget arrives only through this callback, so capture it even on the
+    # suppressed placement call: `_orient_widget` needs it immediately after.
+    self._box_widget = widget
+    if self._suppress:
+      return
+
+    box = self._decompose(widget)
+    if box is None:
+      # The plan is unchanged, so the OUTLINE has to go back to it -- left
+      # where the drag put it, the widget and the solid inside it show two
+      # different fields of view and neither is the plan. Deferred to the Tk
+      # loop because re-placing means destroying this widget, and it is the
+      # one dispatching this callback.
+      self.on_status('that drag was not a box; the plan was left unchanged')
+      self.widget.after(0, self._restore_widget)
+      return
 
     self._suppress = True
     try:
-      self.session.box = FOVBox(fov=extent, loc=centre, angles=angles)
+      self.session.box = box
     finally:
       self._suppress = False
 
@@ -593,6 +659,13 @@ class Window3D:
       markers = self.session.submesh_markers()
       self.on_status(f'{int(markers.sum())} of {markers.size} elements '
                      f'in the field of view')
+
+  def _restore_widget(self) -> None:
+    """Put the outline back on the plan after a drag that was refused."""
+    if not (self.alive and self._is_open()):
+      return
+    self._sync_box_widget()
+    self.refresh_overlay()
 
   # -- camera ---------------------------------------------------------------
 

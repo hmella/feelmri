@@ -35,6 +35,12 @@ PALETTE = {
   'highlight': '#e3a008',       # the picked block, the FOV box
 }
 
+#: The scalar colour map, shared by the surface and the glyph arrows so one
+#: reading of the bar covers both. `jet`, which is what this field is read in
+#: elsewhere in MRI; matplotlib's own default is perceptually better and is not
+#: what anyone here is used to.
+COLOUR_MAP = 'jet'
+
 #: Tk widget options that are not ttk and have to be set by hand. Passed as
 #: keyword arguments, so a caller writes `tk.Text(parent, **TEXT_OPTIONS)`.
 TEXT_OPTIONS = dict(background=PALETTE['surface'], foreground=PALETTE['text'],

@@ -10,6 +10,10 @@ and the panel is deliberately thin so that the untested surface is small.
 """
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+
 import numpy as np
 import pytest
 
@@ -388,3 +392,81 @@ def test_quitting_destroys_the_window_too():
   assert plotter.closed == 1
   assert interactor.processed == 1, 'the quit path skipped the flush'
   assert stub.alive is False
+
+
+# -- the drawn outline, which is what a user actually places ----------------
+
+WIDGET_GEOMETRY_PROBE = '''
+import sys
+import numpy as np
+import tkinter as tk
+import vtk
+
+from feelmri.gui.model.planning import FOVBox
+from feelmri.gui.model.session import Session
+from feelmri.gui.view.window3d import Window3D
+
+FOV = np.array([0.180, 0.140, 0.030])
+root = tk.Tk()
+root.withdraw()
+session = Session()
+view = Window3D(root, session, embed=False)
+try:
+  for angles in ([0.0, 0.0, 0.0], [25.0, 0.0, 15.0]):
+    box = FOVBox(fov=FOV, loc=np.array([0.01, -0.02, 0.03]),
+                 angles=np.radians(angles))
+    session.box = box
+    polydata = vtk.vtkPolyData()
+    view._box_widget.GetPolyData(polydata)
+    points = np.array([polydata.GetPoint(i)
+                       for i in range(polydata.GetNumberOfPoints())])
+    corners = points[:8]
+    local = (corners - corners.mean(axis=0)) @ box.mps
+    drawn = local.max(axis=0) - local.min(axis=0)
+    print(' '.join(f'{v:.9f}' for v in drawn / FOV),
+          ' '.join(f'{v:.9f}' for v in corners.mean(axis=0) - box.loc))
+finally:
+  view.close()
+  root.destroy()
+'''
+
+
+@pytest.mark.slow
+def test_the_drawn_box_is_the_planned_box(tmp_path):
+  """The outline the user drags must BE the field of view, not a proxy for it.
+
+  PyVista's `add_box_widget` defaults `factor=1.25` and hands it to
+  `SetPlaceFactor`, which inflates the placed box about its centre. Measured
+  before this was pinned: a plan of 0.180 x 0.140 x 0.030 m was drawn as
+  0.225 x 0.175 x 0.0375, exactly 1.25 on every axis and at every orientation.
+
+  **Nothing else could see it.** The decomposition reads the widget's
+  transform RELATIVE to where it was placed, so the plan round-tripped
+  perfectly and every test of that arithmetic passed; what was wrong was only
+  the handle. Dragging it onto an anatomical edge therefore produced a field
+  of view 20% smaller per axis than the one drawn.
+
+  Run in a subprocess, like the other tests that need a real window: this
+  project has already measured that building more than one Tk+VTK pair in one
+  process segfaults inside `ProcessEvents`.
+  """
+  if not os.environ.get('DISPLAY'):
+    pytest.skip('needs a display: the widget geometry only exists once VTK '
+                'has a render window')
+  pytest.importorskip('pyvista')
+
+  script = tmp_path / 'widget_geometry.py'
+  script.write_text(WIDGET_GEOMETRY_PROBE)
+  done = subprocess.run([sys.executable, str(script)], capture_output=True,
+                        text=True, timeout=120)
+  assert done.returncode == 0, done.stderr[-2000:]
+
+  rows = [line.split() for line in done.stdout.strip().splitlines() if line]
+  assert len(rows) == 2, f'expected one row per orientation, got {done.stdout!r}'
+  for row in rows:
+    ratio = np.array([float(v) for v in row[:3]])
+    offset = np.array([float(v) for v in row[3:]])
+    assert np.allclose(ratio, 1.0, atol=1e-6), (
+      f'the outline is {ratio} times the plan, not the plan')
+    assert np.allclose(offset, 0.0, atol=1e-9), (
+      f'the outline is centred {offset} away from the plan')
