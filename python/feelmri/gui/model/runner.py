@@ -53,6 +53,10 @@ class RunConfig:
   submesh_axis: int = 2
   readout_t2_ms: float = 50.0
   phi_dB0: float = 0.0
+  lorder: int = 1
+  horder: int = 6
+  nodal_approximation: bool = False
+  lumped: bool = True
   solver: Dict[str, object] = field(default_factory=dict)
   env: Dict[str, str] = field(default_factory=dict)
 
@@ -73,6 +77,11 @@ class RunConfig:
     # NEGATIVE T2 is worse, being finite: no NaN to notice, the signal simply
     # grows. The library refuses both; refusing here means the message names
     # the field a user typed into rather than arriving from inside a solve.
+    for name in ('lorder', 'horder'):
+      order = getattr(self, name)
+      if not isinstance(order, int) or order < 1:
+        raise ValueError(
+          f'RunConfig: {name} must be a positive integer, got {order!r}')
     if not (self.readout_t2_ms > 0) or self.readout_t2_ms == float('inf'):
       raise ValueError(
         f'RunConfig: readout_t2_ms must be positive and finite, got '
@@ -141,7 +150,13 @@ def render_script(config: RunConfig) -> str:
 
   lines += [
     'progress("building the assembler")',
-    f'phantom.set_assembler({config.voxel_size!r})',
+    '# The integration strategy. `voxel_size` splits the mesh: elements at or',
+    '# above it are integrated at `horder`, the rest at `lorder`.',
+    f'phantom.set_assembler({config.voxel_size!r}, '
+    f'lorder={config.lorder!r}, horder={config.horder!r},',
+    f'                      '
+    f'nodal_approximation={config.nodal_approximation!r}, '
+    f'lumped={config.lumped!r})',
     '',
     '# Both signal paths require these, and `simulate_pulseq` refuses without',
     '# them. Uniform maps: edit them into whatever this phantom should carry.',

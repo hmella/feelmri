@@ -50,6 +50,47 @@ SOLVER_FIELDS = (('Solver T1 (ms)', 'T1', '800', float),
 SOLVER_CHOICES = (('Method', 'method', ('magnus2', 'magnus4', 'cayley_klein')),
                   ('Precision', 'dtype', ('float32', 'float64')))
 
+#: How the ASSEMBLER integrates the signal over each element -- the schemes the
+#: accuracy work calls IS1 to IS4. Each name maps to the two `set_assembler`
+#: flags underneath it; `lorder` and `horder` are separate because they apply
+#: to the quadrature either way.
+#:
+#: **Quadrature is the default, and nodal is the one to be careful with.**
+#: Measured on a uniform disc against a converged reference, `nodal +
+#: lumped` reads **82.7%** error where quadrature at a voxel-matched size
+#: reads 0.0%: a nodal approximation is a point-mass model, right for reading
+#: nodal quantities and wrong for synthesizing k-space from a graded mesh.
+#: `kspace-assembler.md` carries the numbers.
+INTEGRATION = (
+  ('quadrature (IS3)', dict(nodal_approximation=False, lumped=True)),
+  ('nodal, lumped (IS2)', dict(nodal_approximation=True, lumped=True)),
+  ('nodal, consistent mass (IS2)',
+   dict(nodal_approximation=True, lumped=False)),
+)
+
+#: Quadrature degrees. **`voxel_size` decides which each element gets**, and
+#: that makes the large-element order INERT more often than one expects: an
+#: element is integrated at `horder` only if its size reaches `voxel_size`,
+#: and the size is `cbrt(element volume)`, not an in-plane diameter.
+#:
+#: Measured on `water_fat_P1_prism`, changing `horder` from 1 to 6:
+#:
+#: | voxel_size | elements promoted | effect of horder |
+#: |---|---|---|
+#: | 0.005 | **0 of 11904** | **0.000e+00, inert** |
+#: | 0.002 | 2600 of 11904 | 1.64 relative |
+#: | 0.0005 | all 11904 | **50.1 relative** |
+#:
+#: So a voxel size at or above every element leaves the control doing
+#: nothing, and one below every element makes it dominant. The run's own log
+#: prints the split (`N/M elements with size < voxel_size`) -- read it.
+#:
+#: With a nodal strategy and a voxel size that actually splits the mesh, this
+#: is the adaptive IS4 dispatch: `mri_signal` sends group 0 through the nodal
+#: path and every other group through quadrature.
+ORDER_FIELDS = (('Quadrature order, small elements', 'lorder', '1', int),
+                ('Quadrature order, large elements', 'horder', '6', int))
+
 
 class RunPanel:
   """Compose a `RunConfig` from the session, launch it, and stream the log."""
@@ -73,6 +114,23 @@ class RunPanel:
       variable = tk.StringVar(value=default)
       ttk.Entry(self.widget, textvariable=variable).pack(fill='x')
       self.vars[key] = variable
+
+    ttk.Separator(self.widget).pack(fill='x', pady=(10, 4))
+    ttk.Label(self.widget, text='Integration',
+              font=('TkDefaultFont', 9, 'bold')).pack(anchor='w')
+    self.integration = tk.StringVar(value=INTEGRATION[0][0])
+    ttk.Combobox(self.widget, textvariable=self.integration, state='readonly',
+                 values=[name for name, _ in INTEGRATION]).pack(fill='x')
+    self.order_vars = {}
+    for label, key, default, _kind in ORDER_FIELDS:
+      ttk.Label(self.widget, text=label).pack(anchor='w', pady=(4, 0))
+      variable = tk.StringVar(value=default)
+      ttk.Entry(self.widget, textvariable=variable).pack(fill='x')
+      self.order_vars[key] = variable
+    ttk.Label(self.widget, wraplength=280, foreground='#555', text=(
+      'An element uses the large-element order only if its size reaches the '
+      'voxel size above. The run log prints the split; if it reads 0 of N, '
+      'that order is doing nothing.')).pack(anchor='w', pady=(4, 0))
 
     ttk.Separator(self.widget).pack(fill='x', pady=(10, 4))
     ttk.Label(self.widget, text='Solver',
@@ -155,8 +213,20 @@ class RunPanel:
     if self.concomitant.get():
       solver['concomitant_fields'] = True
 
+    # A COPY: `dict(INTEGRATION)` hands back the module-level dicts
+    # themselves, and the orders are written in below, which would modify the
+    # constant for every later call.
+    chosen = dict(dict(INTEGRATION)[self.integration.get()])
+    for label, key, _default, kind in ORDER_FIELDS:
+      text = self.order_vars[key].get().strip()
+      try:
+        chosen[key] = kind(text)
+      except ValueError:
+        raise ValueError(f'{label}: {text!r} is not a number') from None
+
     return RunConfig(
       solver=solver,
+      **chosen,
       phantom=self.session.mesh_path,
       output_dir=self.output_dir.get().strip() or str(default_output_dir()),
       box=self.session.box,

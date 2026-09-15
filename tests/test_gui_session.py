@@ -468,3 +468,45 @@ def test_attaching_a_sequence_records_its_path():
   session = Session()
   session.set_sequence(Sequence(), path='some/where.seq')
   assert session.sequence_path == 'some/where.seq'
+
+
+# -- the integration strategy ------------------------------------------------
+
+def test_the_assembler_settings_reach_the_generated_script():
+  """The scheme the accuracy work calls IS1 to IS4 is chosen here, and it is
+  worth a factor of two: measured on a gre_v15 run over a water/fat slab, the
+  nodal strategies differ from quadrature by 2.1 and 1.9 relative."""
+  from feelmri.gui.model.runner import RunConfig, render_script
+
+  script = render_script(RunConfig(
+    phantom='p.xdmf', output_dir='/tmp/o', voxel_size=0.002,
+    lorder=2, horder=4, nodal_approximation=True, lumped=False))
+  call = [line for line in script.splitlines()
+          if line.strip().startswith('phantom.set_assembler')]
+  assert call, 'the script does not build an assembler'
+  joined = ' '.join(script.splitlines()[script.splitlines().index(call[0]):]
+                    [:2])
+  assert 'lorder=2' in joined and 'horder=4' in joined
+  assert 'nodal_approximation=True' in joined
+  assert 'lumped=False' in joined
+
+
+def test_the_default_quadrature_order_is_not_the_lowest():
+  """`set_assembler`'s own default is `horder=1`, the worst quadrature, and
+  the script used to take it silently. Every shipped example that integrates
+  by quadrature passes 6."""
+  from feelmri.gui.model.runner import RunConfig
+
+  config = RunConfig(phantom='p.xdmf', output_dir='/tmp/o')
+  assert config.horder == 6
+  assert config.nodal_approximation is False, (
+    'quadrature is the safe default; a nodal approximation is a point-mass '
+    'model and reads 82.7% error when used to image a graded mesh')
+
+
+@pytest.mark.parametrize('bad', [0, -1, 2.5])
+def test_a_nonsense_quadrature_order_is_refused(bad):
+  from feelmri.gui.model.runner import RunConfig
+
+  with pytest.raises(ValueError, match='horder'):
+    RunConfig(phantom='p.xdmf', output_dir='/tmp/o', horder=bad)
