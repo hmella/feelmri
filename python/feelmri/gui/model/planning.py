@@ -198,6 +198,19 @@ class FOVBox:
     return np.all(np.abs(local) <= half + rtol * np.maximum(half, 1.0), axis=1)
 
 
+def same_box(a: Optional['FOVBox'], b: Optional['FOVBox']) -> bool:
+  """Whether two plans are the same field of view, `None` included.
+
+  `FOVBox` is a dataclass of numpy arrays, so the generated `__eq__` compares
+  element-wise and its result has no truth value -- which is why this is a
+  function and not `==`.
+  """
+  if a is None or b is None:
+    return a is b
+  return bool(np.array_equal(a.fov, b.fov) and np.array_equal(a.loc, b.loc)
+              and np.array_equal(a.angles, b.angles))
+
+
 def parse_triplet(text: str, name: str = 'value') -> np.ndarray:
   """Three numbers from a line of text, separated by spaces or commas.
 

@@ -11,6 +11,7 @@ and the panel is deliberately thin so that the untested surface is small.
 from __future__ import annotations
 
 import os
+import pathlib
 import subprocess
 import sys
 
@@ -470,3 +471,87 @@ def test_the_drawn_box_is_the_planned_box(tmp_path):
       f'the outline is {ratio} times the plan, not the plan')
     assert np.allclose(offset, 0.0, atol=1e-9), (
       f'the outline is centred {offset} away from the plan')
+
+
+REPLACEMENT_PROBE = '''
+import sys
+import numpy as np
+import tkinter as tk
+
+from feelmri.gui.model.planning import FOVBox
+from feelmri.gui.model.session import Session
+from feelmri.gui.view.window3d import Window3D
+
+# A real cine, because a session with NO MESH returns early from `rebuild`
+# and never reaches the widget at all -- which is how the first version of
+# this test read 0 whether the defect was present or not.
+root = tk.Tk()
+root.withdraw()
+session = Session()
+session.load_mesh(sys.argv[1])
+assert session.n_frames > 6, session.n_frames
+
+view = Window3D(root, session, embed=False)
+try:
+  session.box = FOVBox(fov=np.array([0.18, 0.14, 0.03]),
+                       loc=np.array([0.0, 0.0, 0.0]),
+                       angles=np.radians([30.0, 0.0, 20.0]))
+
+  placements = []
+  original = view._sync_box_widget
+  view._sync_box_widget = lambda: (placements.append(1), original())[1]
+
+  # Six frame steps, which is what the play button does. The plan does not
+  # move, so the widget has no reason to be rebuilt.
+  for _ in range(6):
+    session.step_frame(1)
+  steps = len(placements)
+
+  # A real plan change must still reach it.
+  session.box = FOVBox(fov=np.array([0.10, 0.20, 0.05]),
+                       loc=np.array([0.01, 0.0, 0.0]),
+                       angles=np.radians([10.0, 0.0, 0.0]))
+  print(steps, len(placements) - steps)
+finally:
+  view.close()
+  root.destroy()
+'''
+
+
+@pytest.mark.slow
+def test_playing_a_cine_does_not_rebuild_the_field_of_view(tmp_path):
+  """Stepping the frame must leave the box widget alone.
+
+  `refresh_overlay` ran `_sync_box_widget` on every redraw, and that call
+  DESTROYS the widget and builds a new one -- so playing a cine did it once
+  per frame. Measured on the 30-frame aorta before this: 6 frame steps, 6
+  re-placements, and the outline missing from exactly one render per tick,
+  which reads as the field of view strobing.
+
+  The box never actually MOVED -- 0 of 90 renders had it away from its
+  resting pose -- so this asserts the rebuild count rather than the pose.
+
+  **The probe needs a real time series.** A bare `Session` with `n_frames`
+  set by hand has no mesh, `rebuild` returns early, and a frame step never
+  reaches the widget: the first version of this test read 0 either way and
+  would have passed with the defect in place.
+  """
+  if not os.environ.get('DISPLAY'):
+    pytest.skip('needs a display: the box widget is a VTK object')
+  pytest.importorskip('pyvista')
+  phantom = (pathlib.Path(__file__).resolve().parent.parent / 'examples'
+             / 'phantoms' / 'heart_P1_hex.xdmf')
+  if not phantom.exists():
+    pytest.skip(f'{phantom.name} not present')
+
+  script = tmp_path / 'replacement.py'
+  script.write_text(REPLACEMENT_PROBE)
+  done = subprocess.run([sys.executable, str(script), str(phantom)],
+                        capture_output=True, text=True, timeout=120)
+  assert done.returncode == 0, done.stderr[-2000:]
+
+  on_frames, on_plan_change = (int(v) for v in done.stdout.split())
+  assert on_frames == 0, (
+    f'six frame steps rebuilt the field of view {on_frames} times')
+  assert on_plan_change >= 1, (
+    'the widget stopped following a plan change, which is what it is for')

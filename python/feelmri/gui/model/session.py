@@ -25,7 +25,7 @@ from .fields import (MAX_GLYPHS, auto_glyph_factor, field_groups,
                      vector_names)
 from .labels import LabelStore
 from .mesh import element_centroids, load_mesh, surface_triangles
-from .planning import FOVBox
+from .planning import FOVBox, same_box
 from .sequence import SequenceModel
 
 #: How solid the planned volume is drawn. Non-zero by default: the plan was a
@@ -218,20 +218,13 @@ class Session:
     if value is not None and not isinstance(value, FOVBox):
       raise TypeError(f'Session.box must be a FOVBox or None, got '
                       f'{type(value).__name__}')
-    if self._same_box(value, self._box):
+    if same_box(value, self._box):
       return                                    # no notification for a no-op
     self._undo.append(copy.deepcopy(self._box))
     del self._undo[:-self.UNDO_DEPTH]
     self._redo.clear()
     self._box = value
     self.plan_changed.emit(self)
-
-  @staticmethod
-  def _same_box(a: Optional[FOVBox], b: Optional[FOVBox]) -> bool:
-    if a is None or b is None:
-      return a is b
-    return (np.array_equal(a.fov, b.fov) and np.array_equal(a.loc, b.loc)
-            and np.array_equal(a.angles, b.angles))
 
   @property
   def can_undo(self) -> bool:

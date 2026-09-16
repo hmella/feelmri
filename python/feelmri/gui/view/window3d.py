@@ -28,7 +28,7 @@ from typing import Callable, Optional
 import numpy as np
 
 from ..model.camera import STANDARD_VIEWS, Camera
-from ..model.planning import FOVBox, mps_to_euler
+from ..model.planning import FOVBox, mps_to_euler, same_box
 from .theme import COLOUR_MAP, PALETTE
 
 #: M, P and S, in the order `FOVBox.axis_arrows` returns them.
@@ -62,6 +62,7 @@ class Window3D:
     self._overlay = []
     self._box_widget = None
     self._box_reference = None      # (centre, extent) the widget was placed at
+    self._widget_for = None         # the plan the widget currently draws
     self._user_closed = False       # set by the ExitEvent observer
     self._suppress = False          # guard against a feedback loop
 
@@ -196,6 +197,7 @@ class Window3D:
     self._glyph_actor = None
     self._overlay = []
     self._box_widget = None
+    self._widget_for = None
     self._open()
     self.rebuild()
     self.on_status('3D window reopened')
@@ -286,6 +288,7 @@ class Window3D:
       return
     self.alive = False
     self._box_widget = None
+    self._widget_for = None
     self._actor = None
     self._glyph_actor = None
     self._overlay = []
@@ -499,7 +502,16 @@ class Window3D:
     # `apply_plan` creates it, and a later numeric edit must drag it. Skip
     # while `_suppress` is set, or the widget's own callback re-places it
     # underneath the drag.
-    if not self._suppress:
+    #
+    # **Only when the plan has actually MOVED.** This runs on every
+    # `view_changed` too, and re-placing destroys the widget and builds a new
+    # one -- so playing a cine did it on every frame, and the outline was
+    # missing from exactly one render per tick. Measured on the 30-frame
+    # aorta: 6 frame steps, 6 re-placements, 6 renders with no box. The box
+    # itself never moved, so what a viewer sees is the outline strobing, not
+    # the plan changing.
+    if not self._suppress and not same_box(self._widget_for,
+                                           self.session.box):
       self._sync_box_widget()
     self._plotter.render()
 
@@ -512,6 +524,7 @@ class Window3D:
     moving it means replacing it and resetting the reference. That is cheap and
     it is the only way to keep the numeric entries and the handle agreeing.
     """
+    self._widget_for = None
     if self.session.box is None or not self._is_open():
       return
     if self._box_widget is not None:
@@ -561,6 +574,7 @@ class Window3D:
         self._orient_widget(self._box_widget, box.mps, centre)
     finally:
       self._suppress = False
+    self._widget_for = box
 
     # `interaction_event='end'` above is what keeps a drag from writing the
     # plan on every motion event. This second observer is the other half: it
@@ -673,6 +687,10 @@ class Window3D:
       self.widget.after(0, self._restore_widget)
       return
 
+    # The widget is already drawing this pose -- it is what the user dragged
+    # it to -- so record it as placed, or the redraw below would tear it down
+    # and build an identical one.
+    self._widget_for = box
     self._suppress = True
     try:
       self.session.box = box
