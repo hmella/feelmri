@@ -20,8 +20,9 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from .fields import (MAX_GLYPHS, auto_glyph_factor, field_labels,
-                     glyph_sample, resolve, resolve_vector, vector_names)
+from .fields import (MAX_GLYPHS, auto_glyph_factor, field_groups,
+                     field_labels, glyph_sample, resolve, resolve_vector,
+                     vector_names)
 from .labels import LabelStore
 from .mesh import element_centroids, load_mesh, surface_triangles
 from .planning import FOVBox
@@ -32,6 +33,15 @@ from .sequence import SequenceModel
 #: solid is what shows the intersection. Low enough that it tints rather than
 #: hides what is behind it.
 DEFAULT_PLAN_OPACITY = 0.25
+
+#: The drawable layers, which is what a pipeline browser lists and toggles.
+#: Names rather than actors: the session holds no VTK, and each viewport
+#: backend maps a name onto whatever it drew for it.
+LAYERS = ('phantom', 'plan', 'arrows', 'glyphs')
+
+#: How the phantom surface is drawn. ParaView's representation menu, less the
+#: entries that need a volume renderer or a filter this viewer does not have.
+REPRESENTATIONS = ('Surface', 'Surface With Edges', 'Wireframe', 'Points')
 
 
 class Signal:
@@ -117,6 +127,8 @@ class Session:
     self._glyph_count = MAX_GLYPHS
     self._opacity = 1.0
     self._plan_opacity = DEFAULT_PLAN_OPACITY
+    self._representation = REPRESENTATIONS[0]
+    self._visible = {name: True for name in LAYERS}
 
   # -- the mesh -------------------------------------------------------------
 
@@ -435,6 +447,67 @@ class Session:
     self._set_number('plan_opacity', value, low=0.0, high=1.0,
                      signal=self.plan_changed)
 
+  @property
+  def representation(self) -> str:
+    """How the phantom surface is drawn, one of `REPRESENTATIONS`."""
+    return self._representation
+
+  @representation.setter
+  def representation(self, value: str) -> None:
+    value = str(value)
+    if value not in REPRESENTATIONS:
+      raise ValueError(
+        f'Session.representation must be one of {REPRESENTATIONS}, '
+        f'got {value!r}')
+    if value != self._representation:
+      self._representation = value
+      self.view_changed.emit(self)
+
+  def is_visible(self, layer: str) -> bool:
+    """Whether a drawable layer is shown."""
+    self._check_layer(layer)
+    return self._visible[layer]
+
+  def set_visible(self, layer: str, shown: bool) -> None:
+    """Show or hide one layer.
+
+    **Visibility is not opacity.** Opacity 0 still costs the render and still
+    depth-sorts against everything behind it; hiding removes the actor. More
+    to the point they mean different things to a user -- "I do not want to see
+    the plan right now" against "I want to see through it" -- and ParaView
+    gives them separate controls for exactly that reason.
+
+    The plan layers announce on `plan_changed`, which is what redraws the
+    overlay; the phantom and its arrows on `view_changed`, which rebuilds the
+    mesh. Sending all four to one signal would rebuild a 100 000-triangle
+    surface to hide a box.
+    """
+    self._check_layer(layer)
+    shown = bool(shown)
+    if shown == self._visible[layer]:
+      return
+    self._visible[layer] = shown
+    signal = self.plan_changed if layer in ('plan', 'arrows') \
+      else self.view_changed
+    signal.emit(self)
+
+  def _check_layer(self, layer: str) -> None:
+    if layer not in self._visible:
+      raise ValueError(
+        f'Session: unknown layer {layer!r}, expected one of {LAYERS}')
+
+  def step_frame(self, delta: int = 1) -> int:
+    """Move the frame on, wrapping at the ends. Returns the new frame.
+
+    Wrapping rather than clamping because these are CINES -- the last frame of
+    a cardiac cycle is followed by the first, and a play button that stops
+    dead at the end of a loop is showing the data wrongly.
+    """
+    if self.n_frames <= 1:
+      return self._frame
+    self.frame = (self._frame + int(delta)) % self.n_frames
+    return self._frame
+
   def _set_number(self, name: str, value, low=None, high=None,
                   signal: Optional[Signal] = None) -> None:
     """Assign a validated float and notify, or do nothing if it has not moved."""
@@ -463,6 +536,47 @@ class Session:
     _, point_data, cell_data = self.read_frame(
       self._frame if frame is None else frame)
     return field_labels(point_data, cell_data), vector_names(point_data)
+
+  def field_group_choices(self, frame: Optional[int] = None):
+    """`field_groups` for a frame -- a field list and its component lists."""
+    if not self.has_mesh:
+      return []
+    _, point_data, cell_data = self.read_frame(
+      self._frame if frame is None else frame)
+    return field_groups(point_data, cell_data)
+
+  def information(self) -> List[Tuple[str, str]]:
+    """`(label, value)` rows describing what is loaded.
+
+    ParaView's Information tab, and it earns its place here for one specific
+    reason: **the shipped phantoms are in three different units**, and the
+    extent in metres beside the applied scale is what makes a wrong one
+    obvious before a submesh silently reads zero.
+    """
+    if not self.has_mesh:
+      return [('file', 'nothing loaded')]
+    lo, hi = self.points.min(axis=0), self.points.max(axis=0)
+    rows = [
+      ('file', str(self.mesh_path).rsplit('/', 1)[-1]),
+      ('nodes', f'{len(self.points):,}'),
+      ('elements', f'{sum(len(c) for _, c in self.cells):,}'),
+      ('cell types', ', '.join(t for t, _ in self.cells)),
+      ('surface', f'{len(self.surface):,} triangles'),
+      ('frames', str(self.n_frames)),
+      ('scale applied', f'{getattr(self, "scale_factor", 1.0):g}'),
+      ('extent (m)', ' x '.join(f'{v:.4g}' for v in (hi - lo))),
+      ('centre (m)', ' '.join(f'{v:.4g}' for v in 0.5 * (lo + hi))),
+    ]
+    resolved = self.colour_values()
+    if resolved is not None:
+      values = resolved[0]
+      rows.append((f'range of {self._field}',
+                   f'{float(np.min(values)):.4g} to {float(np.max(values)):.4g}'))
+    if self._box is not None:
+      markers = self.submesh_markers()
+      rows.append(('in the slab',
+                   f'{int(markers.sum()):,} of {markers.size:,} elements'))
+    return rows
 
   def colour_values(self):
     """`(values, association)` for the chosen field, or None.

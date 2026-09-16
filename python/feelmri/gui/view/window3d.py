@@ -354,8 +354,21 @@ class Window3D:
 
     if self._actor is not None:
       self._plotter.remove_actor(self._actor, render=False)
+    if not self.session.is_visible('phantom'):
+      self._actor = None
+      self._rebuild_glyphs()
+      self.refresh_overlay()
+      return
+    # `Surface With Edges` is one flag on the surface style, not a fourth
+    # style, which is why this is a lookup rather than a pass-through.
+    representation = self.session.representation
     self._actor = self._plotter.add_mesh(
-      surface, scalars='field' if resolved is not None else None,
+      surface,
+      style={'Surface': 'surface', 'Surface With Edges': 'surface',
+             'Wireframe': 'wireframe', 'Points': 'points'}[representation],
+      show_edges=representation == 'Surface With Edges',
+      edge_color=PALETTE['border'], point_size=3,
+      scalars='field' if resolved is not None else None,
       preference='cell' if resolved and resolved[1] == 'cell' else 'point',
       cmap=COLOUR_MAP, show_scalar_bar=resolved is not None,
       # The bar carries the CHOSEN label, so a component and a magnitude of
@@ -387,6 +400,8 @@ class Window3D:
     if self._glyph_actor is not None:
       self._plotter.remove_actor(self._glyph_actor, render=False)
       self._glyph_actor = None
+    if not self.session.is_visible('glyphs'):
+      return
     arrows = self.session.glyph_arrows()
     if arrows is None:
       return
@@ -452,9 +467,12 @@ class Window3D:
     box = self.session.box if box is None else box
     if box is None:
       return
-    self._add_plan_solid(box)
+    if self.session.is_visible('plan'):
+      self._add_plan_solid(box)
     tips, names, colours = [], [], AXIS_COLOURS
-    for (origin, direction, name), colour in zip(box.axis_arrows(), colours):
+    for (origin, direction, name), colour in (
+        zip(box.axis_arrows(), colours) if self.session.is_visible('arrows')
+        else ()):
       arrow = pv.Arrow(start=origin, direction=direction,
                        scale=float(np.linalg.norm(direction)))
       self._overlay.append(self._plotter.add_mesh(arrow, color=colour,
@@ -502,6 +520,12 @@ class Window3D:
       except Exception:
         pass
       self._box_widget = None
+    # Hiding the field of view hides its HANDLE too. The outline and the
+    # translucent solid are one object to a user, and leaving a draggable
+    # outline behind after switching the layer off would be the kind of
+    # disagreement between two renderings this viewer has already paid for.
+    if not self.session.is_visible('plan'):
+      return
     box = self.session.box
     centre = box.loc.astype(float)
     extent = box.fov.astype(float)

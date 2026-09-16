@@ -293,3 +293,34 @@ def auto_glyph_factor(vectors: np.ndarray, extent: float,
   if not np.isfinite(longest) or longest <= 0:
     return 1.0
   return fraction * float(extent) / longest
+
+
+# -- ParaView's two-combobox split ------------------------------------------
+
+def field_groups(point_data: Optional[Dict] = None,
+                 cell_data: Optional[Dict] = None
+                 ) -> List[Tuple[str, List[Tuple[str, str]]]]:
+  """The same fields, grouped as ParaView's toolbar presents them.
+
+  `[(group, [(component, label), ...]), ...]` -- one entry per stored field,
+  carrying the component choices that field offers and the full label each
+  resolves to. A scalar has the single component `''`, so a caller can drive
+  the second combobox off the list without a special case.
+
+  Two comboboxes rather than one flat list because the flat one grows as the
+  product: `velocity` alone contributes four entries, and a file with three
+  vectors and two scalars would put fourteen lines in one dropdown with no
+  structure. Splitting them also makes the component STICK -- pick `(Y)` and
+  it stays `(Y)` as you move between fields, which is what ParaView does and
+  what someone comparing two fields on one axis wants.
+  """
+  groups: List[Tuple[str, List[Tuple[str, str]]]] = []
+  index: Dict[str, int] = {}
+  for ref in field_refs(point_data, cell_data):
+    group = FieldRef(ref.name, ref.association).label
+    if group not in index:
+      index[group] = len(groups)
+      groups.append((group, []))
+    component = '' if ref.component is None else component_name(ref.component)
+    groups[index[group]][1].append((component, ref.label))
+  return groups

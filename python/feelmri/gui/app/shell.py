@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import Optional
 
 from ..model.session import Session
+from ..view.theme import TEXT_OPTIONS
 
 
 class Shell:
@@ -33,7 +34,6 @@ class Shell:
     self.palette = apply_theme(self.root)
 
     self._status = tk.StringVar(value='ready')
-    self.sliders = {}
 
     # The status bar is packed BEFORE the body: Tk allocates in pack order, so
     # an expanding body packed first takes the whole window and squeezes the
@@ -56,10 +56,18 @@ class Shell:
     # selected tab: the 3D scene while planning, the sequence while labelling,
     # the images once there is a result. Everything is built once and only the
     # visible one is packed, so switching costs nothing and no state is lost.
-    self._deck = ttk.Frame(body)
-    self._deck.pack(side='right', fill='both', expand=True)
+    right = ttk.Frame(body)
+    right.pack(side='right', fill='both', expand=True)
+    # The toolbar strip is packed BEFORE the deck, which expands: Tk allocates
+    # in pack order, and a toolbar packed after an expanding sibling is
+    # squeezed to nothing.
+    self._toolbar_host = ttk.Frame(right)
+    self._toolbar_host.pack(fill='x', side='top')
+    self._deck = ttk.Frame(right)
+    self._deck.pack(fill='both', expand=True)
 
     self.viewport = self._make_viewport(self._deck)
+    self.toolbar = self._make_toolbar(self._toolbar_host)
     self.sequence_panel = self._make_sequence_panel(self._deck)
 
     self.label_panel = self._make_label_panel(self._scrollable('Sequence'))
@@ -170,6 +178,21 @@ class Shell:
       view.widget.pack(fill='both', expand=True)
       self.root.update_idletasks()
 
+  def _make_toolbar(self, parent):
+    """The strip over the view, or nothing if it cannot be built.
+
+    Optional the same way every other panel is: a missing one costs the
+    toolbar, not the application.
+    """
+    try:
+      from ..view.toolbar import Toolbar
+      bar = Toolbar(parent, self.session, self.viewport, on_status=self.status)
+      bar.widget.pack(fill='x')
+      return bar
+    except Exception as exc:
+      self.status(f'toolbar unavailable: {exc}')
+      return None
+
   def _make_label_panel(self, parent):
     """The labels tab, or nothing if it cannot be built."""
     try:
@@ -267,89 +290,113 @@ class Shell:
     self.root.config(menu=bar)
 
   def _build_controls(self) -> None:
+    """The Plan tab, laid out the way ParaView lays out its left-hand side.
+
+    Top to bottom: a pipeline browser of what is in the scene, then the
+    properties of the plan with `Apply` at the head of them, then the display
+    settings, then an information panel. Each is a collapsible section, which
+    the column badly needed -- it had grown to fourteen controls in one
+    unbroken scroll with no headings, navigable only by remembering the order
+    they had been added in.
+    """
     import tkinter as tk
     from tkinter import ttk
 
-    ttk.Label(self.controls, text='Phantom',
-              font=('TkDefaultFont', 10, 'bold')).pack(anchor='w')
-    self._mesh_label = ttk.Label(self.controls, text='none loaded',
-                                 wraplength=270, justify='left')
-    self._mesh_label.pack(anchor='w', pady=(0, 10))
-
-    # The colour list carries every stored field: a scalar by name, a vector
-    # split into its magnitude and components the way ParaView spells them,
-    # and cell fields marked as such. It used to be filtered to point fields
-    # with `ndim == 1`, which left it EMPTY on all five shipped phantoms --
-    # `velocity` and `displacement` are vectors, and `pressure` and
-    # `point_markers` are scalars stored as `(N, 1)`.
-    ttk.Label(self.controls, text='Colour by').pack(anchor='w')
-    self._field = tk.StringVar(value='')
-    self._field_box = ttk.Combobox(self.controls, textvariable=self._field,
-                                   state='readonly', values=[''])
-    self._field_box.pack(fill='x')
-    self._field_box.bind('<<ComboboxSelected>>',
-                         lambda _e: setattr(self.session, 'field',
-                                            self._field.get() or None))
-
-    self._opacity = self._slider('Phantom opacity', 0.0, 1.0, 1.0, 'opacity')
-
-    ttk.Label(self.controls, text='Warp by').pack(anchor='w', pady=(10, 0))
-    self._warp = tk.StringVar(value='')
-    self._warp_box = ttk.Combobox(self.controls, textvariable=self._warp,
-                                  state='readonly', values=[''])
-    self._warp_box.pack(fill='x')
-    self._warp_box.bind('<<ComboboxSelected>>',
-                        lambda _e: setattr(self.session, 'warp_field',
-                                           self._warp.get() or None))
-
-    ttk.Label(self.controls, text='Warp scale').pack(anchor='w', pady=(10, 0))
-    self._warp_scale = tk.DoubleVar(value=1.0)
-    ttk.Scale(self.controls, from_=0.0, to=10.0, variable=self._warp_scale,
-              command=lambda _v: setattr(self.session, 'warp_scale',
-                                         float(self._warp_scale.get()))
-              ).pack(fill='x')
-
-    ttk.Label(self.controls, text='Arrows (glyphs)').pack(anchor='w',
-                                                         pady=(10, 0))
-    self._glyph = tk.StringVar(value='')
-    self._glyph_box = ttk.Combobox(self.controls, textvariable=self._glyph,
-                                   state='readonly', values=[''])
-    self._glyph_box.pack(fill='x')
-    self._glyph_box.bind('<<ComboboxSelected>>',
-                         lambda _e: setattr(self.session, 'glyph_field',
-                                            self._glyph.get() or None))
-
-    # Unitless: the session works out the factor that puts the longest arrow
-    # at a fixed fraction of the mesh, so 1.0 shows something whether the
-    # field is a displacement in metres or a velocity in metres per second.
-    self._glyph_scale = self._slider('Arrow scale', 0.0, 5.0, 1.0,
-                                     'glyph_scale')
-
-    row = ttk.Frame(self.controls)
-    row.pack(fill='x', pady=(6, 0))
-    ttk.Label(row, text='Max arrows').pack(side='left')
-    self._glyph_count = tk.StringVar(value=str(self.session.glyph_count))
-    count = ttk.Entry(row, textvariable=self._glyph_count, width=8)
-    count.pack(side='right')
-    for event in ('<Return>', '<FocusOut>'):
-      count.bind(event, lambda _e: self._set_glyph_count())
-
-    ttk.Label(self.controls, text='Frame').pack(anchor='w', pady=(10, 0))
-    self._frame = tk.IntVar(value=0)
-    self._frame_scale = ttk.Scale(self.controls, from_=0, to=0,
-                                  variable=self._frame,
-                                  command=lambda _v: self._set_frame())
-    self._frame_scale.pack(fill='x')
-
-    ttk.Separator(self.controls).pack(fill='x', pady=12)
-
+    from ..view.pipeline import PipelineBrowser
     from ..view.planning_panel import PlanningPanel
-    self.planning_panel = PlanningPanel(self.controls, self.session,
+    from ..view.widgets import CollapsibleSection, ValueSlider
+
+    self.sections = {}
+
+    def section(title: str, expanded: bool = True):
+      part = CollapsibleSection(self.controls, title, expanded=expanded)
+      part.widget.pack(fill='x', pady=(0, 4))
+      self.sections[title] = part
+      return part.body
+
+    # -- Pipeline ----------------------------------------------------------
+    self.pipeline = PipelineBrowser(section('Pipeline'), self.session,
+                                    on_status=self.status)
+    self.pipeline.widget.pack(fill='x')
+
+    # -- Properties: the plan, with Apply at the head of it ----------------
+    body = section('Properties')
+    self.planning_panel = PlanningPanel(body, self.session,
                                         on_status=self.status)
     self.planning_panel.widget.pack(fill='x')
     # Kept as the panel's own, so a caller reaching for the entries finds one
     # set rather than two that can disagree.
     self._plan_vars = self.planning_panel.vars
+
+    # -- Display -----------------------------------------------------------
+    body = section('Display')
+    self.sliders = {}
+    self.sliders['opacity'] = ValueSlider(
+      body, 'Opacity', 0.0, 1.0, 1.0,
+      lambda v: setattr(self.session, 'opacity', v))
+
+    ttk.Separator(body).pack(fill='x', pady=8)
+    ttk.Label(body, text='Warp by deformation',
+              style='Muted.TLabel').pack(anchor='w')
+    self._warp = tk.StringVar(value='')
+    self._warp_box = ttk.Combobox(body, textvariable=self._warp,
+                                  state='readonly', values=[''])
+    self._warp_box.pack(fill='x', pady=(2, 0))
+    self._warp_box.bind('<<ComboboxSelected>>',
+                        lambda _e: setattr(self.session, 'warp_field',
+                                           self._warp.get() or None))
+    self.sliders['warp_scale'] = ValueSlider(
+      body, 'Warp scale', 0.0, 10.0, 1.0,
+      lambda v: setattr(self.session, 'warp_scale', v))
+
+    ttk.Separator(body).pack(fill='x', pady=8)
+    ttk.Label(body, text='Glyph arrows', style='Muted.TLabel').pack(anchor='w')
+    self._glyph = tk.StringVar(value='')
+    self._glyph_box = ttk.Combobox(body, textvariable=self._glyph,
+                                   state='readonly', values=[''])
+    self._glyph_box.pack(fill='x', pady=(2, 0))
+    self._glyph_box.bind('<<ComboboxSelected>>',
+                         lambda _e: setattr(self.session, 'glyph_field',
+                                            self._glyph.get() or None))
+    # Unitless: the session works out the factor that puts the longest arrow
+    # at a fixed fraction of the mesh, so 1.0 shows something whether the
+    # field is a displacement in metres or a velocity in metres per second.
+    self.sliders['glyph_scale'] = ValueSlider(
+      body, 'Arrow scale', 0.0, 5.0, 1.0,
+      lambda v: setattr(self.session, 'glyph_scale', v))
+
+    row = ttk.Frame(body)
+    row.pack(fill='x', pady=(6, 0))
+    ttk.Label(row, text='Max arrows', width=13).pack(side='left')
+    self._glyph_count = tk.StringVar(value=str(self.session.glyph_count))
+    count = ttk.Entry(row, textvariable=self._glyph_count, width=9)
+    count.pack(side='right')
+    for event in ('<Return>', '<FocusOut>'):
+      count.bind(event, lambda _e: self._set_glyph_count())
+
+    # -- Information -------------------------------------------------------
+    body = section('Information', expanded=False)
+    self._information = tk.Text(body, height=11, width=34,
+                                font=('TkFixedFont', 8), **TEXT_OPTIONS)
+    self._information.pack(fill='x')
+    self._information.configure(state='disabled')
+    self.session.view_changed.connect(lambda *_: self._show_information())
+    self.session.plan_changed.connect(lambda *_: self._show_information())
+    self._show_information()
+
+  def _show_information(self) -> None:
+    """Fill the Information panel, ParaView's own name for this.
+
+    It earns its place for one specific reason: **the shipped phantoms are in
+    three different units**, and the extent in metres beside the scale that
+    was applied is what makes a wrong one obvious before the submesh silently
+    reads zero.
+    """
+    self._information.configure(state='normal')
+    self._information.delete('1.0', 'end')
+    for key, value in self.session.information():
+      self._information.insert('end', f'{key:<16s} {value}\n')
+    self._information.configure(state='disabled')
 
   # -- actions --------------------------------------------------------------
 
@@ -406,60 +453,23 @@ class Shell:
 
   def _on_mesh(self) -> None:
     s = self.session
-    summary = s.summary()
-    self._mesh_label.config(
-      text=f"{summary['nodes']} nodes, {summary['elements']} elements, "
-           f"{summary['frames']} frame(s)")
 
-    # Enumerated by the model, so the list and what the viewport resolves a
-    # choice to come from the same rule.
-    colours, vectors = s.field_choices(0)
-    self._field_box.config(values=[''] + colours)
+    # Colour by lives on the toolbar and refreshes itself from
+    # `mesh_changed`; what is left here are the two vector choosers and the
+    # plan's centre.
+    _colours, vectors = s.field_choices(0)
     self._warp_box.config(values=[''] + vectors)
     self._glyph_box.config(values=[''] + vectors)
-    self._frame_scale.config(to=max(0, s.n_frames - 1))
     # A selection the new phantom does not have would otherwise stay in the
     # box and on the session, showing a name for a mesh drawn plain.
-    self._keep_choice(self._field, 'field', colours)
     self._keep_choice(self._warp, 'warp_field', vectors)
     self._keep_choice(self._glyph, 'glyph_field', vectors)
 
     lo, hi = s.points.min(axis=0), s.points.max(axis=0)
     self._plan_vars['loc'].set(' '.join(f'{v:.4g}' for v in 0.5 * (lo + hi)))
+    self._show_information()
     self.viewport.rebuild()
 
-
-  def _slider(self, label: str, low: float, high: float, start: float,
-              attribute: str):
-    """A labelled scale that writes one session attribute ON RELEASE.
-
-    Not on every motion event, which is what `command` gives: each write
-    redraws the scene, and dragging opacity across a 102 186-triangle surface
-    would rebuild it on every pixel. The readout follows the handle live, so
-    the drag still reads as continuous.
-    """
-    import tkinter as tk
-    from tkinter import ttk
-
-    row = ttk.Frame(self.controls)
-    row.pack(fill='x', pady=(10, 0))
-    ttk.Label(row, text=label).pack(side='left')
-    readout = ttk.Label(row, text=f'{start:.2f}', style='Muted.TLabel')
-    readout.pack(side='right')
-
-    variable = tk.DoubleVar(value=start)
-    scale = ttk.Scale(self.controls, from_=low, to=high, variable=variable)
-    scale.pack(fill='x')
-    scale.configure(
-      command=lambda _v: readout.config(text=f'{variable.get():.2f}'))
-    scale.bind('<ButtonRelease-1>',
-               lambda _e: setattr(self.session, attribute,
-                                  float(variable.get())))
-    # Kept by name so a caller -- a test, or a screenshot probe -- can move a
-    # slider the way a user does rather than writing the session behind it and
-    # leaving the readout beside it saying something else.
-    self.sliders[attribute] = scale
-    return variable
 
   def _keep_choice(self, variable, attribute: str, offered) -> None:
     """Drop a field selection the newly loaded phantom does not have."""
@@ -475,11 +485,6 @@ class Shell:
       self.status('max arrows must be a positive whole number')
     self._glyph_count.set(str(self.session.glyph_count))
 
-  def _set_frame(self) -> None:
-    try:
-      self.session.frame = int(float(self._frame.get()))
-    except IndexError:
-      pass
 
 
 
@@ -500,6 +505,14 @@ class Shell:
     if pump is not None:
       try:
         self.root.after_cancel(pump)
+      except Exception:
+        pass
+    bar = getattr(self, 'toolbar', None)
+    if bar is not None:
+      # A playing cine is a chain of `after` callbacks; one left running calls
+      # into a viewport that is about to stop existing.
+      try:
+        bar.stop()
       except Exception:
         pass
     runner = getattr(self, 'run_panel', None)

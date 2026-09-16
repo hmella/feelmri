@@ -43,9 +43,6 @@ class PlanningPanel:
     self._updating = False
 
     self.widget = ttk.Frame(parent)
-    ttk.Label(self.widget, text='Field of view',
-              font=('TkDefaultFont', 10, 'bold')).pack(anchor='w')
-
     ttk.Label(self.widget, text='Mesh scale (file units to m)').pack(
       anchor='w', pady=(6, 0))
     row = ttk.Frame(self.widget)
@@ -84,7 +81,10 @@ class PlanningPanel:
     scale.bind('<ButtonRelease-1>', lambda _e: setattr(
       self.session, 'plan_opacity', float(self.opacity.get())))
 
-    ttk.Button(self.widget, text='Apply plan',
+    # Accented, because it is the one control that COMMITS and ParaView has
+    # trained everyone to look for a coloured Apply at the top of a properties
+    # panel. The entries above it are a draft until this is pressed.
+    ttk.Button(self.widget, text='Apply plan', style='Apply.TButton',
                command=self.apply).pack(fill='x', pady=(10, 0))
     self._submesh = ttk.Label(self.widget, text='', wraplength=270)
     self._submesh.pack(anchor='w', pady=(6, 0))

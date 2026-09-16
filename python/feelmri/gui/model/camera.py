@@ -220,7 +220,22 @@ class Camera:
 
 #: Named views, as (direction the camera looks along, up).
 STANDARD_VIEWS = {
+  # The anatomical names, which is what a planner asks for.
   'axial': ((0.0, 0.0, -1.0), (0.0, 1.0, 0.0)),
   'coronal': ((0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
   'sagittal': ((1.0, 0.0, 0.0), (0.0, 0.0, 1.0)),
+  # The same six directions ParaView's camera toolbar offers, named by where
+  # the CAMERA sits -- so `+X` looks back along -X. Three of them coincide
+  # with the anatomical names above and are kept as separate entries rather
+  # than aliases, because the equality is a property of this convention and
+  # not something a reader should have to derive.
+  '+X': ((-1.0, 0.0, 0.0), (0.0, 0.0, 1.0)),
+  '-X': ((1.0, 0.0, 0.0), (0.0, 0.0, 1.0)),          # == sagittal
+  '+Y': ((0.0, -1.0, 0.0), (0.0, 0.0, 1.0)),
+  '-Y': ((0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),          # == coronal
+  '+Z': ((0.0, 0.0, -1.0), (0.0, 1.0, 0.0)),         # == axial
+  '-Z': ((0.0, 0.0, 1.0), (0.0, 1.0, 0.0)),
 }
+
+#: The six axis buttons, in the order a toolbar lays them out.
+AXIS_VIEWS = ('-X', '+X', '-Y', '+Y', '-Z', '+Z')

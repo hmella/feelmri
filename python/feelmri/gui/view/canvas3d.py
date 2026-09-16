@@ -144,8 +144,21 @@ class Canvas3D:
 
     if self._actor is not None:
       self._plotter.remove_actor(self._actor, render=False)
+    if not self.session.is_visible('phantom'):
+      self._actor = None
+      self._rebuild_glyphs()
+      self.refresh_overlay()
+      return
+    # `Surface With Edges` is one flag on the surface style, not a fourth
+    # style, which is why this is a lookup rather than a pass-through.
+    representation = self.session.representation
     self._actor = self._plotter.add_mesh(
-      surface, scalars='field' if resolved is not None else None,
+      surface,
+      style={'Surface': 'surface', 'Surface With Edges': 'surface',
+             'Wireframe': 'wireframe', 'Points': 'points'}[representation],
+      show_edges=representation == 'Surface With Edges',
+      edge_color=PALETTE['border'], point_size=3,
+      scalars='field' if resolved is not None else None,
       preference='cell' if resolved and resolved[1] == 'cell' else 'point',
       cmap=COLOUR_MAP, show_scalar_bar=resolved is not None,
       # The bar carries the CHOSEN label, so a component and a magnitude of
@@ -174,6 +187,8 @@ class Canvas3D:
     if self._glyph_actor is not None:
       self._plotter.remove_actor(self._glyph_actor, render=False)
       self._glyph_actor = None
+    if not self.session.is_visible('glyphs'):
+      return
     arrows = self.session.glyph_arrows()
     if arrows is None:
       return

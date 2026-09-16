@@ -135,6 +135,30 @@ def apply(root) -> dict:
                   troughcolor=p['window'], bordercolor=p['border'])
   style.configure('TPanedwindow', background=p['window'])
 
+  # A compact button for the toolbars over the view: ParaView's are icon-sized
+  # and a row of default-padded ttk buttons does not fit the width.
+  style.configure('Tool.TButton', background=p['surface'],
+                  foreground=p['text'], bordercolor=p['border'],
+                  padding=(5, 2), focusthickness=0)
+  style.map('Tool.TButton',
+            background=[('pressed', p['accent']), ('active', p['raised'])],
+            foreground=[('pressed', p['accent_text'])])
+  # The toolbar strip itself, a shade above the view it sits on.
+  style.configure('Toolbar.TFrame', background=p['raised'])
+  style.configure('Toolbar.TLabel', background=p['raised'],
+                  foreground=p['muted'])
+  # A section header in the control column: clickable, so it reads as one.
+  style.configure('Section.TLabel', background=p['raised'],
+                  foreground=p['text'], padding=(6, 4))
+  # The one button that commits, which ParaView colours and everyone looks for.
+  style.configure('Apply.TButton', background=p['accent'],
+                  foreground=p['accent_text'], bordercolor=p['accent'],
+                  padding=(8, 5))
+  style.map('Apply.TButton',
+            background=[('pressed', p['trace']), ('active', p['trace']),
+                        ('disabled', p['surface'])],
+            foreground=[('disabled', p['muted'])])
+
   # The status bar, which wants to read as a strip rather than a panel.
   style.configure('Status.TLabel', background=p['window'],
                   foreground=p['muted'], padding=(8, 4))
