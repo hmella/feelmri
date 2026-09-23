@@ -386,10 +386,25 @@ class VelocityEncoding(_DirectionalEncoding):
         -------
         np.ndarray
             Phase array of shape ``(N, nb_directions)`` in radians.
+
+        Notes
+        -----
+        The sign is NEGATIVE, because this returns the phase the magnetization
+        actually acquires, not the gradient's first-moment sensitivity.  The
+        bipolar built by :meth:`MRObjects.Gradient.make_bipolar` has a positive
+        first moment giving ``gamma*M1*VENC = +pi`` (measured: M1 = +4.34911
+        mT/m/ms^2 at VENC 2.7 m/s), while the solver precesses as
+        ``exp(-i*gamma*B*t)`` -- so the acquired phase is
+        ``-pi (v . dir) / VENC``.  Recovering velocity from a simulated
+        acquisition therefore uses ``v = -VENC * angle(enc * conj(ref)) / pi``.
+
+        This is the same convention mismatch that affected the off-resonance
+        handoff, where the solver's ``exp(-i*gamma*dB*t)`` met an assembler
+        applying ``exp(+i*phi*t)``.
         """
         phi_v = np.zeros([velocity.shape[0], self.nb_directions], dtype=self.dtype)
         for i in range(self.nb_directions):
-            phi_v[:, i] = np.pi * np.dot(velocity, self.directions[i, :].T) / self.VENC[i] + delta_phi
+            phi_v[:, i] = -np.pi * np.dot(velocity, self.directions[i, :].T) / self.VENC[i] + delta_phi
         return phi_v
 
 

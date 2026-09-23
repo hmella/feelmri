@@ -37,12 +37,14 @@ def test_the_two_directional_encoders_match_their_closed_forms():
   enc = VelocityEncoding(venc, dirs.copy(), dtype=np.float64,
                          normalize_dirs=True)
   unit = dirs / np.linalg.norm(dirs, axis=1, keepdims=True)
-  want = np.pi * (v @ unit.T) / np.array([0.6, 0.9, 1.2]) + 0.25
+  # Negative: encode() returns the phase the magnetization acquires under
+  # exp(-i gamma B t), not the bipolar's first-moment sensitivity.
+  want = -np.pi * (v @ unit.T) / np.array([0.6, 0.9, 1.2]) + 0.25
   assert np.abs(enc.encode(v, delta_phi=0.25) - want).max() < 1e-12
 
   # Without normalisation the raw direction length is part of the encoding.
   raw = VelocityEncoding(venc, dirs.copy(), dtype=np.float64)
-  want_raw = np.pi * (v @ dirs.T) / np.array([0.6, 0.9, 1.2])
+  want_raw = -np.pi * (v @ dirs.T) / np.array([0.6, 0.9, 1.2])
   assert np.abs(raw.encode(v) - want_raw).max() < 1e-12
 
   # PositionEncoding always normalises, and multiplies rather than divides.
